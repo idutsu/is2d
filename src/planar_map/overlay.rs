@@ -370,6 +370,8 @@ pub(super) struct ProvStore {
     provs: Vec<Prov>,
     /// 一覧ごとの、`provs` の範囲
     lists: Vec<(u32, u32)>,
+    /// 出どころの曲線（出どころの番号 `Prov::src` の順。切った所の t を曲線の上で決める：`ProvId::split`）
+    pub(super) curves: Vec<QuadBez>,
 }
 
 impl ProvStore {
@@ -382,7 +384,7 @@ impl ProvStore {
     }
 
     /// 一覧 `ids` をこの順につなぎ、出どころごとに `f` をかけた一覧を足す（番号を返す）
-    fn push_mapped(&mut self, ids: &[ProvId], f: impl Fn(Prov) -> Prov) -> ProvId {
+    fn push_mapped(&mut self, ids: &[ProvId], mut f: impl FnMut(Prov) -> Prov) -> ProvId {
         let start = self.provs.len() as u32;
         for id in ids {
             let (a, b) = self.lists[id.0 as usize];
@@ -424,22 +426,39 @@ impl i_overlay9::core::edge_data::OverlayEdgeData for ProvId {
         })
     }
 
+    /// 区間を点 `ctx.p`（格子の座標）で切る。切った所の t は、出どころの曲線の上で、区間の両端の t の間でその点に
+    /// いちばん近い所の t（`nearest_on_quad`。区間の部分曲線の上で求めて t に戻す：部分曲線の媒介変数は t の一次式）。
+    /// 切った2本は、出どころの曲線をその点に近い所で切ったものになるので、曲線の速さが偏っていても、戻した2本が1本に
+    /// まとまる（`merge_degree2` の許容の中。レビュー d91cd4c の N-2003）。両端の間に限るので、曲線が折り返す所でも
+    /// 別の枝に飛ばない。2本には同じ t を渡す（続いた区間のつなぎ目の t はビットまで同じ）
     fn split<I: i_overlay9::i_float::int::number::int::IntNumber>(
         self,
         ctx: i_overlay9::core::edge_data::EdgeDataSplit<I>,
         store: &mut ProvStore,
     ) -> (Self, Self) {
-        let (ax, ay) = (ctx.a.x.to_f64(), ctx.a.y.to_f64());
-        let (dx, dy) = (ctx.b.x.to_f64() - ax, ctx.b.y.to_f64() - ay);
-        let len2 = dx * dx + dy * dy;
-        let f = if len2 > 0.0 {
-            (((ctx.p.x.to_f64() - ax) * dx + (ctx.p.y.to_f64() - ay) * dy) / len2).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-        let mid = move |p: &Prov| p.t0 + (p.t1 - p.t0) * f;
-        let first = store.push_mapped(&[self], |p| Prov { t1: mid(&p), ..p });
-        let second = store.push_mapped(&[self], |p| Prov { t0: mid(&p), ..p });
+        let p = from_grid(ctx.p.x.to_f64() as i64, ctx.p.y.to_f64() as i64);
+        let mids: Vec<f64> = store
+            .get(self)
+            .iter()
+            .map(|pr| {
+                let (lo, hi) = (pr.t0.min(pr.t1), pr.t0.max(pr.t1));
+                if lo == hi {
+                    return lo;
+                }
+                let part = store.curves[pr.src as usize].subsegment(lo..hi);
+                lo + (hi - lo) * crate::vector_engine::nearest_on_quad(&part, p).0
+            })
+            .collect();
+        let mut k = 0;
+        let first = store.push_mapped(&[self], |pr| {
+            k += 1;
+            Prov { t1: mids[k - 1], ..pr }
+        });
+        let mut k = 0;
+        let second = store.push_mapped(&[self], |pr| {
+            k += 1;
+            Prov { t0: mids[k - 1], ..pr }
+        });
         (first, second)
     }
 
@@ -1320,6 +1339,7 @@ impl PlanarMap {
         #[cfg(test)]
         super::CUTS.with(|n| n.set(n.get() + 1));
         let mut ov: EdgeOverlay<i32, ProvId> = EdgeOverlay::new(srcs.len() * 8);
+        ov.data_store_mut().curves = srcs.iter().map(|(q, _)| *q).collect();
         let mut buf = PointsBuf::default();
         for (si, (q, kind)) in srcs.iter().enumerate() {
             let st = if matches!(kind, OverlaySrc::Old(_)) {

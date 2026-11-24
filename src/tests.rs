@@ -31842,6 +31842,48 @@ fn overlay_cuts_once_where_curves_cross() {
     );
 }
 
+/// レビュー d91cd4c の N-2003：縦横で違う拡大・斜めの変形をした絵（速さの偏った曲線）を、矩形で切ってその場に戻すのを
+/// くり返しても、切れ目の頂点が残らない（辺の数が変わらない）。前は、切った所の t を折れ線の区間の中で比例で決めたので、
+/// 速さの偏った曲線では切った2本が1本にまとまらず、くり返すたびに辺が増えていた
+#[test]
+fn cut_and_return_of_transformed_art_leaves_no_cut_vertices() {
+    use crate::planar_map::{MapInput, MapRule, PlanarMap};
+    let colors = [
+        Color32::from_rgb(235, 75, 75),
+        Color32::from_rgb(55, 135, 245),
+        Color32::from_rgb(40, 180, 90),
+    ];
+    let xforms = [
+        ("縦 1/4", Affine::new([1.0, 0.0, 0.0, 0.25, 0.0, 150.0])),
+        ("斜め", Affine::new([1.0, 0.0, 0.8, 1.0, -120.0, 0.0])),
+    ];
+    for seed in 1..=8u64 {
+        let mut rng = map_overlay::Rng(seed);
+        let mut m = PlanarMap::default();
+        for k in 0..30 {
+            let c = colors[k % colors.len()];
+            let r = 2.0 + rng.f() * 8.0;
+            let s = wiggly_stroke(&mut rng, (100.0, 100.0, 300.0, 200.0), r, c);
+            m = m.overlay(MapInput::Shapes(&s), MapRule::Paint(Some(c))).unwrap();
+        }
+        for (name, xform) in xforms {
+            let mut m = crate::planar_map::realized(&m, xform).expect("置ける").into_map();
+            let start = m.edges.len();
+            let bb = m.bounding_box().expect("絵がある");
+            let mut rng = map_overlay::Rng(seed * 7 + 3);
+            for _ in 0..40 {
+                let (x, y) = (bb.x0 + rng.f() * bb.width(), bb.y0 + rng.f() * bb.height());
+                let rect = vec![map_overlay::rect_shape(x, y, x + 20.0 + rng.f() * 80.0, y + 10.0 + rng.f() * 40.0, colors[0])];
+                let inside = m.overlay(MapInput::Shapes(&rect), MapRule::KeepInside).unwrap();
+                let rest = m.overlay(MapInput::Shapes(&rect), MapRule::Paint(None)).unwrap();
+                m = rest.overlay(MapInput::Map(&inside), MapRule::Overlay).unwrap();
+                assert!(m.is_valid());
+            }
+            assert_eq!(m.edges.len(), start, "種 {seed}・{name}：切って戻すたびに辺が増えた");
+        }
+    }
+}
+
 /// N-1001（地図のレビュー 4cb53aa）：線の重なった地図を、矩形で切ってその場に戻すのを繰り返しても、切れ目の頂点が
 /// 残らない（辺の数が変わらない）。切れ目の頂点が折れ線どうしの交点（曲線から `FLAT_TOL` ほど離れる）のままだと、
 /// 切った2本が1本にまとまらず、5回に1回ほど残って溜まっていた
