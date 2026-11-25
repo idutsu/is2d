@@ -276,7 +276,6 @@ pub(crate) fn start_reshape_drag(
                 base,
                 orig_vertex,
                 target: orig_vertex,
-                snapped_to: None,
                 follow,
             });
         }
@@ -324,8 +323,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     if update_selection_drag(tab, pt) {
         return;
     }
-    let snap_radius = 12.0 / (tab.view.zoom() as f64);
-    // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（吸い付く距離はステージで測る）
+    // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（ほかの頂点に吸い付かない。利用者が決めた）
     let xform = tab.session.edit_path.world_xform();
     // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる
     let update = match &mut tab.session.drag {
@@ -335,12 +333,9 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             base,
             orig_vertex,
             target,
-            snapped_to,
             follow,
         }) => {
-            let snap = base.snap_target(*orig_vertex, pt, snap_radius, xform);
-            *target = snap.unwrap_or_else(|| xform.inverse() * pt);
-            *snapped_to = snap.map(|p| xform * p);
+            *target = xform.inverse() * pt;
             Some((
                 base.clone(),
                 ReshapeEdit::vertex(*orig_vertex, *target, *follow),
@@ -469,18 +464,9 @@ pub(crate) fn draw_select_tool_cursor(
                 }
             }
         }
-        ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {
-            if let Some(snap_pt) = snapped_to {
-                let sp = tab.view.world_to_screen(*snap_pt);
-                painter.circle_stroke(
-                    sp,
-                    9.0,
-                    Stroke::new(2.5_f32, Color32::from_rgb(255, 50, 140)),
-                );
-                painter.circle_filled(sp, 4.0, Color32::from_rgb(255, 50, 140));
-            }
-        }
-        ActiveCanvasDrag::MoveSelection(_) | ActiveCanvasDrag::Marquee(_) => {}
+        ActiveCanvasDrag::Select(SelectDragState::MoveVertex { .. })
+        | ActiveCanvasDrag::MoveSelection(_)
+        | ActiveCanvasDrag::Marquee(_) => {}
         _ => draw_select_sub_mode_cursor(tab, select_sub_mode, painter, pos),
     }
 }

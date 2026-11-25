@@ -2410,7 +2410,7 @@ fn test_adobe_animate_click_selects_edge_and_selected_shape_disables_deformation
         doc_actions::Action::SetTool { tool: Tool::Select },
     );
 
-    // 細い 2px ブラシストロークを描画（ほぼ全域が境界線の吸着範囲内になる細い線）
+    // 細い 2px ブラシストロークを描画（ほぼ全域が境界線のカーソル合わせの範囲内になる細い線）
     let thin_stroke = make_stroke(Point::new(100.0, 200.0), Point::new(220.0, 200.0), 2.0, red);
     put_cel_shapes(&mut app, 0, 0, thin_stroke);
     let s = scene_summary(&app);
@@ -4244,7 +4244,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
         maps.maps
             .iter()
             .all(|m| m.base.map().nodes.iter().all(|p| (*p - Point::new(50.0, 50.0)).hypot() > 1.0)),
-        "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（磁気スナップの吸い付き先）にならないこと"
+        "空白フレームのシンボルマーカーの基準点が、輪郭の変形の頂点（カーソル合わせでつかめる頂点）にならないこと"
     );
 }
 
@@ -7887,6 +7887,32 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     );
 }
 
+/// アンカーを動かしても、近くのほかのアンカーに吸い付かない（吸い付きは無くした。利用者が決めた）。丸 A の右端のアンカーを、
+/// 丸 B の左端のアンカーから 5px の所（前の吸い付く距離 12px の内）へ動かすと、カーソルの所に残る
+#[test]
+fn dragging_an_anchor_near_another_anchor_does_not_snap() {
+    for show_anchors in [false, true] {
+        let mut app = Is2dApp::default();
+        for c in [Point::new(200.0, 300.0), Point::new(320.0, 300.0)] {
+            run(&mut app, &[Action::PaintStroke { points: vec![c, c + KVec2::new(0.01, 0.0)], radius: 30.0, color: Color32::BLACK }]);
+        }
+        app.tab_mut().view.show_wireframe = show_anchors;
+        let nodes = |app: &Is2dApp| -> Vec<Point> {
+            scene_summary(app).shapes.iter().flat_map(|s| s.exterior.segments.iter().map(|q| q.p0)).collect()
+        };
+        let before = nodes(&app);
+        let near = |p: Point| *before.iter().min_by(|a, b| (**a - p).hypot().total_cmp(&(**b - p).hypot())).expect("頂点がある");
+        let (v, u) = (near(Point::new(230.0, 300.0)), near(Point::new(290.0, 300.0)));
+        let to = u + KVec2::new(-5.0, 0.0);
+        tool_select::start_reshape_drag(&mut app, v, false, false);
+        tool_select::update_reshape_drag(&mut app, to);
+        tool_select::finish_reshape_drag(&mut app, Some(to));
+        let after = nodes(&app);
+        assert!(after.iter().any(|p| (*p - to).hypot() < 1e-3), "アンカーの表示 {show_anchors}：カーソルの所に無い（吸い付いた）");
+        assert!(after.contains(&u), "吸い付かれた側のアンカーが変わった");
+    }
+}
+
 /// ゆらゆらした長い横線の、波の頂点を引っぱっても、線全体はついてこない（つかんだ波のあたりだけ。利用者が見つけた）。
 /// 回った角度を符号付きで足していたときは、右へ・左へ曲がる波で打ち消し合って `PULL_REACH_TURN` に届かず、線の端まで
 /// ついてきた
@@ -7916,7 +7942,7 @@ fn pulling_a_wave_crest_does_not_drag_the_whole_wavy_line() {
 }
 
 /// 選択ツールでアンカーをつかんで動かすと、アンカーを表示していないときは、まわりがついてくる引っぱりになり、表示している
-/// ときは、そのアンカーだけが動く（Animate の部分選択ツールの代わり。どちらも吸い付く。利用者が決めた）
+/// ときは、そのアンカーだけが動く（Animate の部分選択ツールの代わり。利用者が決めた）
 #[test]
 fn dragging_an_anchor_pulls_its_neighbours_only_while_anchors_are_hidden() {
     // ゆるい弧に沿ったブラシの線（外側の縁に、向きが少しずつ変わるアンカーが並ぶ）。外側の縁の真ん中のアンカーをつかむ
@@ -9385,7 +9411,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
         &mut app,
         doc_actions::Action::SetTool { tool: Tool::Select },
     );
-    // 線の左端の頂点を、ほかの辺から離れた外側（左上）へ動かす（ほかの辺に吸い付かない所）
+    // 線の左端の頂点を、ほかの辺から離れた外側（左上）へ動かす
     let v0_world = scene_summary(&app).shapes[0]
         .exterior
         .segments
@@ -26325,7 +26351,7 @@ mod map_overlay {
         }
     }
 
-    /// 角の吸着（レビュー 08c15dd の N-2004）：頂点を別の面の頂点の座標へ動かして確定すると、2つの頂点は1つになり、
+    /// 頂点の重なり（レビュー 08c15dd の N-2004）：頂点を別の面の頂点の座標ちょうどへ動かして確定すると、2つの頂点は1つになり、
     /// 地図は正しい（書き戻しの座標の一致に頼らない）
     #[test]
     fn move_vertex_onto_other_vertex_merges_them() {
@@ -26363,26 +26389,18 @@ mod map_overlay {
         assert_eq!(next.color_at(Point::new(300.0, 150.0)), Some(Color32::BLUE));
     }
 
-    /// 頂点を動かすときの吸い付き先（`snap_target`）：動かす頂点を除いて、置いた座標で `radius` 以内のいちばん近い頂点
+    /// カーソル合わせの頂点（`hit_node`）：置いた座標で `radius` 以内のいちばん近い頂点
     #[test]
-    fn snap_target_finds_the_nearest_other_vertex() {
+    fn hit_node_finds_the_nearest_vertex_in_placed_coordinates() {
         let red = rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED);
         let m = crate::planar_map::LayerBase::new(&PlanarMap::from_faces([&red]));
-        let (tl, tr) = (Point::new(100.0, 100.0), Point::new(200.0, 100.0));
         let id = Affine::IDENTITY;
-        assert_eq!(
-            m.snap_target(tl, Point::new(201.0, 101.0), 3.0, id),
-            Some(Point::new(200.0, 100.0))
-        );
-        assert_eq!(m.snap_target(tr, Point::new(201.0, 101.0), 3.0, id), None);
-        assert_eq!(m.snap_target(tl, Point::new(205.0, 100.0), 3.0, id), None);
+        assert_eq!(m.hit_node(Point::new(201.0, 101.0), 3.0, id), Some(Point::new(200.0, 100.0)));
+        assert_eq!(m.hit_node(Point::new(205.0, 100.0), 3.0, id), None);
         // 2倍で置くと、距離は置いた座標で測る
         let x2 = Affine::scale(2.0);
-        assert_eq!(
-            m.snap_target(tl, Point::new(402.0, 202.0), 3.0, x2),
-            Some(Point::new(200.0, 100.0))
-        );
-        assert_eq!(m.snap_target(tl, Point::new(201.0, 101.0), 3.0, x2), None);
+        assert_eq!(m.hit_node(Point::new(402.0, 202.0), 3.0, x2), Some(Point::new(200.0, 100.0)));
+        assert_eq!(m.hit_node(Point::new(201.0, 101.0), 3.0, x2), None);
     }
 
     /// ほぼ重なった2本の辺（間がごく細い面）の上に重ねても壊れない。間が格子の目（1/4096px）より細いと、2本の
@@ -37099,7 +37117,7 @@ fn local_edge_rules_match_full_check() {
     );
 }
 
-/// 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、カーソル合わせと吸い付きは何にも
+/// 潰れた変換（逆にできない）で置いた地図は描かない（面積 0 の絵は見えない）ので、カーソル合わせは何にも
 /// 合わない（地図全体の写しを作る予備の道を置かない）
 #[test]
 fn collapsed_placement_hits_nothing() {
@@ -37116,10 +37134,6 @@ fn collapsed_placement_hits_nothing() {
     for xf in [Affine::scale(0.0), Affine::scale_non_uniform(1.0, 0.0)] {
         assert_eq!(base.hit_node(p, 1000.0, xf), None);
         assert_eq!(base.hit_edge(p, 1000.0, xf), None);
-        assert_eq!(
-            base.snap_target(Point::new(100.0, 100.0), p, 1000.0, xf),
-            None
-        );
     }
     // ふつうの変換なら合う
     assert_eq!(base.hit_node(p, 1.0, Affine::IDENTITY), Some(p));

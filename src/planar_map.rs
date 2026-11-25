@@ -2451,35 +2451,11 @@ impl LayerBase {
         }
     }
 
-    /// カーソル合わせ：地図を座標の変換 `xform` で置いたとき、`p` から `r` 以内でいちばん近い頂点の位置（距離は置いた座標で
-    /// 測る：`nearest_node`）
-    pub(crate) fn hit_node(&self, p: Point, r: f64, xform: Affine) -> Option<Point> {
-        self.nearest_node(p, r, xform, None)
-    }
-
-    /// 頂点への吸い付き：地図を座標の変換 `xform` で置いたとき、位置が `skip` の頂点を `p` へ動かすときに吸い付く、ほかの
-    /// 頂点（`radius` 以内でいちばん近いもの。距離は置いた座標で測る：`nearest_node`）の位置
-    pub(crate) fn snap_target(
-        &self,
-        skip: Point,
-        p: Point,
-        radius: f64,
-        xform: Affine,
-    ) -> Option<Point> {
-        self.nearest_node(p, radius, xform, Some(skip))
-    }
-
-    /// 地図を座標の変換 `xform` で置いたとき、点 `p`（置いた座標）から `radius` 以内でいちばん近い頂点の位置（文書の
-    /// 座標。位置が `skip` の頂点は除く）。頂点は、点のまわりの端の升目の索引にある辺の端から引く（地図全体の写しを
+    /// カーソル合わせ：地図を座標の変換 `xform` で置いたとき、点 `p`（置いた座標）から `radius` 以内でいちばん近い頂点の
+    /// 位置（文書の座標。距離は置いた座標で測る）。頂点は、点のまわりの端の升目の索引にある辺の端から引く（地図全体の写しを
     /// 作らない：設計 段2b の 7. の 2b-7d。引くのは辺の入っている升目だけなので、小さく縮めて置いた地図で文書の座標の
     /// 範囲が広くなっても、手間はまわりの中身で決まる：`TileIndex::edges_over`）。同じ距離の頂点は、座標の順で先のもの
-    fn nearest_node(
-        &self,
-        p: Point,
-        radius: f64,
-        xform: Affine,
-        skip: Option<Point>,
-    ) -> Option<Point> {
+    pub(crate) fn hit_node(&self, p: Point, radius: f64, xform: Affine) -> Option<Point> {
         // 潰れた変換（逆にできない：`invertible`）で置いた地図は描かない（面積 0 の絵は見えない）ので、何にも合わない
         if !crate::vector_engine::invertible(xform) {
             return None;
@@ -2496,7 +2472,7 @@ impl LayerBase {
                 let te = self.stored.edge_at(e);
                 [te.a, te.b]
             });
-            nearest_of(pts.filter(|&v| Some(v) != skip), radius, |v| {
+            nearest_of(pts, radius, |v| {
                 (xform * v - p).hypot()
             })
         };
@@ -2681,7 +2657,7 @@ impl LayerBase {
     /// （距離は置いた座標で測る。パラメータはアフィン変換で変わらない）。見る辺は、点のまわりの升目にかかる辺だけ（`p` から
     /// `r` 以内を通る辺は、その所を含むマスの升目にある。引くのは辺の入っている升目だけ：`TileIndex::edges_over`）
     pub(crate) fn hit_edge(&self, p: Point, r: f64, xform: Affine) -> Option<(usize, f64)> {
-        // 潰れた変換で置いた地図は描かないので、何にも合わない（`nearest_node` と同じ）
+        // 潰れた変換で置いた地図は描かないので、何にも合わない（`hit_node` と同じ）
         if !crate::vector_engine::invertible(xform) {
             return None;
         }
@@ -3961,7 +3937,7 @@ pub(crate) fn painted_map_pub(shapes: &[FillShape]) -> Option<PlanarMap> {
 }
 
 /// 点の並び `pts` のうち、`dist` が `radius` 以内でいちばん小さいもの（同じなら座標の順で先：`point_order`）。近い頂点を
-/// 探す所（カーソル合わせ・吸い付き・形の線の端の寄せ）の決まりはこれ1つ
+/// 探す所（カーソル合わせ・形の線の端の寄せ）の決まりはこれ1つ
 pub(crate) fn nearest_of(
     pts: impl IntoIterator<Item = Point>,
     radius: f64,
