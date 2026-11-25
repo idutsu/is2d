@@ -20644,6 +20644,40 @@ fn the_selection_tint_is_drawn_above_every_shape() {
     assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
 }
 
+/// 線で囲んだ塗りを Alt で複製して動かし、そのままグループにすると、選択は新しいグループの全部（塗りも線も）になり、続けて
+/// ドラッグすると線も一緒に動く（利用者の指摘。前は、グループにする前の番号で選び直したので、動かした先に置いて番号の変わった
+/// 線だけが選択から外れ、ドラッグ中に線が置いていかれた）
+#[test]
+fn grouping_moved_duplicates_selects_the_whole_group() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    let green = Color32::from_rgb(120, 175, 160);
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 300.0, 300.0, green)]);
+    let ink = EdgeStroke { color: Color32::BLACK, width: 10 };
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(250.0, 250.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(300.0, 0.0), alt_duplicate: true }));
+    assert!(apply(&mut app, Action::Group));
+    let scope = app.session.editing_group_path.clone();
+    let group: Vec<(bool, bool)> = app
+        .scene()
+        .iter()
+        .filter(|s| s.active_group_id_at_scope(&scope).is_some())
+        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .collect();
+    assert_eq!(group.iter().filter(|g| g.0).count(), 4, "新しいグループに線が4本ある");
+    assert!(group.iter().all(|g| g.1), "新しいグループの中に、選ばれていない図形がある：{group:?}");
+    // 続けてドラッグすると、線も一緒に動く
+    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(550.0, 250.0), false);
+    app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+    app.tab_mut().session.translate_move_overlay(KVec2::new(0.0, 100.0));
+    for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
+        assert!(s.bounding_box().y0 > 280.0, "ドラッグ中に置いていかれた図形がある（線 {}）", s.line.is_some());
+    }
+}
+
 /// 線で囲んだ塗りの、塗りと線1本を一緒に選んでも、選んでいない線は細く見えない：選んだ塗りの選択の色は、同じ段（同じ
 /// レイヤー・同じ階層の塗り）の最後に塗り、線はそのあとに描く（線は塗りより上）。前は選択の色を全部の図形の上に塗ったので、
 /// 塗りの上に乗っている線の内側の半分を、選んだ塗りの色が覆った（利用者の指摘）

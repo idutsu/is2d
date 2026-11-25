@@ -618,8 +618,16 @@ pub(crate) fn prepare_group_selected_shapes(
     if let Some(plan) = rest_plan {
         crate::canvas_tool::write_commit(tab, plan);
     }
-    tab.session.selection = selection;
-    tab.session.retain_existing_selection();
+    // 選択は、できた新しいグループ（今の階層から見て、新しいグループに入っている図形とインスタンス：`expand_to_group_unit`
+    // と同じ見分け方）。前の選択の番号では選び直さない（線の番号は線の形と階層から決まるので、浮いた片を動かした先に置いた
+    // 線は番号が変わり、前の番号で選び直すと線だけが選択から外れて、続くドラッグで線が置いていかれた）
+    let mut grouped = crate::canvas_tool::Selection::default();
+    for s in tab.scene().iter() {
+        if s.active_group_id_at_scope(&scope) == Some(new_gid) {
+            grouped.insert_shape(s);
+        }
+    }
+    tab.session.selection = grouped;
 
     if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
         tab.set_active_layer(l_idx);
