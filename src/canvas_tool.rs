@@ -148,8 +148,8 @@ impl MarqueeDrag {
 pub(crate) enum SelectSubMode {
     #[default]
     Reshape, // 通常の輪郭変形・頂点移動・図形移動（V キー）
-    AddAnchor,    // ＋ アンカー追加モード（+ キー）
-    DeleteAnchor, // － アンカー削除モード（- キー）
+    AddAnchor,    // ＋ アンカー追加モード（D キー）
+    DeleteAnchor, // － アンカー削除モード（F キー）
 }
 
 /// 地図の頂点・辺が、どの地図のものか

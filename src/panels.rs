@@ -683,7 +683,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 追加", icons::ADD))
                     .selected(tool.select_sub_mode == SelectSubMode::AddAnchor),
             )
-            .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (+)")
+            .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (D)")
             .clicked()
         {
             actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
@@ -696,7 +696,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 削除", icons::REMOVE))
                     .selected(tool.select_sub_mode == SelectSubMode::DeleteAnchor),
             )
-            .on_hover_text("アンカーポイントをクリックして削除 (-)")
+            .on_hover_text("アンカーポイントをクリックして削除 (F)")
             .clicked()
         {
             actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
@@ -709,7 +709,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 表示", icons::WIREFRAME))
                     .selected(tab.view.show_wireframe),
             )
-            .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示")
+            .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示 (A)")
             .clicked()
         {
             actions.push(UiAction::ToggleView(ViewSwitch::Anchors));

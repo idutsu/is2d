@@ -7221,8 +7221,7 @@ fn plus_minus_keys_are_decided_by_key_position() {
         modifiers: egui::Modifiers::NONE,
     };
     // 論理キー `key`・位置 `at` のキーを1回押したときの答え
-    let once =
-        |key: Key, at: Option<Key>| plus_minus_pressed(&[event(key, at, true, false)], false);
+    let once = |key: Key, at: Option<Key>| plus_minus_pressed(&[event(key, at, true, false)]);
     let (plus, minus) = (Some(PlusMinus::Plus), Some(PlusMinus::Minus));
     // US の `=`／`+` のキー（Shift の有無で論理キーが変わっても同じ）
     assert_eq!(once(Key::Equals, Some(Key::Equals)), plus);
@@ -7238,16 +7237,52 @@ fn plus_minus_keys_are_decided_by_key_position() {
     assert_eq!(once(Key::Plus, Some(Key::Num1)), None);
     assert_eq!(once(Key::Minus, Some(Key::Quote)), None);
     assert_eq!(once(Key::Minus, None), None);
-    // 押しっぱなしの繰り返しは、`repeat` が偽なら数えず、真なら数える
+    // 押しっぱなしの繰り返しも数える（`Cmd` と合わせたズームを続ける）
     let held = [event(Key::Minus, Some(Key::Minus), true, true)];
-    assert_eq!(plus_minus_pressed(&held, false), None);
-    assert_eq!(plus_minus_pressed(&held, true), minus);
+    assert_eq!(plus_minus_pressed(&held), minus);
     // 離した合図と文字の合図は見ない
     let others = [
         event(Key::Minus, Some(Key::Minus), false, false),
         egui::Event::Text("ー".into()),
     ];
-    assert_eq!(plus_minus_pressed(&others, true), None);
+    assert_eq!(plus_minus_pressed(&others), None);
+}
+
+/// 選択ツールのアンカー編集は、A で表示、D で追加、F で削除を切り替える（もう1回押すと戻る）。`+`・`-` はアンカー編集の
+/// キーではない（`Cmd` と合わせたズームだけ。利用者が決めた）
+#[test]
+fn anchor_edit_modes_toggle_with_a_d_f() {
+    use eframe::egui::{self, Key};
+    let mut app = Is2dApp::default();
+    crate::doc_actions::apply(&mut app, crate::doc_actions::Action::SetTool { tool: Tool::Select });
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let press = |app: &mut Is2dApp, key: Key| {
+        let ev = |pressed| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [vec![ev(true)], vec![ev(false)]] {
+            let _ = ctx.run(egui::RawInput { screen_rect, events, ..Default::default() }, |ctx| app.update_ui(ctx));
+        }
+    };
+    let before = app.tab().view.show_wireframe;
+    press(&mut app, Key::A);
+    assert_eq!(app.tab().view.show_wireframe, !before, "A で表示が切り替わらない");
+    press(&mut app, Key::A);
+    assert_eq!(app.tab().view.show_wireframe, before);
+    press(&mut app, Key::D);
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::AddAnchor, "D で追加にならない");
+    press(&mut app, Key::F);
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::DeleteAnchor, "F で削除にならない");
+    press(&mut app, Key::F);
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::Reshape, "もう1回 F で戻らない");
+    press(&mut app, Key::Minus);
+    press(&mut app, Key::Equals);
+    assert_eq!(app.tool.select_sub_mode, SelectSubMode::Reshape, "+・- でアンカー編集が切り替わった");
 }
 
 /// `Cmd` のショートカット（コピーなど）のすぐ後に、ふつうに `V`（選択ツール）を押して離しても貼り付けない。直す前は、

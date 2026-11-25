@@ -779,12 +779,13 @@ impl Is2dApp {
             }
             self.tool.select_sub_mode = SelectSubMode::Reshape;
         } else if self.tool.tool == Tool::Select {
-            if let Some(key) = plus_minus_pressed(&i.events, false) {
-                let mode = match key {
-                    PlusMinus::Plus => SelectSubMode::AddAnchor,
-                    PlusMinus::Minus => SelectSubMode::DeleteAnchor,
-                };
-                apply(self, Action::ToggleSelectSubMode { mode });
+            // 選択ツールのアンカー編集：A で表示、D で追加、F で削除を切り替える（右パネルの3つのボタンと同じ）
+            if key_pressed_no_repeat(i, Key::A) {
+                self.tab_mut().view.toggle(canvas_tool::ViewSwitch::Anchors);
+            } else if key_pressed_no_repeat(i, Key::D) {
+                apply(self, Action::ToggleSelectSubMode { mode: SelectSubMode::AddAnchor });
+            } else if key_pressed_no_repeat(i, Key::F) {
+                apply(self, Action::ToggleSelectSubMode { mode: SelectSubMode::DeleteAnchor });
             }
         }
     }
@@ -793,7 +794,7 @@ impl Is2dApp {
     fn handle_command_shortcuts(&mut self, ctx: &egui::Context, i: &egui::InputState, cmd: bool) {
         if cmd && key_pressed_no_repeat(i, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if let Some(key) = plus_minus_pressed(&i.events, true).filter(|_| cmd) {
+        } else if let Some(key) = plus_minus_pressed(&i.events).filter(|_| cmd) {
             let factor = match key {
                 PlusMinus::Plus => 1.25,
                 PlusMinus::Minus => 0.8,
@@ -1202,7 +1203,7 @@ impl Is2dApp {
     }
 }
 
-/// `+` と `-` のキー（選択ツールのアンカー追加・削除、`Cmd` と合わせてズームイン・アウト）
+/// `+` と `-` のキー（`Cmd` と合わせてズームイン・アウト）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PlusMinus {
     Plus,
@@ -1216,17 +1217,14 @@ enum PlusMinus {
 /// （`Key::Minus`。テンキーの `-` も同じ名前で来る）。`+` の刻印は、US では `0` の2つ右のキー
 /// （`Key::Equals`）、JIS では `L` の右のキー（`Key::Semicolon`）にある。キーの位置からは配列が
 /// わからないので、`+` はこの2つの位置とテンキーの `+`（`Key::Plus`）のどれでも `+` とする
-/// （そのため US の `;`、JIS の `^` のキーも `+` になる）。
-///
-/// `repeat` が偽なら、押しっぱなしの繰り返しの合図は数えない
-fn plus_minus_pressed(events: &[egui::Event], repeat: bool) -> Option<PlusMinus> {
+/// （そのため US の `;`、JIS の `^` のキーも `+` になる）。押しっぱなしの繰り返しの合図も数える（ズームを続ける）
+fn plus_minus_pressed(events: &[egui::Event]) -> Option<PlusMinus> {
     events.iter().find_map(|ev| match ev {
         egui::Event::Key {
             physical_key: Some(key),
             pressed: true,
-            repeat: is_repeat,
             ..
-        } if repeat || !is_repeat => match key {
+        } => match key {
             Key::Equals | Key::Semicolon | Key::Plus => Some(PlusMinus::Plus),
             Key::Minus => Some(PlusMinus::Minus),
             _ => None,
