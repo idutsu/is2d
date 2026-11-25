@@ -1561,13 +1561,9 @@ pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
             ws.notify_info(format!("「{name}」を開きました"));
         }
         Ok(OpenProjectOutcome::LoadedWithTrimmedData) => {
-            crate::canvas_tool::show_notice(
-                ws.toast_mut(),
-                crate::canvas_tool::NoticeKind::Warning,
-                format!(
-                    "「{name}」の一部を読み込めなかったため除きました（保存すると元のファイルからも消えます）"
-                ),
-            );
+            ws.notify_warning(format!(
+                "「{name}」の一部を読み込めなかったため除きました（保存すると元のファイルからも消えます）"
+            ));
         }
         Ok(OpenProjectOutcome::SwitchedToExistingTab) => {
             ws.notify_info(format!("既に開いている「{name}」のタブへ切り替えました"));

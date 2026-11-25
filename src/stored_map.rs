@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::planar_map::{
     EdgeStroke, STROKE_WIDTHS,
-    point_order, EdgeGeom, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
+    point_order, tile_edge, EdgeGeom, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
 };
-use crate::vector_engine::ShapeId;
+use crate::vector_engine::{ShapeId, SyncCache};
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;
@@ -44,35 +44,6 @@ struct StoredEdge {
 }
 
 impl StoredEdge {
-    /// 地図 `map` の辺 `e` の、決まった向きのしまう辺
-    fn of(map: &PlanarMap, e: &MapEdge) -> Self {
-        let (a, b) = (map.nodes[e.a], map.nodes[e.b]);
-        let src = |id: Option<ShapeId>| id.and_then(NonZeroU64::new);
-        if point_order(a, b).is_le() {
-            Self {
-                a,
-                b,
-                ctrl: e.ctrl,
-                left: e.left,
-                right: e.right,
-                left_src: src(e.left_src),
-                right_src: src(e.right_src),
-                stroke: e.stroke,
-            }
-        } else {
-            Self {
-                a: b,
-                b: a,
-                ctrl: e.ctrl,
-                left: e.right,
-                right: e.left,
-                left_src: src(e.right_src),
-                right_src: src(e.left_src),
-                stroke: e.stroke,
-            }
-        }
-    }
-
     /// 塊から引いた辺の形の辺（決まった向きにする）
     fn of_tile(te: &TileEdge) -> Self {
         let src = |id: Option<ShapeId>| id.and_then(NonZeroU64::new);
@@ -106,6 +77,20 @@ impl StoredEdge {
         MapEdge {
             a,
             b,
+            ctrl: self.ctrl,
+            left: self.left,
+            right: self.right,
+            left_src: self.left_src.map(NonZeroU64::get),
+            right_src: self.right_src.map(NonZeroU64::get),
+            stroke: self.stroke,
+        }
+    }
+
+    /// 塊から引いた辺の形（向きはこのしまう辺の向き）
+    fn tile_edge(&self) -> TileEdge {
+        TileEdge {
+            a: self.a,
+            b: self.b,
             ctrl: self.ctrl,
             left: self.left,
             right: self.right,
@@ -289,7 +274,7 @@ pub(crate) struct StoredMap(Arc<Stored>);
 struct Stored {
     tiles: Box<[Tile]>,
     /// この地図の計算に使う写しのうち、いま誰かが持っているもの（弱い参照。生かすのは写しを使う所：`LayerBase::of_stored`）
-    dense: std::sync::Mutex<Weak<LayerBase>>,
+    dense: SyncCache<Weak<LayerBase>>,
     /// 塊ごとの、最初の辺の、計算に使う地図（`to_dense`）での番号（初めて要るときに作る：`dense_edge`）
     starts: OnceLock<Box<[u32]>>,
 }
@@ -309,7 +294,7 @@ impl StoredMap {
             .edges
             .iter()
             .map(|ed| {
-                let se = StoredEdge::of(map, ed);
+                let se = StoredEdge::of_tile(&tile_edge(map, ed));
                 (se.tile(), se)
             })
             .collect();
@@ -337,13 +322,13 @@ impl StoredMap {
         }
         Self(Arc::new(Stored {
             tiles: tiles.into(),
-            dense: std::sync::Mutex::new(Weak::new()),
+            dense: SyncCache::new(Weak::new()),
             starts: OnceLock::new(),
         }))
     }
 
     /// 計算に使う写しへの弱い参照（`LayerBase::of_stored` だけが使う）
-    pub(crate) fn dense_slot(&self) -> &std::sync::Mutex<Weak<LayerBase>> {
+    pub(crate) fn dense_slot(&self) -> &SyncCache<Weak<LayerBase>> {
         &self.0.dense
     }
 
@@ -399,21 +384,7 @@ impl StoredMap {
             .flat_map(|t| t.iter())
             .enumerate()
             .filter(|(_, se)| se.stroke.is_some())
-            .map(|(i, se)| {
-                (
-                    i,
-                    TileEdge {
-                        a: se.a,
-                        b: se.b,
-                        ctrl: se.ctrl,
-                        left: se.left,
-                        right: se.right,
-                        left_src: se.left_src.map(NonZeroU64::get),
-                        right_src: se.right_src.map(NonZeroU64::get),
-                        stroke: se.stroke,
-                    },
-                )
-            })
+            .map(|(i, se)| (i, se.tile_edge()))
             .collect()
     }
 
@@ -422,17 +393,7 @@ impl StoredMap {
     pub(crate) fn edge_at(&self, e: usize) -> TileEdge {
         let starts = self.starts();
         let k = starts.partition_point(|&s| s as usize <= e) - 1;
-        let se = &self.0.tiles[k][e - starts[k] as usize];
-        TileEdge {
-            a: se.a,
-            b: se.b,
-            ctrl: se.ctrl,
-            left: se.left,
-            right: se.right,
-            left_src: se.left_src.map(NonZeroU64::get),
-            right_src: se.right_src.map(NonZeroU64::get),
-            stroke: se.stroke,
-        }
+        self.0.tiles[k][e - starts[k] as usize].tile_edge()
     }
 
     /// 計算に使う地図（`to_dense`）の辺の数
@@ -521,7 +482,7 @@ impl StoredMap {
         let news: crate::planar_map::IntSet<StoredEdge> = result
             .edges
             .iter()
-            .map(|ed| StoredEdge::of(result, ed))
+            .map(|ed| StoredEdge::of_tile(&tile_edge(result, ed)))
             .collect();
         let removed = window
             .iter()
@@ -529,7 +490,7 @@ impl StoredMap {
             .filter(|&e| !news.contains(self.stored_edge(e)))
             .collect();
         let added = (0..result.edges.len())
-            .filter(|&e| !olds.contains(&StoredEdge::of(result, &result.edges[e])))
+            .filter(|&e| !olds.contains(&StoredEdge::of_tile(&tile_edge(result, &result.edges[e]))))
             .collect();
         (removed, added)
     }
@@ -571,16 +532,6 @@ impl StoredMap {
         let starts = self.starts();
         let mut removed: Vec<usize> = Vec::new();
         let mut added: Vec<TileEdge> = Vec::new();
-        let to_tile_edge = |se: &StoredEdge| TileEdge {
-            a: se.a,
-            b: se.b,
-            ctrl: se.ctrl,
-            left: se.left,
-            right: se.right,
-            left_src: se.left_src.map(NonZeroU64::get),
-            right_src: se.right_src.map(NonZeroU64::get),
-            stroke: se.stroke,
-        };
         let (mut i, mut j) = (0usize, 0usize);
         while i < a.len() || j < b.len() {
             let ka = a.get(i).map(|t| t[0].tile());
@@ -598,7 +549,7 @@ impl StoredMap {
                         added.extend(
                             b[j].iter()
                                 .filter(|se| !olds.contains(se))
-                                .map(to_tile_edge),
+                                .map(StoredEdge::tile_edge),
                         );
                     }
                     i += 1;
@@ -613,7 +564,7 @@ impl StoredMap {
                     i += 1;
                 }
                 _ => {
-                    added.extend(b[j].iter().map(to_tile_edge));
+                    added.extend(b[j].iter().map(StoredEdge::tile_edge));
                     j += 1;
                 }
             }
@@ -722,7 +673,7 @@ impl StoredMap {
     fn of_tiles(tiles: Box<[Tile]>) -> Self {
         Self(Arc::new(Stored {
             tiles,
-            dense: std::sync::Mutex::new(Weak::new()),
+            dense: SyncCache::new(Weak::new()),
             starts: OnceLock::new(),
         }))
     }

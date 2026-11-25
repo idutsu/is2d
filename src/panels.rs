@@ -1047,26 +1047,21 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
 
     draw_panel_section_label(ui, "キャンバス操作", 6.0);
 
-    if ui
-        .add_sized(
-            Vec2::new(ui.available_width(), 28.0),
-            egui::Button::new("枠外を隠す").selected(tab.view.clip_outside_stage),
-        )
-        .on_hover_text(format!(
-            "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします ({MOD_KEY}+3)"
-        ))
-        .clicked()
+    if wide_button(
+        ui,
+        egui::Button::new("枠外を隠す").selected(tab.view.clip_outside_stage),
+    )
+    .on_hover_text(format!(
+        "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします ({MOD_KEY}+3)"
+    ))
+    .clicked()
     {
         actions.push(UiAction::ToggleView(ViewSwitch::ClipOutsideStage));
     }
 
     ui.add_space(6.0);
 
-    if ui
-        .add_sized(
-            Vec2::new(ui.available_width(), 28.0),
-            egui::Button::new("ウィンドウに合わせる"),
-        )
+    if wide_button(ui, egui::Button::new("ウィンドウに合わせる"))
         .on_hover_text(format!(
             "ステージ全体が中央キャンバス領域に収まるようにズームと位置を自動調整します ({MOD_KEY}+2)"
         ))
@@ -1077,11 +1072,7 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
 
     ui.add_space(6.0);
 
-    if ui
-        .add_sized(
-            Vec2::new(ui.available_width(), 28.0),
-            egui::Button::new("100%表示"),
-        )
+    if wide_button(ui, egui::Button::new("100%表示"))
         .on_hover_text(format!(
             "クリック（または {MOD_KEY}+1）で 100% 表示・初期位置にリセットします"
         ))
@@ -1089,6 +1080,11 @@ fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui
     {
         actions.push(UiAction::ResetView);
     }
+}
+
+/// 右パネルの幅いっぱいの、高さ 28 のボタンを置く
+fn wide_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
+    ui.add_sized(Vec2::new(ui.available_width(), 28.0), button)
 }
 
 /// 右パネル内の各セクション見出しラベルと下部余白を描画する共通ヘルパー

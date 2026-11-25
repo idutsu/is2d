@@ -398,11 +398,7 @@ impl Is2dApp {
         else {
             return;
         };
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("音")
-            .to_owned();
+        let name = project_io::file_name_or(&path, "音").to_owned();
         match std::fs::read(&path) {
             Ok(bytes) => {
                 apply(
@@ -413,11 +409,7 @@ impl Is2dApp {
                     },
                 );
             }
-            Err(e) => canvas_tool::show_notice(
-                &mut self.toast,
-                canvas_tool::NoticeKind::Error,
-                format!("音のファイルを読めません: {e}"),
-            ),
+            Err(e) => self.notify_error(format!("音のファイルを読めません: {e}")),
         }
     }
 
@@ -446,9 +438,7 @@ impl Is2dApp {
 
         // 浮いた片を置けなければ、画面に見えている片が入らない動画は書き出さない
         let Some(doc) = self.tab().committed_document_copy() else {
-            canvas_tool::show_notice(
-                &mut self.toast,
-                canvas_tool::NoticeKind::Warning,
+            self.notify_warning(
                 "選んだ図形を置けないため書き出せません（動かすか、取り消してから書き出してください）",
             );
             return;
@@ -1173,13 +1163,9 @@ impl Is2dApp {
                 1 => first.clone(),
                 n => format!("{first} ほか {} か所", n - 1),
             };
-            canvas_tool::show_notice(
-                &mut self.toast,
-                canvas_tool::NoticeKind::Warning,
-                format!(
-                    "{at}の絵が壊れていたので、何も無いものとして表示しています（保存すると元のまま書きます）"
-                ),
-            );
+            self.notify_warning(format!(
+                "{at}の絵が壊れていたので、何も無いものとして表示しています（保存すると元のまま書きます）"
+            ));
             ctx.request_repaint();
         }
         // そのフレームの操作をすべて適用した後の状態から、OS のメニューの見せ方とウィンドウタイトルを更新し、コマが

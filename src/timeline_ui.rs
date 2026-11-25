@@ -3,7 +3,7 @@ use std::time::Duration;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::audio_out::AudioOut;
-use crate::canvas_tool::{cancel_active_drag, show_notice, CoalesceKey, NoticeKind, Tab};
+use crate::canvas_tool::{cancel_active_drag, CoalesceKey, Tab};
 use crate::doc_actions::{apply, Action, ActionHost};
 #[cfg(test)]
 pub(crate) use crate::doc_actions::{
@@ -2448,7 +2448,7 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
 /// （再生中は毎コマの `FillShape` クローンを行わず、`Cel` の結合メッシュキャッシュから直接高速描画する）
 pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context) {
     if let Some(why) = host.timeline_ui_mut().audio.tick() {
-        show_notice(host.toast_mut(), NoticeKind::Warning, why);
+        host.notify_warning(why);
     }
     let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
     timeline_ui.ensure_timeline_context(tab);

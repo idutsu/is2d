@@ -251,11 +251,11 @@ impl PlanarMap {
             index[v]
         };
         let mut edges = Vec::new();
-        for (i, e) in self.edges.iter().enumerate() {
+        for e in &self.edges {
             let Some(([l, r], stroke)) = restricted_sides(
                 [(e.left, e.left_src), (e.right, e.right_src)],
                 e.stroke,
-                line_id_of(&tile_edge(self, i)),
+                line_id_of(&tile_edge(self, e)),
                 &keep,
             ) else {
                 continue;
@@ -1053,9 +1053,8 @@ pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
     Some(LINE_ID_BIT | (h.finish() >> 1))
 }
 
-/// 地図 `m` の辺 `e` を、塊から引いた辺の形にする（線の番号 `line_id_of` を引く）
-fn tile_edge(m: &PlanarMap, e: usize) -> crate::stored_map::TileEdge {
-    let ed = m.edges[e];
+/// 地図 `m` の辺 `ed` を、塊から引いた辺の形にする（線の番号 `line_id_of` を引く・差分を当てる・しまう辺にする）
+pub(crate) fn tile_edge(m: &PlanarMap, ed: &MapEdge) -> crate::stored_map::TileEdge {
     crate::stored_map::TileEdge {
         a: m.nodes[ed.a],
         b: m.nodes[ed.b],
@@ -1283,22 +1282,7 @@ type LocalDiff = (PlanarMap, Vec<usize>, Vec<usize>);
 
 /// 地図 `m` の辺 `edges` を、塊の辺の形にする（差分を当てる `StoredMap::with_diff_tiles` に渡すため）
 fn tile_edges_of(m: &PlanarMap, edges: &[usize]) -> Vec<crate::stored_map::TileEdge> {
-    edges
-        .iter()
-        .map(|&e| {
-            let ed = m.edges[e];
-            crate::stored_map::TileEdge {
-                a: m.nodes[ed.a],
-                b: m.nodes[ed.b],
-                ctrl: ed.ctrl,
-                left: ed.left,
-                right: ed.right,
-                left_src: ed.left_src,
-                right_src: ed.right_src,
-                stroke: ed.stroke,
-            }
-        })
-        .collect()
+    edges.iter().map(|&e| tile_edge(m, &m.edges[e])).collect()
 }
 
 /// 道具が作る、重ね合わせに渡すもの（`LayerBase::paint_change`・`reshape_change`）：重ねるもの・その曲線・その左右の色
@@ -1516,10 +1500,7 @@ impl LayerBase {
     /// しまった地図 `stored` の計算に使う写し：いま誰かが持っていればそれ、無ければ作る（作ったものを生かすのは、
     /// 受け取った所だけ）
     pub(crate) fn of_stored(stored: &StoredMap) -> Arc<Self> {
-        let mut slot = stored
-            .dense_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut slot = stored.dense_slot().lock();
         if let Some(base) = slot.upgrade() {
             return base;
         }
@@ -1531,10 +1512,7 @@ impl LayerBase {
     /// しまった地図 `stored` の計算に使う写し（`of_stored` と同じ）。新しく作るときは、写し `prev`（`stored` と塊を共有
     /// する地図の写し）の升目の索引から、変わった塊の分だけ作り直した索引を持たせる
     pub(crate) fn of_stored_after(stored: &StoredMap, prev: &LayerBase) -> Arc<Self> {
-        let mut slot = stored
-            .dense_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut slot = stored.dense_slot().lock();
         if let Some(base) = slot.upgrade() {
             return base;
         }
@@ -1587,11 +1565,7 @@ impl LayerBase {
             assert!(ok, "面の表の図形と、地図の辺の側の番号が食い違う");
         }
         let base = Arc::new(base);
-        *base
-            .stored
-            .dense_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&base);
+        *base.stored.dense_slot().lock() = Arc::downgrade(&base);
         base
     }
 
@@ -1934,16 +1908,21 @@ impl LayerBase {
         }
     }
 
-    /// バケツで塗る面の、輪郭の向きのある辺（前の地図の番号）：点 `p`（文書の座標）を含む面（`LocalMap::face_at`）。
-    /// 面が無いか、すでに `color` なら `None`
-    fn fill_sides(&self, p: Point, color: Color32, group_path: &[u64]) -> Option<Vec<(usize, bool)>> {
+    /// 点 `p`（文書の座標）を含む面（`LocalMap::face_at`。バケツとインクボトルで同じ決まり）
+    fn face_at_point(&self, p: Point, group_path: &[u64]) -> Option<FaceAt> {
         let empty = PlanarMap::default();
         let local = LocalMap::new(self.map_index(), &empty, &[], &[]);
         let faces_list = self.faces(group_path);
         let lookup = self.faces_lookup(&faces_list);
         let g = gpt(p);
         let mut memo = CycleMemo::default();
-        let (face_color, halves) = local.face_at((2 * g.0, 2 * g.1), &lookup, &mut memo)?;
+        local.face_at((2 * g.0, 2 * g.1), &lookup, &mut memo)
+    }
+
+    /// バケツで塗る面の、輪郭の向きのある辺（前の地図の番号）：点 `p`（文書の座標）を含む面（`face_at_point`）。
+    /// 面が無いか、すでに `color` なら `None`
+    fn fill_sides(&self, p: Point, color: Color32, group_path: &[u64]) -> Option<Vec<(usize, bool)>> {
+        let (face_color, halves) = self.face_at_point(p, group_path)?;
         (face_color != Some(color)).then_some(halves)
     }
 
@@ -2047,13 +2026,7 @@ impl LayerBase {
                 return vec![e];
             }
         }
-        let empty = PlanarMap::default();
-        let local = LocalMap::new(self.map_index(), &empty, &[], &[]);
-        let faces_list = self.faces(group_path);
-        let lookup = self.faces_lookup(&faces_list);
-        let g = gpt(p);
-        let mut memo = CycleMemo::default();
-        match local.face_at((2 * g.0, 2 * g.1), &lookup, &mut memo) {
+        match self.face_at_point(p, group_path) {
             Some((Some(_), halves)) => {
                 let mut edges: Vec<usize> = halves.iter().map(|h| h.0).collect();
                 edges.sort_unstable();

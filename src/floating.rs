@@ -349,6 +349,15 @@ impl Floating {
         self.pieces.iter().map(|p| p.shape_id).collect()
     }
 
+    /// 片の組の片のうち、番号が `keep` に無い片の番号
+    fn ids_not_in(&self, keep: &HashSet<ShapeId>) -> HashSet<ShapeId> {
+        self.layers
+            .iter()
+            .flat_map(|l| l.groups.iter().flat_map(|g| g.ids()))
+            .filter(|id| !keep.contains(id))
+            .collect()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
@@ -569,12 +578,7 @@ impl Floating {
     /// なので、同じ色でつながる所は1つになる：`cut_out`）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
     pub(crate) fn return_pieces(&mut self, stage: Stage<'_>, keep: &HashSet<ShapeId>) -> bool {
         debug_assert!(!self.modified);
-        let drop: HashSet<ShapeId> = self
-            .layers
-            .iter()
-            .flat_map(|l| l.groups.iter().flat_map(|g| g.ids()))
-            .filter(|id| !keep.contains(id))
-            .collect();
+        let drop = self.ids_not_in(keep);
         for l in &mut self.layers {
             let layer_id = l.layer_id;
             let kept = restricted_groups(&l.groups, keep, stage.scope);
@@ -619,12 +623,7 @@ impl Floating {
         keep: &HashSet<ShapeId>,
         scope: &[u64],
     ) -> Result<Floating, Unplaceable> {
-        let drop: HashSet<ShapeId> = self
-            .layers
-            .iter()
-            .flat_map(|l| l.groups.iter().flat_map(|g| g.ids()))
-            .filter(|id| !keep.contains(id))
-            .collect();
+        let drop = self.ids_not_in(keep);
         let parts = self
             .layers
             .iter()

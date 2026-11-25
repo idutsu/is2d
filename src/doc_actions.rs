@@ -64,6 +64,10 @@ pub(crate) trait ActionHost {
     fn notify_info(&mut self, message: impl Into<String>) {
         show_notice(self.toast_mut(), NoticeKind::Info, message);
     }
+
+    fn notify_warning(&mut self, message: impl Into<String>) {
+        show_notice(self.toast_mut(), NoticeKind::Warning, message);
+    }
 }
 
 /// ドキュメント状態または編集セッションを変更するすべての操作を表す列挙型
