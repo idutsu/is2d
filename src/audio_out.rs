@@ -8,9 +8,10 @@
 //! （`Output::Clock`。鳴らさない）ので、コマの決め方は装置の有る無しによらず1つ
 //!
 //! 装置は、鳴らし始めるときに決める（`AudioOut::follow_default_device`）：OS の既定の出力の装置が、開いた（開こうとした）
-//! ものと違えば、その場で開き直し、遅れもそのとき聞く。開けなければ、その装置に替わるまで時計で数える。起動のときに
-//! 装置が無いときも、装置が使えなくなったときも、同じ決まりで、次に既定の装置が替わった（つないだ・OS が切り替えた）
-//! ときから鳴る
+//! ものと違えば、その場で開き直し、遅れもそのとき聞く。開けなければ、その装置に替わるまで時計で数える。開いていた装置が
+//! 使えなくなったら開いた記録を消すので、同じ装置をつなぎ直したときも、次に鳴らし始めるときに開き直す。起動のときに
+//! 装置が無いときも、装置が使えなくなったときも、同じ決まりで、次に既定の装置が替わった（つないだ・つなぎ直した・OS が
+//! 切り替えた）ときから鳴る
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -342,9 +343,14 @@ impl AudioOut {
                     base: self.shared.played.load(Ordering::Relaxed).saturating_sub(ahead),
                 };
                 self.running = false;
+                // 開いていた装置が使えなくなったので、開いた記録を消す：次に鳴らし始めるとき、既定の装置の名前が同じでも
+                // （同じイヤホンを外して付け直した）開き直す（`follow_default_device`。レビュー d91cd4c の N-4001 の残り：
+                // 41766f9 の N-4001）。開こうとして開けなかったとき（`Output::Clock` のまま知らせを受けたとき）は消さない
+                // （同じ装置で鳴らすたびに開こうとしない）
+                self.tried = None;
             }
             return Some(format!(
-                "音の出力が使えません（{why}）。再生はできますが、音は鳴りません（ほかの出力の装置に切り替えると、次に鳴らすときから鳴ります）"
+                "音の出力が使えません（{why}）。再生はできますが、音は鳴りません（出力の装置をつなぎ直すか、ほかの装置に切り替えると、次に鳴らすときから鳴ります）"
             ));
         }
         if let Output::Device(stream) = &self.output {
@@ -474,5 +480,8 @@ mod tests {
         assert!(needs_reopen(Some(&speakers), &None));
         assert!(!needs_reopen(Some(&None), &None));
         assert!(needs_reopen(Some(&None), &earphones));
+        // 開いていたイヤホンが使えなくなった（開いた記録を消す：`AudioOut::tick`）あと、同じイヤホンをつなぎ直した：名前は同じ
+        // でも開き直す（41766f9 の N-4001）
+        assert!(needs_reopen(None, &earphones));
     }
 }
