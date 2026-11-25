@@ -103,22 +103,38 @@ pub(crate) const fn tool_label(tool: Tool) -> &'static str {
     }
 }
 
-/// ツール種別に対応する左ツールバー用ツールチップ文言（Layer 4 プレゼンテーション定義）
-pub(crate) const fn tool_tooltip(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Select => {
-            "選択ツール (V) - クリックで選択 / 範囲スライス選択 / 輪郭ドラッグで粘土変形"
-        }
-        Tool::Transform => {
-            "自由変形ツール (Q) - バウンディングボックスで拡大縮小・回転・基準点移動"
-        }
-        Tool::Brush => "ブラシツール (B) - ベクター塗りストロークを描画",
-        Tool::Pencil => "鉛筆ツール (Y) - 線だけを引く（塗りの上に引くと塗りが線で分かれる）",
-        Tool::Eraser => "消しゴムツール (E) - ベクターシェイプを削る・分割する",
-        Tool::Bucket => "バケツ塗りツール (K) - 閉じた隙間領域の塗りつぶし / 既存塗りの色変更",
-        Tool::InkBottle => "インクボトルツール (S) - 塗りの輪郭に線を付ける / 線の色と太さを変える",
-        Tool::Eyedropper => "スポイトツール (I) - クリックした図形の色を抽出してブラシへ設定",
-    }
+/// ツール種別に対応する左ツールバー用ツールチップ文言（Layer 4 プレゼンテーション定義）。キーは、ツールのキーの決まり
+/// （`Tool::shortcut_key`）から出す（キーを変えたときに吹き出しだけ古いまま残らないように）
+pub(crate) fn tool_tooltip(tool: Tool) -> String {
+    let (name, what) = match tool {
+        Tool::Select => (
+            "選択ツール",
+            "クリックで選択 / 範囲スライス選択 / 輪郭ドラッグで粘土変形",
+        ),
+        Tool::Transform => (
+            "自由変形ツール",
+            "バウンディングボックスで拡大縮小・回転・基準点移動",
+        ),
+        Tool::Brush => ("ブラシツール", "ベクター塗りストロークを描画"),
+        Tool::Pencil => (
+            "鉛筆ツール",
+            "線だけを引く（塗りの上に引くと塗りが線で分かれる）",
+        ),
+        Tool::Eraser => ("消しゴムツール", "ベクターシェイプを削る・分割する"),
+        Tool::Bucket => (
+            "バケツ塗りツール",
+            "閉じた隙間領域の塗りつぶし / 既存塗りの色変更",
+        ),
+        Tool::InkBottle => (
+            "インクボトルツール",
+            "塗りの輪郭に線を付ける / 線の色と太さを変える",
+        ),
+        Tool::Eyedropper => (
+            "スポイトツール",
+            "クリックした図形の色を抽出してブラシへ設定",
+        ),
+    };
+    format!("{name} ({}) - {what}", tool.shortcut_key().name())
 }
 
 // ============================================================================
@@ -295,7 +311,7 @@ fn draw_left_main_tool_buttons(
             btn_size,
             tool_settings.tool == tool,
             tool_icon(tool),
-            tool_tooltip(tool),
+            &tool_tooltip(tool),
         ) {
             actions.push(UiAction::Doc(Action::SetTool { tool }));
         }
@@ -732,7 +748,10 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 選択削除", icons::DELETE))
                     .min_size(Vec2::new(cell_w, 28.0)),
             )
-            .on_hover_text("選択中の図形を削除 (Backspace / Delete)")
+            .on_hover_text(format!(
+                "選択中の図形を削除 ({})",
+                crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::DeleteSelection)))
+            ))
             .clicked()
         {
             actions.push(UiAction::Doc(Action::DeleteSelection));

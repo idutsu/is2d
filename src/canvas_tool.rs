@@ -44,10 +44,10 @@ pub(crate) enum Tool {
     Select,     // V キー
     Transform,  // Q キー（自由変形ツール）
     Brush,      // B キー
-    Pencil,     // Y キー（鉛筆：線だけを引く）
+    Pencil,     // S キー（鉛筆：線だけを引く）
     Eraser,     // E キー
     Bucket,     // K キー
-    InkBottle,  // S キー（インクボトル：面の輪郭や線に、線を乗せる）
+    InkBottle,  // O キー（インクボトル：面の輪郭や線に、線を乗せる）
     Eyedropper, // I キー（スポイトツール）
 }
 

@@ -7358,6 +7358,18 @@ fn anchor_edit_modes_toggle_with_a_d_f() {
     assert!(app.tab().view.show_wireframe, "ほかのツールから A を押して表示が OFF になった");
 }
 
+/// ボタンの吹き出しのキーは、キーの決まりから出す（キーを変えたとき、吹き出しだけ古いキーのまま残っていた：鉛筆 (Y)・
+/// インクボトル (S)・選択削除に G が無い。説明書の確かめで見つかった）
+#[test]
+fn tooltips_show_the_current_keys() {
+    for tool in Tool::ALL {
+        let tip = crate::panels::tool_tooltip(tool);
+        assert!(tip.contains(&format!("({})", tool.shortcut_key().name())), "{tool:?} の吹き出しのキーが違う：{tip}");
+    }
+    let delete = crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(crate::doc_actions::Action::DeleteSelection)));
+    assert_eq!(delete, "Backspace / Delete / G");
+}
+
 /// ツールのキー：鉛筆は S、インクボトルは O（利用者が決めた。Y は使わない。オニオンスキンのキーは無い）
 #[test]
 fn pencil_is_s_and_ink_bottle_is_o() {

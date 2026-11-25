@@ -8,7 +8,6 @@ use eframe::egui::{self, Key};
 use crate::canvas_tool::{active_scope_layer_id, Clipboard, Tab, View, ViewSwitch};
 use crate::doc_actions::Action;
 use crate::panels::UiAction;
-#[cfg(not(target_os = "macos"))]
 use crate::panels::MOD_KEY;
 
 /// メニューバーに並ぶメニュー
@@ -68,9 +67,8 @@ impl Shortcut {
         }
     }
 
-    /// 窓の中のメニュー（Windows・Linux）に出す文字（例：`Ctrl+Shift+S`・`Backspace`）。Mac の OS のメニューは、
-    /// OS が `Cmd` のショートカットを記号で出す
-    #[cfg(not(target_os = "macos"))]
+    /// 窓の中のメニュー（Windows・Linux）とボタンの吹き出しに出す文字（例：`Ctrl+Shift+S`・`Backspace`）。Mac の OS の
+    /// メニューは、OS が `Cmd` のショートカットを記号で出す
     pub(crate) fn text(self) -> String {
         let mut parts = Vec::new();
         if self.command {
@@ -416,6 +414,18 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ToggleView(ViewSwitch::OnionSkin),
     },
 ];
+
+/// `is` に当たる項目のキー（メニューに出すものと出さないもの）を「 / 」で並べた文字（ボタンの吹き出しに出す。キーの決まりは
+/// 表の1か所）
+pub(crate) fn keys_text(is: impl Fn(&UiAction) -> bool) -> String {
+    COMMANDS
+        .iter()
+        .filter(|c| is(&c.action))
+        .flat_map(|c| c.shortcut.into_iter().chain(c.aliases.iter().copied()))
+        .map(Shortcut::text)
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
 
 /// キー `shortcut` で動く項目の番号。OS のメニューがキーを受け取るとき（`os_menu_has_keys`）は、そのキーは含めない
 pub(crate) fn command_for_key(shortcut: Shortcut, os_menu_has_keys: bool) -> Option<usize> {

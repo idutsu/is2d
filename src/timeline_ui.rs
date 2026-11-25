@@ -851,7 +851,7 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
 fn draw_control_bar_onion_controls(tab: &mut Tab, ui: &mut egui::Ui) {
     if ui
         .selectable_label(tab.view.onion_skin_enabled, icons::ONION_SKIN)
-        .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替 (O)")
+        .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替")
         .clicked()
     {
         tab.view.onion_skin_enabled = !tab.view.onion_skin_enabled;
