@@ -87,7 +87,7 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
 }
 
 /// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
-pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) {
+pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
     if apply(host, Action::EnterGroupAt { pt }) {
         return;
     }
@@ -96,15 +96,16 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point) 
         .scene()
         .topmost_shape_at(pt, &host.tab().session.editing_group_path);
     if hit.is_some() {
-        apply(host, Action::SelectConnectedAt { pt });
+        apply(host, Action::SelectConnectedAt { pt, add: shift_held });
     } else {
         apply(host, Action::ExitGroupSteps { steps: 1 });
     }
 }
 
 /// ダブルクリックで選ぶ：点 `pt` のいちばん上の、編集できるレイヤーの今の階層の生の図形（面か線）と、それにつながったもの
-/// （`LayerBase::connected_ids`）を選ぶ。そういう図形が無ければ何もしない
-pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point) -> bool {
+/// （`LayerBase::connected_ids`）を選ぶ。`add`（Shift を押したダブルクリック）なら今の選択に足し、そうでなければ今の選択と
+/// 入れ替える（Shift クリックで足すのと同じ）。そういう図形が無ければ何もしない
+pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point, add: bool) -> bool {
     let scope = tab.session.editing_group_path.clone();
     let scene = tab.scene();
     let Some(hit) = scene
@@ -121,7 +122,7 @@ pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point) -> bool {
         return false;
     };
     let ids = base.connected_ids(id, &scope);
-    if !clear_selection(tab) {
+    if !add && !clear_selection(tab) {
         return false;
     }
     let scene = tab.scene();
@@ -132,7 +133,11 @@ pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point) -> bool {
             })
         })
         .collect();
-    tab.session.set_selected_indices(picked);
+    if add {
+        tab.session.select_shape_indices(picked);
+    } else {
+        tab.session.set_selected_indices(picked);
+    }
     sync_timeline_layer_from_canvas_selection(tab);
     true
 }

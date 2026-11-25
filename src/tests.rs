@@ -6006,7 +6006,7 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
 
     // グループ内部の生シェイプ上の座標 (150, 100) をダブルクリックしても exit_current_group が呼ばれずグループ編集スコープに留まること
     let pt_on_raw = Point::new(150.0, 100.0);
-    tool_select::handle_canvas_double_click(&mut app, pt_on_raw);
+    tool_select::handle_canvas_double_click(&mut app, pt_on_raw, false);
     assert_eq!(
         app.session.editing_group_path,
         vec![gid],
@@ -6014,7 +6014,7 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
     );
     // 空白背景 (400, 400) をダブルクリックすると exit_current_group で親階層へ戻れること
     let pt_empty = Point::new(400.0, 400.0);
-    tool_select::handle_canvas_double_click(&mut app, pt_empty);
+    tool_select::handle_canvas_double_click(&mut app, pt_empty, false);
     assert!(app.session.editing_group_path.is_empty());
 }
 
@@ -20642,6 +20642,38 @@ fn the_selection_tint_is_drawn_above_every_shape() {
         .rposition(|c| *c == Some(green.color) || *c == Some(blue.color))
         .expect("線を描いていない");
     assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
+}
+
+/// Shift を押してダブルクリックすると、つながった線を今の選択に足す（前にダブルクリックで選んだ線は選んだまま。利用者の指摘：
+/// 前は、ダブルクリックがいつも今の選択を外してから選んだので、前の線が選択から外れた）。Shift を押さなければ入れ替える
+#[test]
+fn shift_double_click_adds_connected_lines() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let ink = EdgeStroke { color: Color32::BLACK, width: 8 };
+    let wave = |y: f64| -> Vec<Point> {
+        (0..=200).map(|i| { let x = 100.0 + 3.0 * i as f64; Point::new(x, y + 40.0 * (x / 50.0).sin()) }).collect()
+    };
+    assert!(apply(&mut app, Action::PencilStroke { points: wave(200.0), stroke: ink }));
+    assert!(apply(&mut app, Action::PencilStroke { points: wave(500.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let lines_of = |app: &Is2dApp, upper: bool| -> Vec<u64> {
+        app.scene().iter().filter(|s| s.line.is_some() && (s.bounding_box().y1 < 350.0) == upper).map(|s| s.shape_id).collect()
+    };
+    let (a, b) = (lines_of(&app, true), lines_of(&app, false));
+    assert!(a.len() >= 2 && b.len() >= 2, "つなぎ目のある線にならなかった");
+    let on = |y: f64| Point::new(400.0, y + 40.0 * (400.0f64 / 50.0).sin());
+    let selected = |app: &Is2dApp, ids: &[u64]| ids.iter().filter(|id| app.session.selection.shapes.contains(id)).count();
+    tool_select::handle_canvas_double_click(&mut app, on(200.0), false);
+    assert_eq!(selected(&app, &a), a.len(), "1本目がまとめて選ばれていない");
+    tool_select::handle_canvas_double_click(&mut app, on(500.0), true);
+    assert_eq!(selected(&app, &a), a.len(), "Shift のダブルクリックで、前の線が選択から外れた");
+    assert_eq!(selected(&app, &b), b.len(), "Shift のダブルクリックで、2本目がまとめて選ばれていない");
+    tool_select::handle_canvas_double_click(&mut app, on(500.0), false);
+    assert_eq!(selected(&app, &a), 0, "Shift を押さないダブルクリックは選び直す");
+    assert_eq!(selected(&app, &b), b.len());
 }
 
 /// 線で囲んだ塗りを Alt で複製して動かし、そのままグループにすると、選択は新しいグループの全部（塗りも線も）になり、続けて
@@ -39281,11 +39313,11 @@ mod strokes {
         }
         // 線をダブルクリック：角でつながった4辺をまとめて選ぶ
         let mut app = inked_square_app();
-        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 100.5) }));
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 100.5), add: false }));
         assert_eq!(app.session.selection.shapes.len(), 4);
         // ダブルクリックで塗りと輪郭の線を選んで消す：何も残らない
         let mut app = inked_square_app();
-        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 200.0) }));
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 200.0), add: false }));
         assert_eq!(app.session.selection.shapes.len(), 5);
         assert!(apply(&mut app, Action::DeleteSelection));
         assert_eq!(counts(&app), (0, 0));
@@ -39359,7 +39391,7 @@ mod strokes {
         assert!(apply(&mut app, Action::DrawLines { segs: vec![line(c, Point::new(300.0, 400.0), thin)] }));
         assert!(apply(&mut app, Action::DrawLines { segs: vec![line(Point::new(600.0, 300.0), Point::new(700.0, 300.0), INK)] }));
         assert_eq!(counts(&app).1, 5);
-        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5) }));
+        assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5), add: false }));
         assert_eq!(app.session.selection.shapes.len(), 3);
         // クリックは、辺1本だけ
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 300.5) }));

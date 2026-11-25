@@ -126,7 +126,7 @@ pub(crate) fn handle_select_tool_input(
             let alt_held = ui.input(|i| i.modifiers.alt);
             if host.tab_mut().view.double_clicked(ui.ctx(), response) {
                 if let Some(pt) = mouse_pt {
-                    handle_canvas_double_click(host, pt);
+                    handle_canvas_double_click(host, pt, shift_held);
                 }
                 return;
             }

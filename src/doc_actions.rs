@@ -145,9 +145,11 @@ pub(crate) enum Action {
     EnterGroupAt {
         pt: Point,
     },
-    /// ダブルクリック：点の生の図形と、つながったものを選ぶ（線なら、つながった同じ線。塗りなら、輪郭の線も）
+    /// ダブルクリック：点の生の図形と、つながったものを選ぶ（線なら、つながった同じ線。塗りなら、輪郭の線も）。`add`（Shift）
+    /// なら、今の選択に足す
     SelectConnectedAt {
         pt: Point,
+        add: bool,
     },
     ExitGroupSteps {
         steps: usize,
@@ -643,7 +645,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::Arrange { mode } => prepare_arrange_selected(tab, mode, |tab| push_undo(tab, None)),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
-        Action::SelectConnectedAt { pt } => crate::select_ops::select_connected_at(tab, pt),
+        Action::SelectConnectedAt { pt, add } => crate::select_ops::select_connected_at(tab, pt, add),
         Action::ExitGroupSteps { steps } => {
             let mut exited = false;
             for _ in 0..steps {

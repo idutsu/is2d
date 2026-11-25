@@ -32,7 +32,7 @@ pub(crate) fn handle_transform_tool_input(
             {
                 apply(host, Action::ResetTransformPivot);
             } else {
-                handle_canvas_double_click(host, pt);
+                handle_canvas_double_click(host, pt, ui.input(|i| i.modifiers.shift));
             }
         }
         return;
