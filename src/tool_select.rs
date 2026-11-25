@@ -18,14 +18,15 @@ use crate::vector_engine::{FillShape, LayerId};
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
 
-/// 選んだ生の図形に、半透明の選択の色を重ねて描く（`FillShape::selection_screen_mesh`）
-pub(crate) fn draw_selection_overlay(tab: &Tab, painter: &egui::Painter, scene_idx: usize) {
-    let Some(shape) = tab.scene().get(scene_idx) else {
-        return;
-    };
-    painter.add(egui::Shape::mesh(
-        shape.selection_screen_mesh(tab.view.zoom(), tab.view.pan),
-    ));
+/// 選んだ生の図形（画面の図形の番号 `picked`）を、選択の色で塗る（`FillShape::selection_screen_mesh`。同じ段の図形を描き
+/// 終えた所で呼ぶ：`panels::draw_editable_layer_shapes`）
+pub(crate) fn draw_selection_overlays(tab: &Tab, painter: &egui::Painter, picked: &[usize]) {
+    let scene = tab.scene();
+    for &idx in picked {
+        if let Some(shape) = scene.get(idx) {
+            painter.add(egui::Shape::mesh(shape.selection_screen_mesh(tab.view.zoom(), tab.view.pan)));
+        }
+    }
 }
 
 pub(crate) fn draw_shape_contour_lines(

@@ -1817,6 +1817,9 @@ pub(crate) fn draw_tool_cursor_and_feedback(
     }
 }
 
+/// 選んだグループ・シンボルの枠：（グループの番号, 形の外接矩形, 形が無いときの外接矩形, シンボルの基準点）
+type SelectedBox = (u64, Option<KRect>, KRect, Option<Point>);
+
 /// キャンバス上の全シェイプ（オニオンスキン・全可視レイヤー合成）、選択オーバーレイ、グループ選択枠、自由変形ボックス、矩形選択枠、およびストロークプレビューを描画
 pub(crate) fn draw_canvas_contents(
     tab: &Tab,
@@ -1852,7 +1855,7 @@ pub(crate) fn draw_canvas_contents(
     // 1. 下層レイヤーから上層レイヤーへ順に合成描画（`tab.scene().shapes()` はレイヤー順に整列されているため単一カーソルで O(N) 走査）
     let tl = tab.active_timeline();
     let num_layers = tl.layers.len();
-    let mut selected_group_boxes: Vec<(u64, Option<KRect>, KRect, Option<Point>)> = Vec::new();
+    let mut selected_group_boxes: Vec<SelectedBox> = Vec::new();
     let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
     let curr_f = tl.current_frame;
     let scene = tab.scene();
@@ -1976,7 +1979,10 @@ fn draw_shapes_outside_group(
 }
 
 /// 編集可能レイヤー1枚分の図形スライス範囲 `range` のうち、編集しているグループの中の図形を描画し、選択中のグループ／
-/// シンボル外枠情報を集計する（グループの外の図形は、グループの中を編集しているとき先に描く：`draw_shapes_outside_group`）
+/// シンボル外枠情報を集計する（グループの外の図形は、グループの中を編集しているとき先に描く：`draw_shapes_outside_group`）。
+/// 選んだ生の図形は、同じ段（同じレイヤー・同じグループの階層の、塗りどうし・線どうし：`selection_tier`）の図形を描き
+/// 終えた所で、選択の色で塗る（同じ段の中ではいちばん上に見え、交わる線に隠されない。線は塗りより上なので、選んだ塗りが
+/// 線を覆わない。上のレイヤー・グループの図形には隠される。利用者が決めた）
 fn draw_editable_layer_shapes(
     tab: &Tab,
     tool: &ToolSettings,
@@ -1984,7 +1990,7 @@ fn draw_editable_layer_shapes(
     range: std::ops::Range<usize>,
     view_world_rect: KRect,
     (is_sel, has_sel): (&[bool], bool),
-    selected_group_boxes: &mut Vec<(u64, Option<KRect>, KRect, Option<Point>)>,
+    selected_group_boxes: &mut Vec<SelectedBox>,
 ) {
     let show_wf = tool.tool == Tool::Select
         && (tab.view.show_wireframe || tool.select_sub_mode != SelectSubMode::Reshape);
@@ -1996,6 +2002,9 @@ fn draw_editable_layer_shapes(
     );
     let zoom = tab.view.zoom();
     let pan = tab.view.pan;
+    // 今の段と、その段で選択の色を塗る図形（段が変わる所と、範囲の終わりで塗る）
+    let mut tier: Option<SelectionTier> = None;
+    let mut tinted: Vec<usize> = Vec::new();
 
     for idx in range {
         let Some(shape) = tab.scene().get(idx) else {
@@ -2003,6 +2012,12 @@ fn draw_editable_layer_shapes(
         };
         if !shape.is_in_editing_scope(&tab.session.editing_group_path) {
             continue;
+        }
+        let here = selection_tier(shape);
+        if tier != Some(here) {
+            crate::tool_select::draw_selection_overlays(tab, artwork_painter, &tinted);
+            tinted.clear();
+            tier = Some(here);
         }
         let shape_sel = has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
@@ -2049,9 +2064,19 @@ fn draw_editable_layer_shapes(
             );
         }
         if shape_sel && sel_gid.is_none() {
-            crate::tool_select::draw_selection_overlay(tab, gizmo_painter, idx);
+            tinted.push(idx);
         }
     }
+    crate::tool_select::draw_selection_overlays(tab, artwork_painter, &tinted);
+}
+
+/// 選択の色を塗る段：レイヤー・グループの階層・線か（同じ地図の図形は、面の図形を全部並べたあとに線の図形を並べる：
+/// `LayerBase::drawn_shapes`。画面の図形はこの並びのまま重なり順に並ぶので、同じ段の図形は続いて並ぶ）
+type SelectionTier<'a> = (u64, &'a [u64], bool);
+
+/// 図形 `shape` の選択の色を塗る段（`draw_editable_layer_shapes`）
+fn selection_tier(shape: &crate::vector_engine::FillShape) -> SelectionTier<'_> {
+    (shape.layer_id, &shape.group_path, shape.line.is_some())
 }
 
 /// 選択中のグループ塊およびシンボルインスタンス（水色枠＋シンボルは基準点 `＋` マーク）、シンボル編集中の基準点を描画。
@@ -2059,7 +2084,7 @@ fn draw_editable_layer_shapes(
 fn draw_selected_group_and_symbol_boxes(
     tab: &Tab,
     painter: &egui::Painter,
-    selected_group_boxes: &[(u64, Option<KRect>, KRect, Option<Point>)],
+    selected_group_boxes: &[SelectedBox],
     boxes: bool,
 ) {
     for &(_, geom_bbox, fallback_bbox, sym_reg) in selected_group_boxes {

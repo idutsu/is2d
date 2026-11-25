@@ -20602,6 +20602,194 @@ fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
     }
 }
 
+/// 選んだ生の図形の選択の色は、同じ段（同じレイヤー・同じ階層の線どうし）の図形を描き終えた所で塗る：交わる線に隠されず、
+/// 同じ段の中ではいちばん上に見える（利用者の指摘。前は選んだ図形を描いた直後に重ねたので、あとから描く線の下に回っていた）
+#[test]
+fn the_selection_tint_is_drawn_above_every_shape() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let green = EdgeStroke { color: Color32::from_rgb(40, 180, 90), width: 8 };
+    let blue = EdgeStroke { color: Color32::from_rgb(55, 135, 245), width: 8 };
+    let across: Vec<Point> = (0..=60).map(|i| Point::new(100.0 + 5.0 * i as f64, 200.0)).collect();
+    let down: Vec<Point> = (0..=60).map(|i| Point::new(250.0, 50.0 + 5.0 * i as f64)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: across, stroke: green }));
+    assert!(apply(&mut app, Action::PencilStroke { points: down, stroke: blue }));
+    // 画面の図形の並び（描く順）でいちばん下の線を、交わる所から離れた所で選ぶ
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let low = app.scene().iter().find(|s| s.line.is_some()).unwrap().clone();
+    let q = low.center_curve().unwrap();
+    let pick = if (q.eval(0.0) - Point::new(250.0, 200.0)).hypot() > (q.eval(1.0) - Point::new(250.0, 200.0)).hypot() {
+        q.eval(0.1)
+    } else {
+        q.eval(0.9)
+    };
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: pick }));
+    assert!(app.session.selection.contains_shape(app.scene().iter().find(|s| s.shape_id == low.shape_id).unwrap()));
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    let tint = crate::vector_engine::selection_color(low.color);
+    let first_color = |s: &egui::epaint::ClippedShape| match &s.shape {
+        egui::Shape::Mesh(m) => m.vertices.first().map(|v| v.color),
+        _ => None,
+    };
+    let colors: Vec<Option<Color32>> = out.shapes.iter().map(first_color).collect();
+    let tint_at = colors.iter().position(|c| *c == Some(tint)).expect("選択の色を描いていない");
+    let last_line = colors
+        .iter()
+        .rposition(|c| *c == Some(green.color) || *c == Some(blue.color))
+        .expect("線を描いていない");
+    assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
+}
+
+/// 線で囲んだ塗りの、塗りと線1本を一緒に選んでも、選んでいない線は細く見えない：選んだ塗りの選択の色は、同じ段（同じ
+/// レイヤー・同じ階層の塗り）の最後に塗り、線はそのあとに描く（線は塗りより上）。前は選択の色を全部の図形の上に塗ったので、
+/// 塗りの上に乗っている線の内側の半分を、選んだ塗りの色が覆った（利用者の指摘）
+#[test]
+fn a_selected_fill_does_not_cover_the_lines_on_it() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    let green = Color32::from_rgb(120, 175, 160);
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 500.0, 500.0, green)]);
+    let ink = EdgeStroke { color: Color32::BLACK, width: 10 };
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(350.0, 350.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(350.0, 350.0) }));
+    let left = app.scene().iter().position(|s| s.line.is_some() && s.contains_point(Point::new(200.0, 350.0))).unwrap();
+    assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: left }));
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    let first_color = |s: &egui::epaint::ClippedShape| match &s.shape {
+        egui::Shape::Mesh(m) => m.vertices.first().map(|v| v.color),
+        _ => None,
+    };
+    let colors: Vec<Option<Color32>> = out.shapes.iter().map(first_color).collect();
+    let fill_tint = colors
+        .iter()
+        .position(|c| *c == Some(crate::vector_engine::selection_color(green)))
+        .expect("塗りの選択の色を描いていない");
+    let line_tint = colors
+        .iter()
+        .position(|c| *c == Some(crate::vector_engine::selection_color(ink.color)))
+        .expect("線の選択の色を描いていない");
+    let black: Vec<usize> = (0..colors.len()).filter(|&i| colors[i] == Some(Color32::BLACK)).collect();
+    assert!(!black.is_empty(), "選んでいない線を描いていない");
+    assert!(black.iter().all(|&i| i > fill_tint), "選んだ塗りの色が、選んでいない線を覆う");
+    assert!(black.iter().all(|&i| i < line_tint), "選んだ線の色が、同じ段の線の下になる");
+}
+
+/// 線の図形の選択の色は、両端を丸くした帯：同じ線が続くつなぎ目でも、選んだ区間の端が丸く見える（利用者が決めた）。
+/// 描く線そのものは、つなぎ目で切れたまま（隣の線とつながって見える）。両端がもともと丸い線は、描くメッシュと同じ
+#[test]
+fn a_selected_line_shows_round_ends_even_at_joints() {
+    use crate::vector_stroke::LineEnd;
+    let inside = |mesh: &egui::Mesh, p: Point| {
+        mesh.indices.chunks_exact(3).any(|t| {
+            let v = |i: u32| {
+                let q = mesh.vertices[i as usize].pos;
+                Point::new(f64::from(q.x), f64::from(q.y))
+            };
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            let side = |p1: Point, p2: Point| (p2 - p1).cross(p - p1);
+            let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+            !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+        })
+    };
+    let stroke = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 10 };
+    let center = QuadBez::new((0.0, 0.0), (50.0, 0.0), (100.0, 0.0));
+    let make = |ends: [LineEnd; 2]| {
+        let (ext, holes, mesh) = crate::planar_map::line_band(center, stroke, ends).unwrap();
+        FillShape::new(stroke.color, ext, holes).with_line(stroke, center, ends).with_mesh(mesh)
+    };
+    // 終わりの端がつなぎ目（隣の線へ扇を足さない側）
+    let joined = make([LineEnd::Cap, LineEnd::Open]);
+    let beyond = Point::new(103.0, 0.0);
+    for zoom in [1.0f32, 16.0] {
+        // 選択の色のメッシュは画面の座標（倍率をかけた所）
+        let on_screen = Point::new(beyond.x * f64::from(zoom), beyond.y * f64::from(zoom));
+        assert!(inside(&joined.selection_screen_mesh(zoom, Vec2::ZERO), on_screen), "倍率 {zoom}：選択の色の端が丸くない");
+        assert!(!inside(&joined.view_mesh(zoom), beyond), "倍率 {zoom}：描く線まで丸くなった");
+    }
+    let capped = make([LineEnd::Cap, LineEnd::Cap]);
+    assert_eq!(
+        capped.selection_screen_mesh(1.0, Vec2::ZERO).vertices.len(),
+        capped.fill_mesh().vertices.len(),
+        "両端が丸い線は、描くメッシュをそのまま使う"
+    );
+}
+
+/// つながった同じ線をまとめて選んだとき、つなぎ目で丸い端どうしが重なっても、選択の色は濃くならない（選択の色は図形の
+/// 色に青を重ねた不透明な色なので、重なった所も同じ色：`selection_color`。前は半透明の青を重ねたので、2回塗られて濃い丸に
+/// 見えた）
+#[test]
+fn joined_selected_lines_do_not_double_the_tint_at_joints() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let ink = EdgeStroke { color: Color32::BLACK, width: 16 };
+    let wave: Vec<Point> = (0..=200)
+        .map(|i| {
+            let x = 100.0 + 3.0 * i as f64;
+            Point::new(x, 300.0 + 80.0 * (x / 60.0).sin())
+        })
+        .collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: wave, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectAll));
+    let lines: Vec<QuadBez> = app.scene().iter().filter_map(|s| s.center_curve()).collect();
+    assert!(lines.len() >= 3, "つなぎ目のある線にならなかった（{} 本）", lines.len());
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    let tint = crate::vector_engine::selection_color(ink.color);
+    assert_eq!(tint.a(), 255, "不透明な線を選んだ色は不透明");
+    let tints: Vec<std::sync::Arc<egui::Mesh>> = out
+        .shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            egui::Shape::Mesh(m) if m.vertices.first().is_some_and(|v| v.color == tint) => Some(m.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!tints.is_empty(), "選択の色を描いていない");
+    let (zoom, pan) = (app.view.zoom(), app.view.pan);
+    let covers = |m: &egui::Mesh, p: Point| {
+        let p = Point::new(p.x * f64::from(zoom) + f64::from(pan.x), p.y * f64::from(zoom) + f64::from(pan.y));
+        m.indices.chunks_exact(3).any(|t| {
+            let v = |i: u32| {
+                let q = m.vertices[i as usize].pos;
+                Point::new(f64::from(q.x), f64::from(q.y))
+            };
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            let side = |p1: Point, p2: Point| (p2 - p1).cross(p - p1);
+            let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+            !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+        })
+    };
+    let mut joints = 0;
+    for a in &lines {
+        for b in &lines {
+            if a.p2 != b.p0 {
+                continue;
+            }
+            joints += 1;
+            // つなぎ目から、続く線の上を太さの 1/4 だけ進んだ点
+            let t = (1..1000).map(|k| k as f64 / 1000.0).find(|&t| (b.eval(t) - b.p0).hypot() >= 4.0).unwrap();
+            let p = b.eval(t);
+            // その点を覆う選択の色は、どれも同じ不透明な色（何回重なっても、見える色は1回のときと同じ）
+            let covering: Vec<_> = tints.iter().filter(|m| covers(m, p)).collect();
+            assert!(!covering.is_empty(), "つなぎ目 {:?} の先が選択の色で塗られていない", b.p0);
+            assert!(covering.iter().all(|m| m.vertices.iter().all(|v| v.color == tint)), "つなぎ目 {:?}", b.p0);
+        }
+    }
+    assert!(joints > 0, "つなぎ目が無い");
+}
+
 /// 拡大したときの曲線のなめらかさ（設計：claude/拡大したときの曲線のなめらかさの設計_41766f9.md）：画面に描くメッシュの段は、
 /// 画面でのずれ（許容 × 倍率）が画素の 1/4 を超えないいちばん小さい段。6.25 倍までは図形が持つメッシュのまま
 #[test]

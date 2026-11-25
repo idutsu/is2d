@@ -358,6 +358,8 @@ pub(crate) struct FillShape {
     fill_mesh: OnceLock<Arc<Mesh>>,
     /// 拡大して描くときの、`fill_mesh` より細かいメッシュ（段と一緒に1つだけ：`view_mesh`）
     zoom_mesh: ZoomMesh,
+    /// 線の図形の選択の色を塗る、両端を丸くした帯のメッシュ（段と一緒に1つだけ：`selection_mesh`）
+    round_mesh: ZoomMesh,
     /// `fill_mesh` を作ったあとに、その頂点を写した変換の最大の拡大率を掛け合わせたもの（メッシュのずれは、作る許容の
     /// この倍まで：`keeps_mesh`）。メッシュが無いときは 1
     mesh_stretch: f64,
@@ -382,6 +384,7 @@ impl FillShape {
             bbox: KRect::ZERO,
             fill_mesh: OnceLock::new(),
             zoom_mesh: ZoomMesh::default(),
+            round_mesh: ZoomMesh::default(),
             mesh_stretch: 1.0,
             hit_bez_path: OnceLock::new(),
         };
@@ -426,37 +429,49 @@ impl FillShape {
         if level == 0 {
             return Arc::clone(self.fill_mesh());
         }
-        let mut slot = self.zoom_mesh.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((l, m)) = &*slot {
-            if *l == level {
-                return Arc::clone(m);
-            }
-        }
-        let m = Arc::new(self.mesh_with_tol(MESH_TOL * 0.5f64.powi(level as i32)));
-        *slot = Some((level, Arc::clone(&m)));
-        m
+        self.zoom_mesh.get_or_make(level, || match self.line {
+            Some(_) => self.band_mesh(level_tol(level), self.line_ends),
+            None => tessellate_contours_to_mesh(
+                &self.exterior,
+                &self.holes,
+                self.color,
+                self.fill_rule(),
+                level_tol(level),
+            ),
+        })
     }
 
-    /// 許容 `tol`（文書の座標）で作ったメッシュ。面の図形は輪郭の曲線から（`fill_mesh` と同じ作り方）。線の図形は、輪郭が
-    /// 帯を `MESH_TOL` で折れ線にしたものなので、線の形を作った座標で中心の曲線から帯を作り直し（`quad_band`。許容は
-    /// 変換の拡大率で割ったもの）、今の座標へ写す
-    fn mesh_with_tol(&self, tol: f64) -> Mesh {
-        match (self.line, self.center) {
-            (Some(stroke), Some(c)) => {
-                let s = max_scale(self.line_xform);
-                let local_tol = if s > 0.0 { tol / s } else { tol };
-                let (_, mut mesh) = crate::vector_stroke::quad_band(
-                    c,
-                    stroke.width as f64 / 2.0,
-                    local_tol,
-                    self.color,
-                    self.line_ends,
-                );
-                transform_mesh_vertices_in_place(&mut mesh.vertices, self.line_xform.as_coeffs());
-                mesh
-            }
-            _ => tessellate_contours_to_mesh(&self.exterior, &self.holes, self.color, self.fill_rule(), tol),
+    /// 選択の色を塗るメッシュ（文書の座標。倍率 `zoom` の段の細かさ）：線の図形は、両端を丸くした帯（同じ線が続くつなぎ目
+    /// でも、選んだ区間の端が丸く見える。利用者が決めた。選んだ線どうしで丸い端が重なっても、選択の色は不透明なので濃く
+    /// ならない：`selection_color`）、面の図形は描くメッシュ（`view_mesh`）。両端がもともと丸い線は、描くメッシュを使う
+    fn selection_mesh(&self, zoom: f32) -> Arc<Mesh> {
+        let round = [crate::vector_stroke::LineEnd::Cap; 2];
+        if self.line.is_none() || self.line_ends == round {
+            return self.view_mesh(zoom);
         }
+        let level = mesh_level(zoom);
+        self.round_mesh.get_or_make(level, || self.band_mesh(level_tol(level), round))
+    }
+
+    /// 線の図形の帯のメッシュ（文書の座標）：線の形を作った座標で、中心の曲線と太さと端の形 `ends` から、許容 `tol` を
+    /// 変換の拡大率で割った許容で帯を作り（`quad_band`）、今の座標へ写す。線の図形の輪郭は帯を `MESH_TOL` で折れ線に
+    /// したものなので、細かくするときは輪郭からでなく、ここで作り直す
+    fn band_mesh(&self, tol: f64, ends: [crate::vector_stroke::LineEnd; 2]) -> Mesh {
+        let (Some(stroke), Some(c)) = (self.line, self.center) else {
+            return Mesh::default();
+        };
+        let s = max_scale(self.line_xform);
+        let local_tol = if s > 0.0 { tol / s } else { tol };
+        let (_, mut mesh) =
+            crate::vector_stroke::quad_band(c, stroke.width as f64 / 2.0, local_tol, self.color, ends);
+        transform_mesh_vertices_in_place(&mut mesh.vertices, self.line_xform.as_coeffs());
+        mesh
+    }
+
+    /// 形・色・置き場所を変えたときに、倍率に合わせて作ったメッシュ（`zoom_mesh`・`round_mesh`）を捨てる
+    fn drop_view_meshes(&mut self) {
+        self.zoom_mesh = ZoomMesh::default();
+        self.round_mesh = ZoomMesh::default();
     }
 
     /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す（倍率に合わせた細かさ：`view_mesh`）
@@ -477,7 +492,7 @@ impl FillShape {
     pub(crate) fn strip_transient_caches(&mut self) {
         self.hit_bez_path = OnceLock::new();
         self.fill_mesh = OnceLock::new();
-        self.zoom_mesh = ZoomMesh::default();
+        self.drop_view_meshes();
         self.mesh_stretch = 1.0;
     }
 
@@ -665,7 +680,7 @@ impl FillShape {
     /// 色を `f` で替える（色効果）。再テッセレーションを行わず、キャッシュ済みの頂点の色も `f` で替える
     pub(crate) fn recolor(&mut self, f: impl Fn(Color32) -> Color32) {
         self.color = f(self.color);
-        self.zoom_mesh = ZoomMesh::default();
+        self.drop_view_meshes();
         if let Some(arc_mesh) = self.fill_mesh.get_mut() {
             for v in &mut Arc::make_mut(arc_mesh).vertices {
                 v.color = f(v.color);
@@ -721,7 +736,7 @@ impl FillShape {
             hole.translate(delta);
         }
         self.line_xform = Affine::translate(delta) * self.line_xform;
-        self.zoom_mesh = ZoomMesh::default();
+        self.drop_view_meshes();
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = Affine::translate(delta) * binding.xform;
         }
@@ -751,7 +766,7 @@ impl FillShape {
             hole.transform(affine);
         }
         self.line_xform = affine * self.line_xform;
-        self.zoom_mesh = ZoomMesh::default();
+        self.drop_view_meshes();
         if let Some(binding) = &mut self.symbol_instance {
             binding.xform = affine * binding.xform;
         }
@@ -786,7 +801,7 @@ impl FillShape {
         }
         self.center = orig.center;
         self.line_xform = affine * orig.line_xform;
-        self.zoom_mesh = ZoomMesh::default();
+        self.drop_view_meshes();
         self.symbol_instance = orig.symbol_instance.map(|mut binding| {
             binding.xform = affine * binding.xform;
             binding
@@ -821,13 +836,14 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
-    /// 選択表示：図形の塗りのメッシュ（作ってある写しを使う）を画面座標に写し、半透明の選択の色 `SELECTION_TINT` で
-    /// 塗ったもの。図形の上に重ねて描く。どの倍率でも、図形と同じ形のまま薄く色が付く
+    /// 選択表示：選択の色を塗るメッシュ（`selection_mesh`。線の図形は両端を丸くした帯）を画面座標に写し、頂点の色を選択の
+    /// 色（`selection_color`：図形の色に `SELECTION_TINT` を重ねた色）にしたもの。同じ段の図形の上に描く。どの倍率でも、
+    /// 図形と同じ形のまま青みがかって見える
     pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
-        let mut mesh = (*self.view_mesh(zoom)).clone();
+        let mut mesh = (*self.selection_mesh(zoom)).clone();
         for v in &mut mesh.vertices {
             v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
-            v.color = SELECTION_TINT;
+            v.color = selection_color(v.color);
         }
         mesh
     }
@@ -1030,6 +1046,26 @@ impl Clone for ZoomMesh {
         Self::default()
     }
 }
+
+impl ZoomMesh {
+    /// 鍵 `key`（段など）のメッシュ（持っていればそれ、無ければ `make` で作って持つ。鍵が変われば置き換える）
+    fn get_or_make(&self, key: u32, make: impl FnOnce() -> Mesh) -> Arc<Mesh> {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, m)) = &*slot {
+            if *k == key {
+                return Arc::clone(m);
+            }
+        }
+        let m = Arc::new(make());
+        *slot = Some((key, Arc::clone(&m)));
+        m
+    }
+}
+
+/// 段 `level` の許容（`MESH_TOL / 2^level`：`mesh_level`）
+fn level_tol(level: u32) -> f64 {
+    MESH_TOL * 0.5f64.powi(level as i32)
+}
 /// 持っているメッシュの頂点を写して使い回すときに許すずれ（文書の座標）：見分けられないずれ（画面の画素の 1/4。形を
 /// 曲線に当てはめるときの許容 `FIT_TOL_PX` と同じ決まり）を、100% 表示の文書の座標にしたもの。形そのものが当てはめで
 /// これだけずれうるので、メッシュのずれがこの中なら、作り直しても見た目は変わらない（作る許容の 6.25 倍、つまり 6.25 倍
@@ -1049,8 +1085,20 @@ pub(crate) fn max_scale(affine: Affine) -> f64 {
     ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
 }
 
-/// 選択表示で、選んだ図形に重ねる半透明の色（明るい青）
+/// 選択表示で、選んだ図形の色に重ねる半透明の色（明るい青）
 const SELECTION_TINT: Color32 = Color32::from_rgba_premultiplied(0, 46, 100, 100);
+
+/// 選んだ図形を塗る色：図形の色 `c` に `SELECTION_TINT` を重ねた色（どちらも前もって不透明度を掛けた色で、重ねる式は
+/// `t + c × (1 − t の不透明度)`）。不透明な図形なら不透明なので、選んだ図形どうしがどう重なっても（線の丸い端・曲がり角の
+/// 内側・塗りと輪郭の線）、2回塗られて濃くならない。同じ段（同じレイヤー・同じ階層の塗りどうし・線どうし）の図形を描き
+/// 終えた所で塗るので、選んだ図形は、同じ段の中ではいちばん上に見える（利用者が決めた）。不透明度を下げた図形は、図形の色
+/// が2回重なる分、選んでいる間は少し濃く見える
+pub(crate) fn selection_color(c: Color32) -> Color32 {
+    let t = SELECTION_TINT;
+    let keep = 255 - u16::from(t.a());
+    let over = |tc: u8, cc: u8| (u16::from(tc) + (u16::from(cc) * keep + 127) / 255).min(255) as u8;
+    Color32::from_rgba_premultiplied(over(t.r(), c.r()), over(t.g(), c.g()), over(t.b(), c.b()), over(t.a(), c.a()))
+}
 
 pub(crate) fn tessellate_raw_polygon(pts: &[Point], color: Color32) -> Mesh {
     if pts.len() < 3 {
