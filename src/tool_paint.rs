@@ -25,23 +25,27 @@ pub(crate) fn handle_brush_or_eraser_input(
     let (base_r, preview_color) = match active_tool {
         Tool::Brush => (brush_radius as f64, brush_color),
         Tool::Pencil => (stroke.width as f64 / 2.0, stroke.color),
-        _ => (
-            eraser_radius as f64,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 220),
-        ),
+        // 消しゴムは不透明な白（描いている間の形が重なる所で色が濃くならない。利用者が決めた）
+        _ => (eraser_radius as f64, Color32::WHITE),
+    };
+    // 輪郭の区切りごとに三角形に分けて足したメッシュ（`stroke_preview_outline`）
+    let preview_mesh = |rings: Vec<Vec<Point>>| {
+        let mut mesh = egui::Mesh::default();
+        for ring in &rings {
+            append_mesh(&mut mesh, &tessellate_raw_polygon(ring, preview_color));
+        }
+        mesh
     };
     // 描いている間の形は、離したあとの形と同じ中心線（`CenterlineBuilder`）を太らせたもの。確定した所は確定するたびに
-    // 足し、確定していない所は点が来るたびに作り直す
+    // 足し、確定していない所は点が来るたびに作り直す。2つの境目は、両側の区間がどちらも確定した節で決まる、いちばん先の
+    // 節（`CenterlineBuilder::settled`）で、そこでは両側の平らな端がぴったり接する（`stroke_preview_outline`）
     let z = host.tab().view.zoom() as f64;
     let ppp = response.ctx.pixels_per_point();
     host.tab_mut().view.pixels_per_point = ppp;
     let tail_of = |b: &CenterlineBuilder| {
         let cl = b.current();
-        let from = b.fixed().saturating_sub(1);
-        tessellate_raw_polygon(
-            &stroke_preview_outline(&cl, from, cl.len().saturating_sub(1), base_r, z),
-            preview_color,
-        )
+        let from = b.settled();
+        preview_mesh(stroke_preview_outline(&cl, from, cl.len().saturating_sub(1), base_r, z))
     };
 
     if response.drag_started_by(PointerButton::Primary) {
@@ -72,21 +76,14 @@ pub(crate) fn handle_brush_or_eraser_input(
         ) = (mouse_pt, &mut tab.session.drag)
         {
             let before = stroke.points().len();
+            let settled_before = stroke.settled();
             let fixed_before = stroke.push(pt);
             if stroke.points().len() != before {
-                if let Some(f0) = fixed_before {
+                if fixed_before.is_some() {
                     let cl = stroke.current();
-                    let piece = stroke_preview_outline(
-                        &cl,
-                        f0.saturating_sub(1),
-                        stroke.fixed() - 1,
-                        base_r,
-                        z,
-                    );
-                    append_mesh(
-                        committed_world_mesh,
-                        &tessellate_raw_polygon(&piece, preview_color),
-                    );
+                    let piece =
+                        stroke_preview_outline(&cl, settled_before, stroke.settled(), base_r, z);
+                    append_mesh(committed_world_mesh, &preview_mesh(piece));
                 }
                 *tail_mesh = tail_of(stroke);
             }

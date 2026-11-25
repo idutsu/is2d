@@ -209,6 +209,14 @@ impl CenterlineBuilder {
         self.fixed_a.len()
     }
 
+    /// 両側の区間がどちらも確定した節の値だけで決まる、いちばん先の節の番号（確定した節が無ければ 0）。中心線はまとまり
+    /// （`CHUNK`）ごとに確定するので、まとまりの境目の節では両側の向きがわずかに食い違う（`BACK`）が、まとまりの中の節では
+    /// 同じ。確定した最後の節は、その先の区間が確定していない節で決まるので、その1つ前。描いている間の形の、確定した所と
+    /// 確定していない所の境目にする（境目で両側の平らな端がぴったり接する：`tool_paint`・`stroke_preview_outline`）
+    pub(crate) fn settled(&self) -> usize {
+        self.fixed().saturating_sub(2)
+    }
+
     /// 点を足す（有限でない点と、前の点と同じ点は足さない）。確定した所が増えたら、増える前の確定した節の数を返す
     pub(crate) fn push(&mut self, p: Point) -> Option<usize> {
         if !p.x.is_finite() || !p.y.is_finite() || self.pts.last() == Some(&p) {
@@ -1019,21 +1027,69 @@ pub(crate) fn input_step(zoom: f64, pixels_per_point: f64) -> f64 {
     1.0 / (pixels_per_point * zoom)
 }
 
-/// 中心線の節 `from..=to` を半径 `radius` で太らせた輪郭（描いている間に見せる形。NonZero で塗る閉じた折れ線、
-/// 文書の座標）。折れ線の細かさは表示の倍率 `zoom` で画面に合わせる
+/// 中心線の節 `from..=to` を半径 `radius` で太らせた輪郭（描いている間に見せる形。区切り（`piece_ends`）ごとの、NonZero で
+/// 塗る閉じた折れ線、文書の座標）。区切りどうしは、つなぎ目の点の平らに閉じた端でぴったり接し、重ならない（描くだけで
+/// 合わせないので重ねる要は無く、重ならないので半透明の色でも境目が濃くならない）。丸く閉じるのは、線の本当の始まり
+/// （中心線の最初の点）と、今の終わり（中心線の最後の点）だけで、節の途中の端（確定した所と、確定していない所の境目）は
+/// 平らに閉じる：境目の点は両側で同じ点（中心線の節の点）で、なめらかな中心線の向きも同じなので、隣の節の平らな端と
+/// ぴったり接する（前は節の両端を丸く閉じたので、境目ごとに丸が重なり、半透明の色では濃い丸に見えた）。折れ線の細かさは
+/// 表示の倍率 `zoom` で画面に合わせる
 pub(crate) fn stroke_preview_outline(
     cl: &Centerline,
     from: usize,
     to: usize,
     radius: f64,
     zoom: f64,
-) -> Vec<Point> {
+) -> Vec<Vec<Point>> {
     if cl.len() == 0 || from >= cl.len() || !radius.is_finite() || radius <= 0.0 {
         return Vec::new();
     }
     let eps = FIT_TOL_PX * FLAT_RATIO / zoom;
-    let cs = cl.samples(from, to.min(cl.len() - 1), radius, eps);
-    brush_outline(&cs, radius, eps, [true, true]).0
+    let to = to.min(cl.len() - 1);
+    let cs = cl.samples(from, to, radius, eps);
+    let last = cs.len() - 1;
+    let (starts, ends) = (from == 0, to == cl.len() - 1);
+    let mut rings = Vec::new();
+    let mut a = 0;
+    for b in piece_ends(&cs, radius, eps) {
+        rings.push(brush_outline(&cs[a..=b], radius, eps, [a == 0 && starts, b == last && ends]).0);
+        a = b;
+    }
+    rings
+}
+
+/// 中心線の点 `cs`（半径 `r`・許容 `eps`。同じ単位）を、輪郭を作る区切りに分けたときの、区切りごとの終わりの点の番号
+/// （昇順。最後は `cs.len() − 1`）。区切りの決まりはこれ1つ（離したあとの形 `stroke_shapes` と、描いている間の形
+/// `stroke_preview_outline`）。輪郭の自分との交わりを解く手間（離したあとの i_overlay、描いている間の三角形に分ける
+/// lyon）は、交わりの数だけ増え、きつく曲がる所の内側の帯は曲がりの中心の近くで互いに交わる（点 K 個で K² 個ほど）ので、
+/// 点を `PIECE` 個ほどずつに区切って、交わりを1つの区切りの中だけにする（レビュー 41766f9 の N-2001：前は描いている間の
+/// 形だけ区切らず、太いブラシで急に曲がると1回 50ms を超えた）。つなぎ目 j は、前後の区間（j−1..j+2）で接線の回りが
+/// 刻み φ（`arc_step`）以下の所にし、区切りは j+1 で終わる（そこでは帯がまっすぐなので、平らに閉じた端どうしが合う）。
+/// 次の区切りは、離したあとの形と同じく j から探し始める（どちらの形でも同じつなぎ目になる）
+fn piece_ends(cs: &[Sample], r: f64, eps: f64) -> Vec<usize> {
+    let last = cs.len().saturating_sub(1);
+    let phi = arc_step(r, eps);
+    let turn = |i: usize| {
+        cs[i]
+            .t
+            .cross(cs[i + 1].t)
+            .atan2(cs[i].t.dot(cs[i + 1].t))
+            .abs()
+    };
+    let joint = |j: usize| j >= 1 && j + 2 <= last && (j - 1..=j + 1).all(|i| turn(i) <= phi);
+    let mut ends = Vec::new();
+    let mut a = 0;
+    loop {
+        let b = ((a + PIECE).max(1)..last)
+            .find(|&j| joint(j))
+            .map_or(last, |j| j + 1);
+        ends.push(b);
+        if b == last {
+            break;
+        }
+        a = b - 1;
+    }
+    ends
 }
 
 /// マウスの点 `points`（文書の座標）と半径 `radius` から、離したあとの図形を作る。丸めの刻みは `step`
@@ -1062,40 +1118,22 @@ pub(crate) fn stroke_shapes(
             t: c.t,
         })
         .collect();
-    // 輪郭を自分との交わりで整理する手間（i_overlay）は、交わりの数だけ増える。きつく曲がる所の内側の帯は、曲がりの
-    // 中心の近くで互いに交わる（点 K 個で K² 個ほど）。そこで、中心線の点を `PIECE` 個ほどずつの区切りに分け、区切り
-    // ごとの輪郭を整理してから合わせる（`union_rings`）。隣の区切りとは1区間（点 j..j+1）重ね、つなぎ目の端は平らに
-    // 閉じる：前の区切りは j+1 の直径で、後の区切りは j の直径で閉じ、どちらの直径も隣の区切りの中に入る（端の点は
-    // 隣の帯の点と同じ）。つなぎ目 j は、前後の区間（j−1..j+2）で接線の回りが刻み φ（`arc_step`）以下の所にする。
-    // 速さが 0 に近い折り返しでは、隣どうしの点の法線がほぼ逆向きで、2本の直径がほぼ重なり、区切りごとに整理した
-    // 輪郭の間に細いすき間が残る。キャップで閉じないのは、キャップの円が隣の帯に接してわずかにはみ出し、つなぎ目に
-    // 角ができるため
+    // 区切り（`piece_ends`）ごとの輪郭を整理してから合わせる（`union_rings`）。隣の区切りとは1区間（点 b−1..b）重ね、
+    // つなぎ目の端は平らに閉じる：前の区切りは b の直径で、後の区切りは b−1 の直径で閉じ、どちらの直径も隣の区切りの
+    // 中に入る（端の点は隣の帯の点と同じ）。重ねるのは、合わせる計算で区切りの間にすき間を残さないため（速さが 0 に近い
+    // 折り返しでは、隣どうしの点の法線がほぼ逆向きで、重ねないと細いすき間が残る）。キャップで閉じないのは、キャップの
+    // 円が隣の帯に接してわずかにはみ出し、つなぎ目に角ができるため
     let last = cs.len() - 1;
-    let phi = arc_step(radius * z, eps_flat);
-    let turn = |i: usize| {
-        cs[i]
-            .t
-            .cross(cs[i + 1].t)
-            .atan2(cs[i].t.dot(cs[i + 1].t))
-            .abs()
-    };
-    let joint = |j: usize| j + 2 <= last && (j - 1..=j + 1).all(|i| turn(i) <= phi);
     let mut parts = Vec::new();
     let mut a = 0;
-    loop {
-        let b = ((a + PIECE).max(1)..last)
-            .find(|&j| joint(j))
-            .map_or(last, |j| j + 1);
+    for b in piece_ends(&cs, radius * z, eps_flat) {
         parts.push(brush_outline(
             &cs[a..=b],
             radius * z,
             eps_flat,
             [a == 0, b == last],
         ));
-        if b == last {
-            break;
-        }
-        a = b - 1;
+        a = b.saturating_sub(1);
     }
     let rings: Vec<Vec<[f64; 2]>> = parts
         .iter()

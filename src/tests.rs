@@ -64,11 +64,14 @@ fn paint_drag(points: &[Point], radius: f64) -> canvas_tool::ActiveCanvasDrag {
         stroke.push(p);
     }
     let cl = stroke.current();
-    let outline = vector_stroke::stroke_preview_outline(&cl, 0, cl.len() - 1, radius, 1.0);
+    let mut tail_mesh = egui::Mesh::default();
+    for ring in vector_stroke::stroke_preview_outline(&cl, 0, cl.len() - 1, radius, 1.0) {
+        vector_engine::append_mesh(&mut tail_mesh, &vector_engine::tessellate_raw_polygon(&ring, Color32::BLACK));
+    }
     canvas_tool::ActiveCanvasDrag::PaintStroke {
         stroke,
         committed_world_mesh: egui::Mesh::default(),
-        tail_mesh: vector_engine::tessellate_raw_polygon(&outline, Color32::BLACK),
+        tail_mesh,
     }
 }
 
@@ -15064,18 +15067,19 @@ fn test_tessellate_lyon_path_shrinks_mesh_capacity_to_len() {
     );
 
     let cl = vector_stroke::centerline(&raw.pts, 1.0);
-    let outline = vector_stroke::stroke_preview_outline(&cl, 0, cl.len() - 1, raw.radius, 1.0);
-    let direct_mesh = vector_engine::tessellate_raw_polygon(&outline, Color32::BLUE);
-    assert_eq!(
-        direct_mesh.vertices.capacity(),
-        direct_mesh.vertices.len(),
-        "直接輪郭メッシュの vertices.capacity() が vertices.len() と一致すること"
-    );
-    assert_eq!(
-        direct_mesh.indices.capacity(),
-        direct_mesh.indices.len(),
-        "直接輪郭メッシュの indices.capacity() が indices.len() と一致すること"
-    );
+    for outline in vector_stroke::stroke_preview_outline(&cl, 0, cl.len() - 1, raw.radius, 1.0) {
+        let direct_mesh = vector_engine::tessellate_raw_polygon(&outline, Color32::BLUE);
+        assert_eq!(
+            direct_mesh.vertices.capacity(),
+            direct_mesh.vertices.len(),
+            "直接輪郭メッシュの vertices.capacity() が vertices.len() と一致すること"
+        );
+        assert_eq!(
+            direct_mesh.indices.capacity(),
+            direct_mesh.indices.len(),
+            "直接輪郭メッシュの indices.capacity() が indices.len() と一致すること"
+        );
+    }
 }
 
 /// M2-1: 図形10個を持つシンボルや、入れ子シンボルを含むシンボルを Cmd+B (Action::Ungroup) で分解した際、
@@ -20667,6 +20671,84 @@ fn the_selection_tint_is_drawn_above_every_shape() {
         .rposition(|c| *c == Some(green.color) || *c == Some(blue.color))
         .expect("線を描いていない");
     assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
+}
+
+/// 描いている間の形（仮表示）は、離したあとの形と同じつなぎ目（`piece_ends`）で区切って作り、区切りどうしは、つなぎ目の
+/// 平らに閉じた端の2点を共有して接する（重ならない）。区切るので、輪郭の自分との交わりは1つの区切りの中だけになる（レビュー
+/// 41766f9 の N-2001：前は描いている間の形だけ区切らず、太いブラシで急に曲がると1回の三角形分けが 50ms を超えた）
+#[test]
+fn the_brush_preview_is_built_in_pieces_that_meet_at_joints() {
+    let mut rng = fastrand::Rng::with_seed(0x0020_0100_2026);
+    let mut split = 0;
+    for _ in 0..200 {
+        let zoom = [0.25, 1.0, 4.0][rng.usize(0..3)];
+        let pts = random_hand_stroke(&mut rng, zoom);
+        let radius = (0.5 + rng.f64() * 39.5) / zoom;
+        let cl = vector_stroke::centerline(&pts, 1.0 / zoom);
+        if cl.len() == 0 {
+            continue;
+        }
+        let rings = vector_stroke::stroke_preview_outline(&cl, 0, cl.len() - 1, radius, zoom);
+        assert!(!rings.is_empty());
+        if rings.len() > 1 {
+            split += 1;
+        }
+        let bits = |p: &Point| (p.x.to_bits(), p.y.to_bits());
+        for w in rings.windows(2) {
+            let shared = w[1].iter().filter(|p| w[0].iter().any(|q| bits(q) == bits(p))).count();
+            assert!(shared >= 2, "隣の区切りが、つなぎ目の端の2点を共有していない（共有 {shared} 点）");
+        }
+    }
+    assert!(split > 0, "区切られた仮表示が無い（試しの線がつなぎ目を作らない）");
+}
+
+/// 描いている間に、確定した所の形（確定するたびに足す）と、確定していない所の形（点が来るたびに作り直す）は、境目の点で
+/// 平らな端どうしが接する（丸い端どうしが重ならない）。丸く閉じるのは、線の始まりと今の終わりだけ（利用者の指摘：前は境目
+/// ごとに丸が重なり、半透明の色で描くと、濃い丸がスタンプのように見えた）
+#[test]
+fn brush_preview_pieces_meet_flat_at_their_boundaries() {
+    let mut rng = fastrand::Rng::with_seed(0x0020_0200_2026);
+    let near = |a: &Point, b: &Point| (*a - *b).hypot() < 1e-9;
+    // 輪郭 `ring` の始まりの端が、輪郭 `prev` と平らな端（同じ直径の2点）で接するか：輪郭は、左の点を前へ・終わりの端・右の
+    // 点を後ろへ・始めの端の順に並ぶので、始めの端が平らなら、最初と最後の点が直径の両端で、どちらも `prev` の点。丸い端
+    // なら、最後に円弧の点が入る
+    let meets_flat = |ring: &[Point], prev: &[Point]| {
+        let shared = |p: &Point| prev.iter().any(|q| near(q, p));
+        shared(&ring[0]) && shared(&ring[ring.len() - 1])
+    };
+    let mut boundaries = 0;
+    for _ in 0..200 {
+        let zoom = [0.25, 1.0, 4.0][rng.usize(0..3)];
+        let pts = random_hand_stroke(&mut rng, zoom);
+        let radius = (0.5 + rng.f64() * 39.5) / zoom;
+        let mut b = vector_stroke::CenterlineBuilder::new(1.0 / zoom);
+        // 前に確定した所の形の、最後の区切り
+        let mut last_piece: Option<Vec<Point>> = None;
+        for &p in &pts {
+            let settled_before = b.settled();
+            let fixed_before = b.push(p);
+            let cl = b.current();
+            if fixed_before.is_some() {
+                let piece = vector_stroke::stroke_preview_outline(&cl, settled_before, b.settled(), radius, zoom);
+                if let (Some(prev), Some(first)) = (&last_piece, piece.first()) {
+                    let shared = first.iter().filter(|p| prev.iter().any(|q| near(q, p))).count();
+                    assert!(shared >= 2, "確定した所どうしの境目が接していない（共有 {shared} 点）");
+                    assert!(meets_flat(first, prev), "確定した所どうしの境目が、平らな端で接しない（丸い端どうしが重なる）");
+                    boundaries += 1;
+                }
+                last_piece = piece.last().cloned();
+            }
+            if cl.len() > 0 && b.settled() > 0 {
+                if let Some(prev) = &last_piece {
+                    let tail = vector_stroke::stroke_preview_outline(&cl, b.settled(), cl.len() - 1, radius, zoom);
+                    let shared = tail[0].iter().filter(|p| prev.iter().any(|q| near(q, p))).count();
+                    assert!(shared >= 2, "確定した所と確定していない所の境目が接していない（共有 {shared} 点）");
+                    assert!(meets_flat(&tail[0], prev), "確定した所と確定していない所の境目が、平らな端で接しない");
+                }
+            }
+        }
+    }
+    assert!(boundaries > 0, "確定した所の境目が無い");
 }
 
 /// カラーピッカーの四角の十字は、縁や角でも切らずに全部描く：黒（明るさ 0・鮮やかさ 0 で左下の角）でも十字が見える（利用者の
