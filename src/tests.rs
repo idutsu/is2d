@@ -7248,6 +7248,57 @@ fn plus_minus_keys_are_decided_by_key_position() {
     assert_eq!(plus_minus_pressed(&others), None);
 }
 
+/// 線の行き止まりの端のアンカーを消すと、その区間が無くなり、線が1区間短くなる（残りの区間はそのまま）。1区間だけの線は
+/// 線ごと消える。線の先が塗りの輪郭につながる点は、今までどおり消せない（利用者が決めた）
+#[test]
+fn deleting_a_line_end_anchor_shortens_the_line() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let ink = EdgeStroke { color: Color32::BLACK, width: 4 };
+    let centers = |app: &Is2dApp| -> Vec<QuadBez> { app.scene().iter().filter_map(|s| s.center_curve()).collect() };
+    // 行き止まりの端：ほかの線の端と重ならない端
+    let dead_ends = |lines: &[QuadBez]| -> Vec<Point> {
+        let ends: Vec<Point> = lines.iter().flat_map(|q| [q.p0, q.p2]).collect();
+        ends.iter().copied().filter(|p| ends.iter().filter(|q| *q == p).count() == 1).collect()
+    };
+    // 1. つなぎ目のある線
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let wave: Vec<Point> = (0..=200).map(|i| { let x = 100.0 + 3.0 * i as f64; Point::new(x, 300.0 + 60.0 * (x / 50.0).sin()) }).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: wave, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let before = centers(&app);
+    assert!(before.len() >= 2, "つなぎ目のある線にならなかった");
+    let end = dead_ends(&before)[0];
+    let gone = *before.iter().find(|q| q.p0 == end || q.p2 == end).unwrap();
+    assert!(apply(&mut app, Action::DeleteAnchor { pt: end }), "線の端のアンカーを消せない");
+    let after = centers(&app);
+    assert_eq!(after.len(), before.len() - 1, "線が1区間短くならない");
+    for q in &before {
+        let same = |a: &QuadBez| (a.p0 == q.p0 && a.p1 == q.p1 && a.p2 == q.p2) || (a.p0 == q.p2 && a.p1 == q.p1 && a.p2 == q.p0);
+        assert_eq!(after.iter().any(same), *q != gone, "消した区間のほかの区間が変わった（または消した区間が残った）");
+    }
+    // 2. 1区間だけの線：線ごと消える
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let straight: Vec<Point> = (0..=50).map(|i| Point::new(100.0 + 4.0 * i as f64, 200.0)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: straight, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert_eq!(centers(&app).len(), 1);
+    assert!(apply(&mut app, Action::DeleteAnchor { pt: Point::new(100.0, 200.0) }));
+    assert!(centers(&app).is_empty(), "1区間だけの線が残った");
+    // 3. 線の先が塗りの輪郭につながる点は消せない
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 400.0, 400.0, Color32::from_rgb(120, 175, 160))]);
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let out: Vec<Point> = (0..=50).map(|i| Point::new(300.0, 400.0 + 4.0 * i as f64)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: out, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let n = centers(&app).len();
+    assert!(!apply(&mut app, Action::DeleteAnchor { pt: Point::new(300.0, 400.0) }), "輪郭につながる点を消せた");
+    assert_eq!(centers(&app).len(), n);
+}
+
 /// 選択ツールのアンカー編集は、A で表示、D で追加、F で削除を切り替える（もう1回押すと戻る）。`+`・`-` はアンカー編集の
 /// キーではない（`Cmd` と合わせたズームだけ。利用者が決めた）
 #[test]

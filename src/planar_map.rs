@@ -3102,7 +3102,8 @@ pub(crate) enum ReshapeEdit {
 pub(crate) enum AnchorEdit {
     /// 形が `orig_seg` の辺の `t` の所に頂点を足す（境目なら両側の図形に入る）
     Add { orig_seg: QuadBez, t: f64 },
-    /// `orig_vertex` にある頂点を消し、前後の辺を1本の直線にする
+    /// `orig_vertex` にある頂点を消し、前後の辺を1本の直線にする（線の行き止まりの端なら、その区間を取り除く：
+    /// `with_anchor_deleted`）
     Delete { orig_vertex: Point },
 }
 
@@ -3163,11 +3164,24 @@ impl PlanarMap {
         self.can_replace_path(&[e], ed.a, ed.b, &pc).then_some(m)
     }
 
-    /// 頂点 `v` を消し、前後の辺を1本の直線にした形。消せないときは `None`：
-    /// つながる辺が2本でない（3色以上が接する点など）、前後が同じ頂点（細いレンズ形）、
+    /// 頂点 `v` を消した形。つながる辺が2本なら、前後の辺を1本の直線にする。つながる辺が1本（線の行き止まりの端）なら、
+    /// その区間を取り除き、線が1区間短くなる（1区間だけの線は、両端の頂点も残らないので線ごと消える。利用者が決めた）。
+    /// 行き止まりの区間は両側が同じ面（面の輪郭を作らない）なので、取り除いても面の形は変わらず、ほかの辺とも交わらない。
+    /// 消せないときは `None`：つながる辺が1本・2本でない（3色以上が接する点・線の先が輪郭につながる点など）、
+    /// 行き止まりの区間の両側が違う（取り除くと塗りの形が変わる）か閉じた輪、前後が同じ頂点（細いレンズ形）、
     /// 判定の形でつながりが変わる（直線がほかの辺に触れる・ほかの頂点や辺をまたぐ）
     pub(crate) fn with_anchor_deleted(&self, v: usize) -> Option<PlanarMap> {
         let at = self.edges_at(v);
+        if let [e] = at[..] {
+            let ed = self.edges[e];
+            if ed.a == ed.b || ed.left != ed.right || ed.left_src != ed.right_src {
+                return None;
+            }
+            let mut m = self.clone();
+            m.edges.swap_remove(e);
+            m.compact_nodes();
+            return Some(m);
+        }
         if at.len() != 2 {
             return None;
         }
