@@ -778,15 +778,12 @@ impl Is2dApp {
                 apply(self, Action::ExitGroupSteps { steps: 1 });
             }
             self.tool.select_sub_mode = SelectSubMode::Reshape;
-        } else if self.tool.tool == Tool::Select {
-            // 選択ツールのアンカー編集：A で表示、D で追加、F で削除を切り替える（右パネルの3つのボタンと同じ）
-            if key_pressed_no_repeat(i, Key::A) {
-                self.tab_mut().view.toggle(canvas_tool::ViewSwitch::Anchors);
-            } else if key_pressed_no_repeat(i, Key::D) {
-                apply(self, Action::ToggleSelectSubMode { mode: SelectSubMode::AddAnchor });
-            } else if key_pressed_no_repeat(i, Key::F) {
-                apply(self, Action::ToggleSelectSubMode { mode: SelectSubMode::DeleteAnchor });
-            }
+        } else if key_pressed_no_repeat(i, Key::A) {
+            self.anchor_edit_key(None);
+        } else if key_pressed_no_repeat(i, Key::D) {
+            self.anchor_edit_key(Some(SelectSubMode::AddAnchor));
+        } else if key_pressed_no_repeat(i, Key::F) {
+            self.anchor_edit_key(Some(SelectSubMode::DeleteAnchor));
         }
     }
 
@@ -1185,6 +1182,28 @@ impl Is2dApp {
 }
 
 impl Is2dApp {
+    /// アンカー編集のキー（A：表示（`mode` が `None`）、D：追加、F：削除。右パネルの選択ツールの3つのボタンと同じ）。選択
+    /// ツールでは切り替える（もう1回押すと戻る）。ほかのツールでは、選択ツールにして ON にする（どのツールからでも効く。
+    /// 押したのに何も起きないことが無いよう、ほかのツールから押したときは切り替えで OFF にしない。利用者が決めた）
+    fn anchor_edit_key(&mut self, mode: Option<SelectSubMode>) {
+        let entering = self.tool.tool != Tool::Select;
+        if entering {
+            apply(self, Action::SetTool { tool: Tool::Select });
+        }
+        match mode {
+            None => {
+                if !(entering && self.tab().view.show_wireframe) {
+                    self.tab_mut().view.toggle(canvas_tool::ViewSwitch::Anchors);
+                }
+            }
+            Some(mode) => {
+                if !(entering && self.tool.select_sub_mode == mode) {
+                    apply(self, Action::ToggleSelectSubMode { mode });
+                }
+            }
+        }
+    }
+
     /// 今のタブの、次に見るセル画の写しを先読みの係に作らせる（`prefetch`）。今描いているコマの範囲（今のコマ。止まって
     /// いてオニオンスキンが有れば、その範囲：オニオンスキンは再生中は描かない）のすぐ外の、レイヤーごとの次のセル画。
     /// 再生中は進む向きだけ、止まっているときは前後とも（どちらへ動くか分からない）。くり返し再生なら、端の先は反対の端

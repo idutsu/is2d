@@ -70,10 +70,10 @@ impl Tool {
             Tool::Select => Key::V,
             Tool::Transform => Key::Q,
             Tool::Brush => Key::B,
-            Tool::Pencil => Key::Y,
+            Tool::Pencil => Key::S,
             Tool::Eraser => Key::E,
             Tool::Bucket => Key::K,
-            Tool::InkBottle => Key::S,
+            Tool::InkBottle => Key::O,
             Tool::Eyedropper => Key::I,
         }
     }

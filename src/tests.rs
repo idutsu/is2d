@@ -7334,6 +7334,35 @@ fn anchor_edit_modes_toggle_with_a_d_f() {
     press(&mut app, Key::Minus);
     press(&mut app, Key::Equals);
     assert_eq!(app.tool.select_sub_mode, SelectSubMode::Reshape, "+・- でアンカー編集が切り替わった");
+    // ほかのツールから押すと、選択ツールにして ON にする（もう1回押すと、選択ツールのまま切り替える）
+    for (key, check) in [
+        (Key::A, (|app: &Is2dApp| app.tab().view.show_wireframe) as fn(&Is2dApp) -> bool),
+        (Key::D, |app: &Is2dApp| app.tool.select_sub_mode == SelectSubMode::AddAnchor),
+        (Key::F, |app: &Is2dApp| app.tool.select_sub_mode == SelectSubMode::DeleteAnchor),
+    ] {
+        crate::doc_actions::apply(&mut app, crate::doc_actions::Action::SetTool { tool: Tool::Pencil });
+        press(&mut app, key);
+        assert_eq!(app.tool.tool, Tool::Select, "{key:?}：選択ツールにならない");
+        assert!(check(&app), "{key:?}：ほかのツールから押して ON にならない");
+        press(&mut app, key);
+        assert_eq!(app.tool.tool, Tool::Select);
+        assert!(!check(&app), "{key:?}：選択ツールでもう1回押して切り替わらない");
+    }
+    // 表示が ON のまま、ほかのツールから A を押しても OFF にしない
+    press(&mut app, Key::A);
+    assert!(app.tab().view.show_wireframe);
+    crate::doc_actions::apply(&mut app, crate::doc_actions::Action::SetTool { tool: Tool::Brush });
+    press(&mut app, Key::A);
+    assert_eq!(app.tool.tool, Tool::Select);
+    assert!(app.tab().view.show_wireframe, "ほかのツールから A を押して表示が OFF になった");
+}
+
+/// ツールのキー：鉛筆は S、インクボトルは O（利用者が決めた。Y は使わない。オニオンスキンのキーは無い）
+#[test]
+fn pencil_is_s_and_ink_bottle_is_o() {
+    assert_eq!(Tool::Pencil.shortcut_key(), eframe::egui::Key::S);
+    assert_eq!(Tool::InkBottle.shortcut_key(), eframe::egui::Key::O);
+    assert!(Tool::ALL.iter().all(|t| t.shortcut_key() != eframe::egui::Key::Y));
 }
 
 /// `Cmd` のショートカット（コピーなど）のすぐ後に、ふつうに `V`（選択ツール）を押して離しても貼り付けない。直す前は、
@@ -8544,7 +8573,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
 }
 
 #[test]
-fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
+fn test_key_repeat_suppressed_for_enter_anchors_tween_and_cmd3() {
     use eframe::egui;
 
     let ctx = egui::Context::default();
@@ -8554,13 +8583,14 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         Vec2::new(1280.0, 820.0),
     ));
 
-    // 1. O キー初回押下フレーム (repeat: false) でオニオンスキンが ON になり、別フレームでの長押しリピート (repeat: true) では OFF に戻らないこと (#16)
-    assert!(!app.view.onion_skin_enabled);
+    // 1. A キー初回押下フレーム (repeat: false) でアンカーの表示が ON になり、別フレームでの長押しリピート (repeat: true) では OFF に戻らないこと (#16。
+    //    前はオニオンスキンの O で確かめていたが、オニオンスキンのキーは無くした)
+    assert!(!app.view.show_wireframe);
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
             events: vec![egui::Event::Key {
-                key: egui::Key::O,
+                key: egui::Key::A,
                 physical_key: None,
                 pressed: true,
                 repeat: false,
@@ -8572,12 +8602,12 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
             app.update_ui(ctx);
         },
     );
-    assert!(app.view.onion_skin_enabled);
+    assert!(app.view.show_wireframe);
     let _ = ctx.run(
         egui::RawInput {
             screen_rect,
             events: vec![egui::Event::Key {
-                key: egui::Key::O,
+                key: egui::Key::A,
                 physical_key: None,
                 pressed: true,
                 repeat: true,
@@ -8590,8 +8620,8 @@ fn test_key_repeat_suppressed_for_enter_onion_tween_and_cmd3() {
         },
     );
     assert!(
-        app.view.onion_skin_enabled,
-        "別フレームの O キー長押しリピートでオニオンスキンが切り替わり続けないこと (#16)"
+        app.view.show_wireframe,
+        "別フレームの A キー長押しリピートでアンカーの表示が切り替わり続けないこと (#16)"
     );
 
     // 2. Cmd+3 初回押下フレームで clip_outside_stage が ON になり、別フレームの repeat: true では OFF に戻らないこと (#16)
@@ -39066,7 +39096,9 @@ fn menu_keys_dispatch_table_actions_and_leave_text_keys_to_fields() {
         menu_key_tap(egui::Key::O, none),
         |_, _| {},
     );
-    assert!(app.view.onion_skin_enabled, "O でオニオンスキン");
+    assert!(!app.view.onion_skin_enabled, "O でオニオンスキンが切り替わった（オニオンスキンのキーは無い）");
+    assert_eq!(app.tool.tool, Tool::InkBottle, "O でインクボトルにならない");
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
 
     put_cel_shapes(
         &mut app,
@@ -39083,7 +39115,7 @@ fn menu_keys_dispatch_table_actions_and_leave_text_keys_to_fields() {
     let focus = |ctx: &egui::Context, _: &mut Is2dApp| {
         ctx.memory_mut(|m| m.request_focus(egui::Id::new("入力欄")));
     };
-    // 入力中：コピー（Cmd+C は egui-winit がコピーの合図にする）・O・Backspace は入力欄のもの
+    // 入力中：コピー（Cmd+C は egui-winit がコピーの合図にする）・O（ツールのキー）・Backspace は入力欄のもの
     menu_test_frame(&ctx, &mut app, cmd, vec![egui::Event::Copy], focus);
     assert!(
         app.clipboard.content.is_none(),
@@ -39096,7 +39128,7 @@ fn menu_keys_dispatch_table_actions_and_leave_text_keys_to_fields() {
         menu_key_tap(egui::Key::O, none),
         focus,
     );
-    assert!(app.view.onion_skin_enabled, "入力中の O は入力欄の文字");
+    assert_eq!(app.tool.tool, Tool::Select, "入力中の O は入力欄の文字（ツールを変えない）");
     menu_test_frame(
         &ctx,
         &mut app,

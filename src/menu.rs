@@ -408,7 +408,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         menu: Menu::View,
         separator_before: false,
         label: "オニオンスキン",
-        shortcut: Some(Shortcut::plain(Key::O)),
+        shortcut: None,
         alias: None,
         repeats: false,
         enabled: always,
