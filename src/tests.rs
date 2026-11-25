@@ -20515,7 +20515,8 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     assert_eq!(app.doc.library.len(), 1);
 }
 
-/// レビュー d91cd4c の N-3003：浮いた片の確定を断られた（置けない）ら、輪郭の頂点・辺をつかんでも、輪郭のドラッグを始めない
+/// レビュー d91cd4c の N-3003・41766f9 の N-3003・N-5001：浮いた片の確定を断られた（置けない）ら、輪郭の頂点・辺・塗りを
+/// つかんでも（Alt の複製・自由変形ツールでも）、ドラッグを始めず、再生も始めない
 /// （浮いた片はみな選ばれたまま。矩形選択などにも落ちない）。前は、断られたのを見ずに始め、選択を空にして浮いた片の表示を
 /// 消し、離しても何も起きなかった
 #[test]
@@ -20538,14 +20539,38 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     assert!(app.session.floating().is_some());
     // 置く先のレイヤーの1つを編集できなくする（置けない場面の代わり）
     app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[1].locked = true);
-    for grab in [Point::new(500.0, 500.0), Point::new(550.0, 500.0)] {
+    let before = app.session.selection.clone();
+    // 輪郭の頂点・辺、塗り（レビュー 41766f9 の N-3003）、Alt で塗り（複製）を選択ツールでつかむ
+    let grabs = [
+        (Point::new(500.0, 500.0), false),
+        (Point::new(550.0, 500.0), false),
+        (Point::new(550.0, 550.0), false),
+        (Point::new(550.0, 550.0), true),
+    ];
+    for (grab, alt) in grabs {
         app.toast = None;
-        tool_select::start_reshape_drag(&mut app, grab, false, false);
+        tool_select::start_reshape_drag(&mut app, grab, false, alt);
         assert!(app.toast.is_some(), "{grab:?}：置けないことを知らせない");
-        assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}：断られたのにドラッグを始めた");
+        assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}（Alt {alt}）：断られたのにドラッグを始めた");
         assert!(app.session.floating().is_some());
-        assert!(!app.session.selection.is_empty(), "{grab:?}：浮いた片が選ばれていない");
+        assert_eq!(app.session.selection, before, "{grab:?}（Alt {alt}）：浮いた片の選択が変わった");
     }
+    // 自由変形ツールで、選んでいない図形をつかむ（N-3003）
+    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
+    app.toast = None;
+    tool_transform::start_transform_drag(&mut app, Point::new(550.0, 550.0), false, false);
+    assert!(app.toast.is_some(), "自由変形：置けないことを知らせない");
+    assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "自由変形：断られたのにドラッグを始めた");
+    assert_eq!(app.session.selection, before);
+    // 再生を押す（レビュー 41766f9 の N-5001：前は断られても再生を始め、止めたあとの確定で、止まったコマの絵が消えた）
+    let frame = app.tab().active_timeline().current_frame;
+    app.toast = None;
+    timeline_ui::toggle_playback(&mut app);
+    assert!(!app.timeline_ui.is_playing, "断られたのに再生を始めた");
+    assert!(app.toast.is_some(), "再生：置けないことを知らせない");
+    assert_eq!(app.tab().active_timeline().current_frame, frame);
+    assert!(app.session.floating().is_some());
+    assert_eq!(app.session.selection, before);
 }
 
 /// レビュー d91cd4c の N-3001：スポイトは、ロックの有無によらず、点でいちばん手前に見えているものを吸う。見えているのが

@@ -144,12 +144,8 @@ pub(crate) fn start_transform_drag(
             let scene = host.tab().scene();
             let hit_opt = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
             if let Some(hit_idx) = hit_opt {
-                if !host.tab().session.is_selected_at(hit_idx) {
-                    apply(host, Action::SelectSingleAt { pt });
-                }
-                let tab = host.tab_mut();
-                let move_drag = begin_move_selection_drag(tab, pt, alt_held);
-                tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+                let selected = host.tab().session.is_selected_at(hit_idx);
+                crate::select_ops::grab_and_move(host, pt, selected, alt_held);
             } else {
                 host.tab_mut().session.drag =
                     ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));

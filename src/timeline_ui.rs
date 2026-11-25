@@ -2425,7 +2425,12 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
         host.stop_playback();
         apply(host, Action::EndCoalesce { key: None });
     } else {
-        apply(host, Action::Deselect);
+        // 浮いた片の確定を断られたら、再生を始めない（確定は再生を始める前に行う。断った理由は `apply` が知らせている。
+        // レビュー 41766f9 の N-5001：前は断られても再生を始めてコマが進み、止めたあとに確定すると、浮いた片と持ち上げた元の
+        // コマの残りが、止まったコマのセル画に書かれてそのコマの絵が消えた）
+        if !apply(host, Action::Deselect) {
+            return;
+        }
         let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
         cancel_active_drag(tab);
         timeline_ui.cancel_drag();

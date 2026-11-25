@@ -224,6 +224,20 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
     }
 }
 
+/// 点 `pt` でつかんだ図形を動かし始める（選択ツールの塗り・Alt の複製、自由変形ツールの共通）：つかんだ図形が選ばれて
+/// いなければ（`selected` でなければ）選び直し、選び直せたときだけ、移動のドラッグ（`alt` なら複製しながら）を始める。
+/// 浮いた片の確定を断られて選び直せなければ、何も始めない（浮いた片はみな選ばれたまま。輪郭の頂点・辺をつかむときと同じ
+/// 決まり：`tool_select::start_reshape_drag`。レビュー 41766f9 の N-3003：前は断られても移動を始め、つかんだ図形でなく
+/// 浮いた片が動いた）
+pub(crate) fn grab_and_move(host: &mut impl ActionHost, pt: Point, selected: bool, alt: bool) {
+    if !selected && !apply(host, Action::SelectSingleAt { pt }) {
+        return;
+    }
+    let tab = host.tab_mut();
+    let move_drag = crate::clipboard_ops::begin_move_selection_drag(tab, pt, alt);
+    tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+}
+
 /// 進行中の選択の移動・矩形選択のドラッグを `pt` へ進める（選択ツール・自由変形ツール共通）
 pub(crate) fn update_selection_drag(tab: &mut Tab, pt: Point) -> bool {
     match &mut tab.session.drag {

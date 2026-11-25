@@ -6,7 +6,6 @@ use kurbo::{ParamCurve, Point, QuadBez};
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
-use crate::clipboard_ops::begin_move_selection_drag;
 use crate::doc_actions::{apply, Action, ActionHost};
 use crate::map_hover::scope_maps;
 use crate::planar_map::{reshape_result, LayerBase, ReshapeEdit};
@@ -217,12 +216,8 @@ pub(crate) fn start_reshape_drag(
     );
     if alt_held {
         if let Some(shape_id) = target.shape_id() {
-            if !host.tab().session.is_shape_id_selected(shape_id) {
-                apply(host, Action::SelectSingleAt { pt });
-            }
-            let tab = host.tab_mut();
-            let move_drag = begin_move_selection_drag(tab, pt, true);
-            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+            let selected = host.tab().session.is_shape_id_selected(shape_id);
+            crate::select_ops::grab_and_move(host, pt, selected, true);
             return;
         }
     }
@@ -286,12 +281,8 @@ pub(crate) fn start_reshape_drag(
         }
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
         HoverTarget::Fill { shape_id } => {
-            if !host.tab().session.is_shape_id_selected(shape_id) {
-                apply(host, Action::SelectSingleAt { pt });
-            }
-            let tab = host.tab_mut();
-            let move_drag = begin_move_selection_drag(tab, pt, false);
-            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+            let selected = host.tab().session.is_shape_id_selected(shape_id);
+            crate::select_ops::grab_and_move(host, pt, selected, false);
         }
         HoverTarget::None => {
             host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));
