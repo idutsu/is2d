@@ -906,6 +906,10 @@ pub(crate) enum Placement {
     /// 指さない。線の図形は、線がいつも塗りより上なので、その階層の生の図形のいちばん上。浮いた片の残り・輪郭の変形の
     /// 仮表示）
     RawOf(LayerId, Scope),
+    /// そのレイヤー・その階層の生の図形のいちばん上（グループ・インスタンスより下）。浮いた片と、動かしている生の図形の
+    /// 置き場（生の図形はいつもグループ・インスタンスより下：Animate と同じ。確定した後と同じ重なり。前はレイヤーの
+    /// いちばん上に置いたので、選んだ生の絵がグループを隠した）
+    AboveRaw(LayerId, Scope),
     /// そのレイヤー・その編集スコープの一番上に置く
     TopOfLayer(LayerId, Scope),
 }
@@ -989,6 +993,28 @@ pub(crate) fn build_scene_order_by_layer_ids(
                         }
                         None => Some(*lid),
                     }
+                }
+            }
+            Placement::AboveRaw(lid, scope) => {
+                // その階層の生の図形のいちばん上（生の図形が無ければ、その階層のいちばん下）
+                match base
+                    .iter()
+                    .rposition(|s| s.layer_id == *lid && s.is_raw_at_scope(scope))
+                {
+                    Some(pos) => {
+                        after_base[pos].push((0, add_idx));
+                        None
+                    }
+                    None => match base
+                        .iter()
+                        .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
+                    {
+                        Some(pos) => {
+                            replace_at_base[pos].push(add_idx);
+                            None
+                        }
+                        None => Some(*lid),
+                    },
                 }
             }
             Placement::TopOfLayer(lid, scope) => {
@@ -1491,7 +1517,7 @@ impl Session {
             self.overlay_movable_start = self.overlay.add.len();
             for piece in fl.pieces() {
                 self.overlay.add.push((
-                    Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                    Placement::AboveRaw(piece.layer_id, scope.clone()),
                     piece.clone(),
                 ));
             }
@@ -1588,7 +1614,7 @@ impl Session {
             .collect();
         // 複製のとき、動かしていない矩形の切り口（`modified` でない浮いた片）は、確定で捨てて元に戻してから写しを置く
         // （`duplicate_selected_in_working_copy` の `commit_floating`）ので、止まった絵はセル画のまま（切った片と残りを
-        // 出さない。出すと、浮いた片はレイヤーのいちばん上に描くので、片の塗りが、切り口のすぐ近くを通る残りの線の半分を
+        // 出さない。出すと、浮いた片は生の図形のいちばん上に描くので、片の塗りが、切り口のすぐ近くを通る残りの線の半分を
         // 覆って見えた）
         let stationary_floating = self
             .floating
@@ -1608,7 +1634,7 @@ impl Session {
             if alt_duplicate {
                 for piece in fl.pieces() {
                     self.overlay.add.push((
-                        Placement::TopOfLayer(piece.layer_id, scope.clone()),
+                        Placement::AboveRaw(piece.layer_id, scope.clone()),
                         piece.clone(),
                     ));
                 }
@@ -1639,7 +1665,9 @@ impl Session {
                 if !alt_duplicate {
                     self.overlay.hide.insert(shape.shape_id);
                 }
-                let placement = if alt_duplicate || shape.is_raw_at_scope(&scope) {
+                let placement = if shape.is_raw_at_scope(&scope) {
+                    Placement::AboveRaw(shape.layer_id, scope.clone())
+                } else if alt_duplicate {
                     Placement::TopOfLayer(shape.layer_id, scope.clone())
                 } else {
                     Placement::ReplaceAt(shape.shape_id)
@@ -1660,7 +1688,7 @@ impl Session {
                     }
                     self.overlay
                         .add
-                        .push((Placement::TopOfLayer(r.layer_id, scope.clone()), cloned));
+                        .push((Placement::AboveRaw(r.layer_id, scope.clone()), cloned));
                 }
             }
             for piece in fl.pieces() {
@@ -1674,7 +1702,7 @@ impl Session {
                     }
                     self.overlay
                         .add
-                        .push((Placement::TopOfLayer(piece.layer_id, scope.clone()), cloned));
+                        .push((Placement::AboveRaw(piece.layer_id, scope.clone()), cloned));
                 }
             }
         }

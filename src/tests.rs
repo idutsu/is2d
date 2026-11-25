@@ -21370,6 +21370,40 @@ fn undo_and_redo_keep_the_lines_of_selected_groups_selected() {
     assert!(all_selected(&app), "やり直した後に、グループの一部（線）が選ばれていない");
 }
 
+/// 生の絵とグループを一緒に選んでも、グループは生の絵の上に見える（生の絵はいつもグループより下：Animate と同じ。前は、
+/// 選んだ生の絵（浮いた片）をレイヤーのいちばん上に描いたので、選んだ顔の塗りが眉のグループを隠した。利用者の指摘）。
+/// 選んだまま動かしている間も同じ（離した後と同じ重なり）
+#[test]
+fn selected_raw_art_stays_under_groups() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    let skin = Color32::from_rgb(240, 210, 185);
+    let brow = Color32::from_rgb(20, 20, 20);
+    // 眉（グループ）を先に作り、そのあと顔の塗り（生の絵）を置く
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(220.0, 220.0, 300.0, 240.0, brow)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Group));
+    assert!(apply(&mut app, Action::Deselect));
+    assert!(apply(&mut app, Action::SetTool { tool: Tool::Brush }));
+    run(&mut app, &[Action::PaintStroke { points: vec![Point::new(260.0, 300.0), Point::new(260.01, 300.0)], radius: 150.0, color: skin }]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let top_at = |app: &Is2dApp, p: Point| app.scene().iter().rev().find(|s| s.contains_point(p)).map(|s| s.color);
+    let on_brow = Point::new(260.0, 230.0);
+    assert_eq!(top_at(&app, on_brow), Some(brow), "選ぶ前から眉が見えていない");
+    // 矩形で両方を選ぶ（顔の塗りは浮いた片になる）
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(500.0, 500.0), additive: false }));
+    assert!(app.scene().iter().any(|s| s.color == skin && app.session.selection.contains_shape(s)));
+    assert_eq!(top_at(&app, on_brow), Some(brow), "選ぶと、眉が顔の塗りに隠れた");
+    // 選んだまま動かしている間も、離した後も
+    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(260.0, 300.0), false);
+    app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+    crate::select_ops::update_selection_drag(app.tab_mut(), Point::new(270.0, 310.0));
+    assert_eq!(top_at(&app, on_brow + KVec2::new(10.0, 10.0)), Some(brow), "動かしている間に、眉が顔の塗りに隠れた");
+    crate::select_ops::finish_selection_drag(&mut app, None);
+    assert_eq!(top_at(&app, on_brow + KVec2::new(10.0, 10.0)), Some(brow), "離した後に、眉が顔の塗りに隠れた");
+}
+
 /// 線の漏れの洗い出し：線と塗りとグループの混ざった絵で、選び方と、新しい中身ができる操作（グループ化・解除・重ね順・
 /// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転・取り消し・やり直し）をでたらめな順に重ね、そのたびに確かめる：
 /// - グループのまとまり：グループの図形は、塗りも線も、みな選ばれているか、みな選ばれていないか
