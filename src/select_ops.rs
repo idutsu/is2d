@@ -806,21 +806,29 @@ pub(crate) fn prepare_arrange_selected(
     let scope = tab.session.editing_group_path.clone();
     let scope = &scope;
     let selection = &tab.session.selection;
+    let tl = tab.active_timeline();
     let mut layer_orders: Vec<(u64, Vec<u64>)> = Vec::new();
     for lid in editable_layer_ids(tab) {
-        let mut chunks: Vec<(u64, bool)> = Vec::new();
-        for s in tab.scene().iter() {
-            if s.layer_id == lid {
-                if let Some(gid) = s.active_group_id_at_scope(scope) {
-                    let sel = selection.contains_shape(s);
-                    if let Some(c) = chunks.iter_mut().find(|(id, _)| *id == gid) {
-                        c.1 |= sel;
-                    } else {
-                        chunks.push((gid, sel));
-                    }
-                }
-            }
-        }
+        // 並びは、今のコマのセル画の、今の階層の子（文書の中身：画面に図形を出さない子も入る。前は画面の図形から作った
+        // ので、変換の潰れたインスタンスが並びから漏れ、重ね順を変えると黙っていちばん下へ動いた：レビュー 41766f9 の
+        // N-6001）。選んでいるかは、選んだ画面の図形が入っている子か（見えない子は選べない）
+        let Some(cel) = tl
+            .layer_index_by_id(lid)
+            .and_then(|i| tl.layers[i].cel_at(tl.current_frame))
+        else {
+            continue;
+        };
+        let picked: std::collections::HashSet<u64> = tab
+            .scene()
+            .iter()
+            .filter(|s| s.layer_id == lid && selection.contains_shape(s))
+            .filter_map(|s| s.active_group_id_at_scope(scope))
+            .collect();
+        let mut chunks: Vec<(u64, bool)> = cel
+            .children(scope)
+            .into_iter()
+            .map(|g| (g, picked.contains(&g)))
+            .collect();
         if chunks.len() < 2 || !chunks.iter().any(|(_, sel)| *sel) {
             continue;
         }

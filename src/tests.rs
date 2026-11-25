@@ -6392,6 +6392,87 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     );
 }
 
+/// レビュー 41766f9 の N-6001：変換が潰れて画面に図形を出さないシンボル（反転のトゥイーンの真ん中で分けたコマなど）が
+/// あっても、重ね順を変えると、そのシンボルは並びの中の位置のまま動かない（重ね順の並びを文書のセル画の子から作る。前は
+/// 画面の図形から作ったので、見えないシンボルが並びから漏れ、黙っていちばん下へ動いた）
+#[test]
+fn arranging_keeps_an_invisible_instance_in_place() {
+    use crate::doc_actions::{apply, Action};
+    use crate::select_ops::ArrangeMode;
+    let mut app = Is2dApp::default();
+    let color = Color32::from_rgb(120, 175, 160);
+    let rects: Vec<FillShape> = (0..4)
+        .map(|k| map_overlay::rect_shape(100.0 + 150.0 * k as f64, 100.0, 200.0 + 150.0 * k as f64, 200.0, color))
+        .collect();
+    put_cel_shapes(&mut app, 0, 0, rects);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    // 下から：グループ・シンボル・グループ・グループ
+    let center = |k: usize| Point::new(150.0 + 150.0 * k as f64, 150.0);
+    for k in 0..4 {
+        assert!(apply(&mut app, Action::SelectSingleAt { pt: center(k) }));
+        assert!(apply(&mut app, if k == 1 { Action::ConvertToSymbol } else { Action::Group }));
+        apply(&mut app, Action::Deselect);
+    }
+    let order = |app: &Is2dApp| -> Vec<u64> {
+        let tl = app.tab().active_timeline();
+        tl.layers[0].cel_at(tl.current_frame).unwrap().children(&[])
+    };
+    let before = order(&app);
+    assert_eq!(before.len(), 4);
+    let inst = app.tab().active_timeline().instances().next().unwrap().binding.instance_gid;
+    assert_eq!(before[1], inst, "シンボルが下から2番目にある");
+    // シンボルの変換を潰す（横幅 0：画面に図形を出さない）
+    let set_xform = |app: &mut Is2dApp, f: &dyn Fn(Affine) -> Affine| {
+        app.tab_mut().with_active_timeline_mut(|tl, _| {
+            let kf = tl.layers[0].keyframe_index_at(0).unwrap();
+            let cel = &mut tl.layers[0].keyframe_mut(kf).cel;
+            let i = std::sync::Arc::make_mut(&mut cel.instances);
+            i[0].binding.xform = f(i[0].binding.xform);
+            cel.revision = crate::vector_engine::next_mesh_revision();
+        });
+    };
+    let orig = app.tab().active_timeline().instances().next().unwrap().binding.xform;
+    set_xform(&mut app, &|x| x * Affine::scale_non_uniform(0.0, 1.0));
+    assert!(
+        app.scene().iter().all(|s| s.symbol_instance.is_none_or(|b| b.instance_gid != inst)),
+        "変換の潰れたシンボルが画面に図形を出している"
+    );
+    // いちばん上のグループを最背面へ
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: center(3) }));
+    assert!(apply(&mut app, Action::Arrange { mode: ArrangeMode::ToBack }));
+    set_xform(&mut app, &|_| orig);
+    let after = order(&app);
+    assert_eq!(after, vec![before[3], before[0], before[1], before[2]], "見えないシンボルが並びの中で動いた");
+}
+
+/// レビュー 41766f9 の N-2002：回転したシンボルを左右に反転するトゥイーンを、横幅が 0 になる真ん中のコマで分けても
+/// （F6 など）、後ろのコマの動きが分ける前と同じ。真ん中のコマの行列は横の列が潰れているので、残った縦の列で向きを
+/// 決める（前は回転を 0 と決め打ちし、本当の回転が斜めと縦の拡大に入って、後ろの動きが斜めに歪んだ）
+#[test]
+fn splitting_a_flip_tween_at_its_collapsed_frame_keeps_the_motion() {
+    use crate::symbol::{interpolate_affine_with_pivot, TweenRotate};
+    let pivot = Point::new(40.0, -30.0);
+    for deg in [0.0f64, 30.0, 60.0, 90.0, 135.0, -70.0] {
+        let rot = kurbo::Affine::rotate(deg.to_radians());
+        let start = kurbo::Affine::translate((200.0, 150.0)) * rot;
+        let end = kurbo::Affine::translate((320.0, 180.0)) * rot * kurbo::Affine::scale_non_uniform(-1.0, 1.0);
+        let at = |a, b, t| interpolate_affine_with_pivot(a, pivot, b, pivot, TweenRotate::Auto, t).0;
+        // 10 コマのトゥイーンを、コマ 5（横幅 0）で分ける。分けたあとのコマ 7 は、後ろのトゥイーン（コマ 5〜10）の t = 0.4
+        let mid = at(start, end, 0.5);
+        for (frame, t_whole) in [(6.0, 0.6), (7.0, 0.7), (9.0, 0.9)] {
+            let whole = at(start, end, t_whole);
+            let split = at(mid, end, (frame - 5.0) / 5.0);
+            let diff = whole
+                .as_coeffs()
+                .iter()
+                .zip(split.as_coeffs())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0, f64::max);
+            assert!(diff < 1e-9, "回転 {deg}°・コマ {frame}：分けたあとの動きが変わった（係数の差 {diff}）");
+        }
+    }
+}
+
 #[test]
 fn test_flip_tween_midpoint_and_horizontal_flip_without_spurious_rotation() {
     use crate::symbol::{interpolate_affine_with_pivot, TweenRotate};

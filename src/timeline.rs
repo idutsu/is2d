@@ -160,12 +160,20 @@ pub(crate) fn interpolate_affine_with_pivot(
     (interp_xform, local_pivot)
 }
 
-/// 2D アフィン変換から回転・拡大縮小・せん断 `(rot, sx, sy, shear)` を取り出す（平行移動はトゥイーンでピボットから作り直すので返さない）
+/// 2D アフィン変換から回転・拡大縮小・せん断 `(rot, sx, sy, shear)` を取り出す（平行移動はトゥイーンでピボットから作り直すので返さない）。
+/// 向きは横の列 `(a, b)` = sx·(cos, sin) から決める。横の列が潰れているとき（反転のトゥイーンの真ん中のコマなど。長さ
+/// `TINY_LEN` 以下）は、残った縦の列 `(c, d)` = sy·(−sin, cos) から決める（斜めは 0 とみなす。斜めをかけたまま反転した
+/// ときは、潰れた行列から斜めと回転を見分ける手がかりが無い）。両方とも潰れていれば向きは決まらないので 0。前は横の列が
+/// 潰れると回転を 0 と決め打ちし、本当の回転が斜めと縦の拡大に入ったので、そのコマで分けた（F6）トゥイーンの後ろの動きが
+/// 変わった（レビュー 41766f9 の N-2002）
 fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
     let [a, b, c, d, _, _] = affine.as_coeffs();
     let sx = a.hypot(b);
+    let len_y = c.hypot(d);
     let (cos_r, sin_r, rot) = if sx > crate::vector_engine::TINY_LEN {
         (a / sx, b / sx, b.atan2(a))
+    } else if len_y > crate::vector_engine::TINY_LEN {
+        (d / len_y, -c / len_y, (-c).atan2(d))
     } else {
         (1.0, 0.0, 0.0)
     };
@@ -961,21 +969,36 @@ impl Cel {
         changed
     }
 
+    /// 中身 `it` が、階層 `scope` のどの子（グループ・インスタンスの番号）に入るか（`scope` そのものの生の図形と、`scope` の
+    /// 外は `None`）。重ね順の子の見分け方はこれ1つ（`children`・`rearrange`）
+    fn child_of(it: &Item<ScopeMap>, scope: &[u64]) -> Option<u64> {
+        let depth = scope.len();
+        match it {
+            Item::Raw(p, _) if p.starts_with(scope) && p.len() > depth => Some(p[depth]),
+            Item::Instance(i) if i.parent_scope == scope => Some(i.binding.instance_gid),
+            Item::Instance(i) if i.parent_scope.starts_with(scope) => Some(i.parent_scope[depth]),
+            _ => None,
+        }
+    }
+
+    /// 階層 `scope` の子（グループ・インスタンスの番号）を、重なりの順（下から）に並べたもの。文書の中身から作るので、画面に
+    /// 図形を出さない子（変換が潰れたインスタンスなど）も入る（重ね順の変更の並び：`select_ops::prepare_arrange_selected`）
+    pub(crate) fn children(&self, scope: &[u64]) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        for it in Self::items_of(&self.maps, &self.instances) {
+            if let Some(g) = Self::child_of(&it, scope) {
+                if !out.contains(&g) {
+                    out.push(g);
+                }
+            }
+        }
+        out
+    }
+
     /// 重ね順：階層 `scope` の子（グループ・インスタンス）の順を、番号の並び `order` にする（並びに無い子は動かさない）。
     /// `false`：変わらない
     pub(crate) fn rearrange(&mut self, scope: &[u64], order: &[u64]) -> bool {
-        let depth = scope.len();
-        // 中身が階層 `scope` のどの子に入るか（`scope` そのものの生の図形と、`scope` の外は `None`）
-        let child = |it: &Item<ScopeMap>| -> Option<u64> {
-            match it {
-                Item::Raw(p, _) if p.starts_with(scope) && p.len() > depth => Some(p[depth]),
-                Item::Instance(i) if i.parent_scope == scope => Some(i.binding.instance_gid),
-                Item::Instance(i) if i.parent_scope.starts_with(scope) => {
-                    Some(i.parent_scope[depth])
-                }
-                _ => None,
-            }
-        };
+        let child = |it: &Item<ScopeMap>| Self::child_of(it, scope);
         let mut items: Vec<Option<Item<ScopeMap>>> = Self::items_of(&self.maps, &self.instances)
             .into_iter()
             .map(Some)
