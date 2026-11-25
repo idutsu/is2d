@@ -1,6 +1,7 @@
 //! 塗りの色を選ぶ部品：RGBA の数字・今の色・明るさと鮮やかさの四角・色相の帯・不透明度の帯（egui の
 //! `color_picker_color32` と同じ並び）。四角の中の今の色の位置は、十字で示す（egui の部品は、四角の幅に比べた大きさの
-//! 丸で示し、その大きさを外から変えられないので、自分で作る）。幅はパネルの残りの幅いっぱい
+//! 丸で示し、その大きさを外から変えられないので、自分で作る。十字は四角の縁や角でも切らずに全部描く：腕が四角の外に
+//! はみ出してよい。利用者が決めた）。幅はパネルの残りの幅いっぱい
 
 use eframe::egui::{
     self,
@@ -78,7 +79,8 @@ fn contrast(color: Color32) -> Color32 {
     }
 }
 
-/// 鮮やかさ（横）と明るさ（縦）を選ぶ、幅 `width` の正方形。今の位置を十字で示す
+/// 鮮やかさ（横）と明るさ（縦）を選ぶ、幅 `width` の正方形。今の位置を十字で示す（四角の中に切り取らない：黒（左下の角）や
+/// 灰色（左の縁）でも十字が見える。前は四角の中に切り取ったので、縁の上の腕が切れ、黒では十字がまったく見えなかった）
 fn saturation_value_square(
     ui: &mut egui::Ui,
     width: f32,
@@ -116,7 +118,6 @@ fn saturation_value_square(
         lerp(rect.bottom()..=rect.top(), *v),
     );
     let stroke = Stroke::new(visuals.fg_stroke.width, contrast(color_at(*s, *v)));
-    let painter = painter.with_clip_rect(rect);
     painter.line_segment(
         [center - vec2(CROSS_ARM, 0.0), center + vec2(CROSS_ARM, 0.0)],
         stroke,

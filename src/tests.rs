@@ -20644,6 +20644,33 @@ fn the_selection_tint_is_drawn_above_every_shape() {
     assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
 }
 
+/// カラーピッカーの四角の十字は、縁や角でも切らずに全部描く：黒（明るさ 0・鮮やかさ 0 で左下の角）でも十字が見える（利用者の
+/// 指摘：インクボトルの線の色は最初が黒で、四角の中に切り取ると、縁の上に乗った腕が切れて十字がまったく見えなかった）
+#[test]
+fn the_color_picker_cross_is_whole_even_at_the_corner() {
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0)));
+    let mut color = Color32::BLACK;
+    let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            crate::color_picker::color_picker(ui, &mut color);
+        });
+    });
+    // 十字の線（黒の上なので白）が、どちらも切られずに描かれる（線の両端が、その形を切り取る範囲の中にある）
+    let whole: Vec<_> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::LineSegment { points, stroke } if stroke.color == Color32::WHITE => {
+                Some(points.iter().all(|p| c.clip_rect.contains(*p)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(whole.len(), 2, "十字の線が2本描かれていない");
+    assert!(whole.iter().all(|&w| w), "十字の線が四角の縁で切られる");
+}
+
 /// Shift を押してダブルクリックすると、つながった線を今の選択に足す（前にダブルクリックで選んだ線は選んだまま。利用者の指摘：
 /// 前は、ダブルクリックがいつも今の選択を外してから選んだので、前の線が選択から外れた）。Shift を押さなければ入れ替える
 #[test]
