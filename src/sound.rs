@@ -5,7 +5,7 @@
 //! （`Pcm`。保存しない）。音の中の位置は、どの音でも同じ単位 `SOUND_RATE`（1 秒を 48,000 に分けた番号）で数える。
 //! 音の元のサンプルの速さによらず、作品の fps を変えても、切った位置がずれない
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 音の中の位置の単位：1 秒あたりの数（`SoundClip` の `start`・`end`、`Sound::len`）
 pub(crate) const SOUND_RATE: u64 = 48_000;
@@ -36,46 +36,73 @@ pub(crate) struct Sound {
     pub(crate) encoded: Arc<[u8]>,
     /// 鳴らすための波形（`encoded` から作った写し。保存しない）
     pub(crate) pcm: Arc<Pcm>,
-    /// 波形の絵のための、音の中の位置 `PEAK_UNITS` ごとの、左右の値のいちばん小さいもの・大きいもの（`pcm` から1回だけ
-    /// 作る写し。保存しない）。サンプルが1つも入らない所は、小さいほうが大きいほうより大きい（値が無い）
-    peaks: Arc<Vec<(i16, i16)>>,
+    /// 波形の絵のための山の表（`Peaks`。初めて描くときに作る写し。保存しない。写しの音と共有する）
+    peaks: Arc<Peaks>,
 }
 
-/// 波形の絵の値の幅を持つ長さ（`SOUND_RATE` の単位）：タイムラインの画面の 1px に当たる音のいちばん短い長さ。1コマの
-/// 幅 `CELL_W` に、いちばん短いコマ（fps の上限 `MAX_FPS` の1コマ）が入るので、1px は 1 / (`MAX_FPS` × `CELL_W`) 秒
-/// （60fps・16px で 50）。これより細かく持っても画面に出ない
-const PEAK_UNITS: u64 =
-    SOUND_RATE / (crate::symbol::MAX_FPS as u64 * crate::timeline_ui::CELL_W as u64);
+/// 波形の絵の山の表の入れ物：（細かさ, 表）を1つ。表は、音の中の位置を細かさ（`SOUND_RATE` の単位の長さ）ごとに区切った、
+/// 左右の値のいちばん小さいもの・大きいもの。サンプルが1つも入らない所は、小さいほうが大きいほうより大きい（値が無い）。
+/// 細かさは描く側が決める（画面の都合なので、音の側は持たない：`timeline_ui::WAVE_UNIT`）。細かさが変われば作り直す
+/// （拡大のメッシュ `ZoomMesh` と同じ作り）
+#[derive(Default, Debug)]
+struct Peaks(Mutex<Option<(u64, PeakTable)>>);
+
+/// 波形の山の表（区切りごとの、左右の値のいちばん小さいもの・大きいもの）
+type PeakTable = Arc<Vec<(i16, i16)>>;
+
+/// 波形 `pcm` の、細かさ `unit` の山の表：時点 i（左右の組）は、区切り ⌊i·`SOUND_RATE` / (rate·`unit`)⌋ に入る。区切り b に
+/// 入る時点は ⌈b·rate·unit / SOUND_RATE⌉ から次の区切りの始まりの前までなので、区切りごとに、その範囲をまとめて調べる
+/// （時点ごとに割り算をしない）。時点が1つも入らない区切りは、小さいほうが大きいほうより大きい（値が無い）
+pub(crate) fn peak_table(pcm: &Pcm, unit: u64) -> Vec<(i16, i16)> {
+    let frames = pcm.frames();
+    let span = u64::from(pcm.rate) * unit;
+    let start = |b: u64| (b * span).div_ceil(SOUND_RATE).min(frames);
+    let bins = if frames == 0 { 0 } else { (frames - 1) * SOUND_RATE / span + 1 };
+    (0..bins)
+        .map(|b| {
+            let (i0, i1) = (start(b) as usize, start(b + 1) as usize);
+            pcm.samples[2 * i0..2 * i1]
+                .iter()
+                .fold((i16::MAX, i16::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+        })
+        .collect()
+}
+
+impl Peaks {
+    /// 波形 `pcm` の、細かさ `unit` の表（持っていればそれ、無ければ作って持つ）
+    fn get_or_make(&self, unit: u64, pcm: &Pcm) -> PeakTable {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((u, t)) = &*slot {
+            if *u == unit {
+                return Arc::clone(t);
+            }
+        }
+        let t = Arc::new(peak_table(pcm, unit));
+        *slot = Some((unit, Arc::clone(&t)));
+        t
+    }
+}
 
 impl Sound {
     /// 番号 `id`・名前 `name` の、バイト `encoded`（WAV か MP3）の音。波形にできなければ `Err`（壊れた音・読めない形式）
     pub(crate) fn new(id: u64, name: String, encoded: Arc<[u8]>) -> Result<Self, String> {
         let pcm = decode(&encoded)?;
-        let mut peaks: Vec<(i16, i16)> = Vec::new();
-        for (i, lr) in pcm.samples.chunks_exact(2).enumerate() {
-            let b = (i as u64 * SOUND_RATE / u64::from(pcm.rate) / PEAK_UNITS) as usize;
-            if b >= peaks.len() {
-                peaks.resize(b + 1, (i16::MAX, i16::MIN));
-            }
-            let p = &mut peaks[b];
-            *p = (p.0.min(lr[0]).min(lr[1]), p.1.max(lr[0]).max(lr[1]));
-        }
         Ok(Self {
             id,
             name,
             encoded,
             pcm: Arc::new(pcm),
-            peaks: Arc::new(peaks),
+            peaks: Arc::default(),
         })
     }
 
     /// 音の中の位置 `a` から `b` の前まで（`SOUND_RATE` の単位。`a < b`）の、左右の値のいちばん小さいもの・大きいもの
-    /// （-1〜1）。波形の絵に使う（`PEAK_UNITS` ごとに持った値から：範囲にかかる所を全部見る）。値が無い所は `None`
-    pub(crate) fn peak(&self, a: u64, b: u64) -> Option<(f32, f32)> {
-        let first = (a / PEAK_UNITS) as usize;
-        let last = (b.div_ceil(PEAK_UNITS) as usize).min(self.peaks.len());
-        let (lo, hi) = self
-            .peaks
+    /// （-1〜1）。波形の絵に使う（細かさ `unit` ごとに持った山の表から：範囲にかかる所を全部見る）。値が無い所は `None`
+    pub(crate) fn peak(&self, a: u64, b: u64, unit: u64) -> Option<(f32, f32)> {
+        let peaks = self.peaks.get_or_make(unit, &self.pcm);
+        let first = (a / unit) as usize;
+        let last = (b.div_ceil(unit) as usize).min(peaks.len());
+        let (lo, hi) = peaks
             .get(first..last)?
             .iter()
             .fold((i16::MAX, i16::MIN), |(lo, hi), &(l, h)| {

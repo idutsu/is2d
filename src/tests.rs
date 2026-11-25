@@ -24562,6 +24562,10 @@ fn test_reshape_preview_matches_commit_when_crossing() {
 ///   残りに戻せず、片と残りの両方に残った）
 /// - ドラッグ中の見た目が、選んでいる残り（矩形の後に Shift のダブルクリックで足した線）を動かさなかった
 ///   （`Session::begin_selection_overlay`。確定は持ち上げて動かす）
+///
+/// 線で縁どった塗りの絵での Alt の複製も：動かしていない矩形の切り口は、確定で捨てて元に戻してから写しを置くので、ドラッグ
+/// 中の止まった絵もセル画のまま（前は切った片と残りを出し、レイヤーのいちばん上に描く片の塗りが、切り口のすぐ近くを通る
+/// 残りの線の半分を覆って見えた）
 #[test]
 fn dragging_after_mixed_selections_matches_the_drop() {
     use crate::doc_actions::{apply, Action};
@@ -24638,9 +24642,7 @@ fn dragging_after_mixed_selections_matches_the_drop() {
             continue;
         }
         let from = Point::new(300.0, 300.0);
-        // Alt の複製は線だけの絵で確かめる。塗りのある絵では、その場に残る元の片の塗りが、矩形の枠のすぐ近くを通る残りの線の
-        // 半分を覆って見える（浮いた片はレイヤーのいちばん上に描くため。離すと線は塗りの上。今回とは別の、前からあるずれ）
-        let alt = rng.bool() && !with_fill;
+        let alt = rng.bool();
         let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, alt);
         app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
         crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(15.0, 140.0));
@@ -38970,9 +38972,36 @@ fn frames_to_reach_is_the_inverse_of_frames_to_sound() {
 fn sound_peaks_follow_the_samples() {
     let doc = doc_with_flat_sound();
     let s = &doc.sounds[0];
-    assert_eq!(s.peak(0, 125), Some((0.5, 0.5)));
-    assert_eq!(s.peak(47_900, 48_000), Some((0.5, 0.5)));
-    assert_eq!(s.peak(48_000, 48_100), None);
+    let unit = crate::timeline_ui::WAVE_UNIT;
+    assert_eq!(s.peak(0, 125, unit), Some((0.5, 0.5)));
+    assert_eq!(s.peak(47_900, 48_000, unit), Some((0.5, 0.5)));
+    assert_eq!(s.peak(48_000, 48_100, unit), None);
+    // 細かさを変えると作り直す（同じ音の値）
+    assert_eq!(s.peak(0, 125, unit * 2), Some((0.5, 0.5)));
+    assert_eq!(s.peak(48_000, 48_100, unit * 2), None);
+}
+
+/// 波形の山の表を、区切りごとにまとめて作っても（`peak_table`）、時点ごとに区切りを求めて入れた表（お手本）と同じ。いろいろな
+/// rate・細かさ・長さで
+#[test]
+fn peak_table_matches_per_sample_binning() {
+    let mut rng = fastrand::Rng::with_seed(0x9ea6);
+    for &(rate, unit) in &[(48_000u32, 50u64), (44_100, 50), (22_050, 50), (8_000, 7), (96_000, 13), (44_100, 1)] {
+        for &frames in &[0usize, 1, 2, 3, 49, 50, 51, 1000, 4411] {
+            let samples: Vec<i16> = (0..frames * 2).map(|_| rng.i16(..)).collect();
+            let pcm = crate::sound::Pcm { rate, samples };
+            let mut want: Vec<(i16, i16)> = Vec::new();
+            for (i, lr) in pcm.samples.chunks_exact(2).enumerate() {
+                let b = (i as u64 * crate::sound::SOUND_RATE / u64::from(rate) / unit) as usize;
+                if b >= want.len() {
+                    want.resize(b + 1, (i16::MAX, i16::MIN));
+                }
+                let p = &mut want[b];
+                *p = (p.0.min(lr[0]).min(lr[1]), p.1.max(lr[0]).max(lr[1]));
+            }
+            assert_eq!(crate::sound::peak_table(&pcm, unit), want, "rate {rate}・細かさ {unit}・長さ {frames}");
+        }
+    }
 }
 
 /// テスト用：40 コマのレイヤーの、コマ 10 から 29 のキーフレームに音 1（1 秒）を頭から付け、コマ 0・30 は空白のキーフレーム

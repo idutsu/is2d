@@ -31,6 +31,12 @@ pub(crate) fn keyframes_examined() -> usize {
 /// タイムライングリッドの1フレームあたりのセル幅（px）
 pub(crate) const CELL_W: f32 = 16.0;
 
+/// 波形の絵の山の表の細かさ（`SOUND_RATE` の単位の長さ：`Sound::peak`）：タイムラインの画面の 1px に当たる音のいちばん
+/// 短い長さ。1コマの幅 `CELL_W` に、いちばん短いコマ（fps の上限 `MAX_FPS` の1コマ）が入るので、1px は
+/// 1 / (`MAX_FPS` × `CELL_W`) 秒（60fps・16px で 50）。これより細かく持っても画面に出ない
+pub(crate) const WAVE_UNIT: u64 =
+    crate::sound::SOUND_RATE / (crate::symbol::MAX_FPS as u64 * CELL_W as u64);
+
 const LAYER_COL_W: f32 = 190.0;
 const RULER_H: f32 = 24.0;
 const ROW_H: f32 = 26.0;
@@ -1929,7 +1935,7 @@ fn draw_sound_wave(
             if a >= b {
                 break;
             }
-            if let Some((lo, hi)) = sound.peak(a, b) {
+            if let Some((lo, hi)) = sound.peak(a, b, WAVE_UNIT) {
                 let x = x0 + j as f32 + 0.5;
                 grid_painter.line_segment(
                     [Pos2::new(x, mid - hi * half), Pos2::new(x, mid - lo * half)],

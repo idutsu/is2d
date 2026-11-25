@@ -1584,7 +1584,15 @@ impl Session {
             .map(|r| r.shape_id)
             .filter(|id| self.selection.shapes.contains(id))
             .collect();
-        if let Some(fl) = &self.floating {
+        // 複製のとき、動かしていない矩形の切り口（`modified` でない浮いた片）は、確定で捨てて元に戻してから写しを置く
+        // （`duplicate_selected_in_working_copy` の `commit_floating`）ので、止まった絵はセル画のまま（切った片と残りを
+        // 出さない。出すと、浮いた片はレイヤーのいちばん上に描くので、片の塗りが、切り口のすぐ近くを通る残りの線の半分を
+        // 覆って見えた）
+        let stationary_floating = self
+            .floating
+            .as_ref()
+            .filter(|fl| !alt_duplicate || fl.modified);
+        if let Some(fl) = stationary_floating {
             self.overlay.hide = fl.hidden().clone();
             self.overlay.add.extend(
                 fl.placed_remainder()
