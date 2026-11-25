@@ -21249,6 +21249,206 @@ fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
     assert!(pasted.iter().all(|d| d.1), "貼り付けた中に選ばれていない図形がある：{pasted:?}");
 }
 
+/// 線で縁どった塗りの、塗りだけをその場に貼り付けて確定しても、縁の線は消えない（Animate と同じ。利用者が確かめた）。上に
+/// 重ねる塗りの境目に線が無ければ、下の線はそのまま残る（内側にすっぽり入った下の線だけが、上の塗りに覆われて消える）。
+/// 前は、上の塗りの線の無い境目が、ぴったり重なる下の線を置き換えて消した
+#[test]
+fn pasting_a_fill_in_place_keeps_the_ink_under_its_edge() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    let green = Color32::from_rgb(120, 175, 160);
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 300.0, 300.0, green)]);
+    let ink = EdgeStroke { color: Color32::BLACK, width: 10 };
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(250.0, 250.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let lines = |app: &Is2dApp| app.scene().iter().filter(|s| s.line.is_some()).count();
+    assert_eq!(lines(&app), 4);
+    // 塗りだけを選んで、コピーして、その場に貼り付けて、確定する
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 250.0) }));
+    assert!(app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).all(|s| s.line.is_none()));
+    assert!(apply(&mut app, Action::Copy));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert!(apply(&mut app, Action::Deselect));
+    assert_eq!(lines(&app), 4, "縁の線が消えた");
+    // 縁の線の外側の半分（塗りの外）も、線の色のまま
+    let top_outside = Point::new(250.0, 197.0);
+    let hit = app.scene().iter().rev().find(|s| s.contains_point(top_outside)).map(|s| s.color);
+    assert_eq!(hit, Some(Color32::BLACK));
+}
+
+/// 線の漏れの洗い出し：線と塗りとグループの混ざった絵で、選び方と、新しい中身ができる操作（グループ化・解除・重ね順・
+/// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転）をでたらめな順に重ね、そのたびに確かめる：
+/// - グループのまとまり：グループの図形は、塗りも線も、みな選ばれているか、みな選ばれていないか
+/// - 選んでいる範囲：形を変えない操作（グループ化・解除・重ね順・シンボル化・その場に貼り付け）のあとは、選んだ絵が覆う所が
+///   前と同じ。動かす操作（移動・Alt の複製）のあとは、動かした分だけずれた所（線の番号は形から決まるので、形や持ち主が
+///   変わると番号が変わる。選び直しで線が漏れると、線の所が欠ける）
+/// - 最後に続けてドラッグしたとき、ドラッグ中の見た目と離した後が同じ
+#[test]
+fn selections_keep_their_lines_through_operations() {
+    use crate::doc_actions::{apply, Action};
+    use crate::select_ops::ArrangeMode;
+    let ink = crate::planar_map::EdgeStroke { color: Color32::from_rgb(20, 40, 90), width: 8 };
+    let line = |a: Point, b: Point| -> Vec<Point> { (0..=40).map(|i| a.lerp(b, i as f64 / 40.0)).collect() };
+    // 選んでいる絵
+    let selected = |app: &Is2dApp| -> Vec<FillShape> {
+        app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).cloned().collect()
+    };
+    // 格子の点が、絵 `sel` を `shift` だけずらしたものに覆われているか
+    let covered = |sel: &[FillShape], shift: KVec2| -> Vec<bool> {
+        let mut out = Vec::new();
+        let mut y = 120.0;
+        while y < 760.0 {
+            let mut x = 60.0;
+            while x < 900.0 {
+                let p = Point::new(x + 0.137, y + 0.173) - shift;
+                out.push(sel.iter().any(|s| s.contains_point(p)));
+                x += 4.0;
+            }
+            y += 4.0;
+        }
+        out
+    };
+    let colors = |app: &Is2dApp| -> Vec<Option<Color32>> {
+        let shapes: Vec<FillShape> = app.scene().iter().cloned().collect();
+        let mut out = Vec::new();
+        let mut y = 120.0;
+        while y < 760.0 {
+            let mut x = 60.0;
+            while x < 900.0 {
+                let p = Point::new(x + 0.137, y + 0.173);
+                out.push(shapes.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color));
+                x += 4.0;
+            }
+            y += 4.0;
+        }
+        out
+    };
+    let mut rng = fastrand::Rng::with_seed(0x11e5_1eaf);
+    let mut bad: Vec<String> = Vec::new();
+    for case in 0..600 {
+        let mut app = Is2dApp::default();
+        apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+        for (a, b) in [
+            (Point::new(100.0, 200.0), Point::new(500.0, 200.0)),
+            (Point::new(220.0, 200.0), Point::new(220.0, 450.0)),
+            (Point::new(380.0, 200.0), Point::new(380.0, 450.0)),
+        ] {
+            assert!(apply(&mut app, Action::PencilStroke { points: line(a, b), stroke: ink }));
+        }
+        put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(420.0, 300.0, 520.0, 420.0, Color32::from_rgb(230, 180, 60))]);
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(470.0, 360.0), stroke: ink }));
+        apply(&mut app, Action::SetTool { tool: Tool::Select });
+        let on_art = |rng: &mut fastrand::Rng| match rng.usize(0..5) {
+            0 => Point::new(100.0 + rng.f64() * 400.0, 200.0),
+            1 => Point::new(220.0, 200.0 + rng.f64() * 250.0),
+            2 => Point::new(380.0, 200.0 + rng.f64() * 250.0),
+            3 => Point::new(430.0 + rng.f64() * 80.0, 310.0 + rng.f64() * 100.0),
+            _ => Point::new(420.0 + rng.f64() * 100.0, 300.0),
+        };
+        let mut ops: Vec<String> = Vec::new();
+        for _ in 0..(3 + rng.usize(0..8)) {
+            let before = selected(&app);
+            let pick = rng.usize(0..14);
+            // （名前, 選んだ範囲の確かめ：None は確かめない、Some(d) は d だけずれる）
+            let (name, expect): (&str, Option<KVec2>) = match pick {
+                0 => {
+                    let (x, y) = (60.0 + rng.f64() * 500.0, 150.0 + rng.f64() * 350.0);
+                    let add = rng.bool();
+                    apply(&mut app, Action::SelectMarquee { p0: Point::new(x, y), p1: Point::new(x + 40.0 + rng.f64() * 300.0, y + 40.0 + rng.f64() * 300.0), additive: add });
+                    ("矩形", None)
+                }
+                1 => {
+                    let pt = on_art(&mut rng);
+                    crate::select_ops::apply_click_selection(&mut app, pt, rng.bool(), true);
+                    ("クリック", None)
+                }
+                2 => {
+                    let pt = on_art(&mut rng);
+                    tool_select::handle_canvas_double_click(&mut app, pt, rng.bool());
+                    ("ダブル", None)
+                }
+                3 => ("全部", { apply(&mut app, Action::SelectAll); None }),
+                4 => ("グループ化", apply(&mut app, Action::Group).then_some(KVec2::ZERO)),
+                5 => ("解除", apply(&mut app, Action::Ungroup).then_some(KVec2::ZERO)),
+                6 => {
+                    let mode = [ArrangeMode::ToFront, ArrangeMode::Forward, ArrangeMode::Backward, ArrangeMode::ToBack][rng.usize(0..4)];
+                    ("重ね順", apply(&mut app, Action::Arrange { mode }).then_some(KVec2::ZERO))
+                }
+                7 => ("シンボル化", apply(&mut app, Action::ConvertToSymbol).then_some(KVec2::ZERO)),
+                8 => {
+                    let d = KVec2::new(rng.f64() * 60.0 - 30.0, rng.f64() * 60.0 - 30.0).round();
+                    ("移動", apply(&mut app, Action::MoveSelected { delta: d }).then_some(d))
+                }
+                9 => {
+                    let d = KVec2::new(rng.f64() * 300.0 - 100.0, rng.f64() * 200.0).round();
+                    let alt = rng.bool();
+                    let ok = apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: d, alt_duplicate: alt });
+                    (if alt { "Alt複製" } else { "ドラッグ" }, ok.then_some(d))
+                }
+                10 => {
+                    let ok = apply(&mut app, Action::Copy) && apply(&mut app, Action::Paste { in_place: true });
+                    ("その場に貼り付け", ok.then_some(KVec2::ZERO))
+                }
+                11 => ("拡大", { apply(&mut app, Action::ScaleSelection { sx: 1.25, sy: 0.8 }); None }),
+                12 => ("回転", { apply(&mut app, Action::RotateSelection { angle_rad: 0.4 }); None }),
+                _ => ("反転", { apply(&mut app, Action::FlipSelection { flip_x: true, flip_y: false }); None }),
+            };
+            ops.push(name.to_string());
+            // グループのまとまり（今の階層の子グループ・インスタンスごとに、みな選ばれているか、みな選ばれていないか）
+            let scope_now = app.session.editing_group_path.clone();
+            let mut units: std::collections::HashMap<u64, (usize, usize, usize)> = std::collections::HashMap::new();
+            for sh in app.scene().iter() {
+                if let Some(g) = sh.active_group_id_at_scope(&scope_now) {
+                    let e = units.entry(g).or_default();
+                    e.0 += 1;
+                    if app.session.selection.contains_shape(sh) {
+                        e.1 += 1;
+                    }
+                    if sh.line.is_some() {
+                        e.2 += 1;
+                    }
+                }
+            }
+            if let Some((g, (n, k, l))) = units.iter().find(|(_, (n, k, _))| *k != 0 && k != n) {
+                bad.push(format!("{case}（{}）：グループ {} の {n} 個のうち {k} 個だけ選ばれている（線 {l}）", ops.join("・"), g % 1000));
+                break;
+            }
+            if let Some(d) = expect {
+                let after = selected(&app);
+                let (got, want) = (covered(&after, KVec2::ZERO), covered(&before, d));
+                // 欠けた所だけを見る（線が漏れると、その線の所が欠ける。増えるのは、選んだ線が隣の線から離れて端が丸く
+                // なる分で、決まりどおり）
+                let missing = got.iter().zip(&want).filter(|(g, w)| !**g && **w).count();
+                if missing > 0 {
+                    let lines = |v: &[FillShape]| v.iter().filter(|s| s.line.is_some()).count();
+                    bad.push(format!(
+                        "{case}（{}）：選んだ範囲が {missing} 点欠けた（選んだ線 {} → {}）",
+                        ops.join("・"),
+                        lines(&before),
+                        lines(&after)
+                    ));
+                    break;
+                }
+            }
+        }
+        // 続けてドラッグしたとき、ドラッグ中の見た目と離した後が同じ
+        if !app.session.selection.is_empty() && !bad.iter().any(|b| b.starts_with(&format!("{case}（"))) {
+            let from = Point::new(300.0, 300.0);
+            let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, false);
+            app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+            crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(20.0, 130.0));
+            let during = colors(&app);
+            crate::select_ops::finish_selection_drag(&mut app, None);
+            let diff = during.iter().zip(&colors(&app)).filter(|(a, b)| a != b).count();
+            if diff > 0 {
+                bad.push(format!("{case}（{}・続けてドラッグ）：ドラッグ中と離した後が {diff} 点違う", ops.join("・")));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "線の漏れ（{} 件）：{bad:?}", bad.len());
+}
+
 /// 線で囲んだ塗りの、塗りと線1本を一緒に選んでも、選んでいない線は細く見えない：選んだ塗りの選択の色は、同じ段（同じ
 /// レイヤー・同じ階層の塗り）の最後に塗り、線はそのあとに描く（線は塗りより上）。前は選択の色を全部の図形の上に塗ったので、
 /// 塗りの上に乗っている線の内側の半分を、選んだ塗りの色が覆った（利用者の指摘）
