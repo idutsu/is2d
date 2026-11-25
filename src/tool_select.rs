@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2};
-use kurbo::{ParamCurve, Point, QuadBez};
+use kurbo::{ParamCurve, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
@@ -28,82 +29,103 @@ pub(crate) fn draw_selection_overlays(tab: &Tab, painter: &egui::Painter, picked
     }
 }
 
-pub(crate) fn draw_shape_contour_lines(
-    tab: &Tab,
-    painter: &egui::Painter,
-    shape: &FillShape,
-    stroke: Stroke,
-    show_anchors: bool,
-) {
-    let z = tab.view.zoom() as f64;
-    let pad = 4.0 / z;
-    let view_rect = tab
-        .view
-        .visible_world_rect(
-            painter,
-            tab.doc.stage_size,
-            tab.session.edit_path.shows_stage(),
-        )
-        .inflate(pad, pad);
-    let draw_seg = |seg: &QuadBez| {
-        if seg.p0.x.max(seg.p1.x).max(seg.p2.x) < view_rect.x0
-            || seg.p0.x.min(seg.p1.x).min(seg.p2.x) > view_rect.x1
-            || seg.p0.y.max(seg.p1.y).max(seg.p2.y) < view_rect.y0
-            || seg.p0.y.min(seg.p1.y).min(seg.p2.y) > view_rect.y1
-        {
+/// 輪郭の表示（ワイヤーフレーム）で描く辺と頂点：画面に出している生の図形の輪郭（面の図形は外周と穴の区間、線の図形は
+/// 中心の曲線）と、そのアンカー（区間の始め・線の両端）を集め、座標がまったく同じ辺・頂点は1つにする。同じ地図の面と線は、
+/// 地図の同じ辺から作るので、隣の面どうし・面とその輪郭の線は同じ辺を持ち、頂点も共有する（前は図形ごとに描いたので、
+/// 同じ辺を最大3回、同じ頂点を平均 3.6 回描き、線の多い絵で重かった：レビュー 41766f9 の N-3001）。描く元が画面の図形
+/// なので、ドラッグ中の仮の絵（上乗せ）にもそのままついていく
+#[derive(Default)]
+pub(crate) struct Wireframe {
+    edges: Vec<QuadBez>,
+    nodes: Vec<Point>,
+    seen_edges: HashSet<[u64; 6]>,
+    seen_nodes: HashSet<[u64; 2]>,
+}
+
+impl Wireframe {
+    /// 図形 `shape` の輪郭とアンカーを足す（まったく同じものは足さない）
+    pub(crate) fn add_shape(&mut self, shape: &FillShape) {
+        if let Some(c) = shape.center_curve() {
+            self.add_edge(c);
+            self.add_node(c.p0);
+            self.add_node(c.p2);
             return;
         }
-        let mid_dev = (seg.p1 - seg.p0.lerp(seg.p2, 0.5)).hypot() * z;
-        if mid_dev <= 0.15 {
-            painter.line_segment(
-                [
-                    tab.view.world_to_screen(seg.p0),
-                    tab.view.world_to_screen(seg.p2),
-                ],
-                stroke,
-            );
-        } else {
-            let mut prev = seg.p0;
-            let approx_len = ((seg.p1 - seg.p0).hypot() + (seg.p2 - seg.p1).hypot()) * z;
-            let steps = ((approx_len / 8.0).ceil() as usize).clamp(3, 18);
-            for k in 1..=steps {
-                let curr = seg.eval(k as f64 / steps as f64);
-                painter.line_segment(
-                    [
-                        tab.view.world_to_screen(prev),
-                        tab.view.world_to_screen(curr),
-                    ],
-                    stroke,
-                );
-                prev = curr;
+        for contour in shape.contours() {
+            for seg in contour.segments.iter() {
+                self.add_edge(*seg);
+                self.add_node(seg.p0);
             }
         }
-    };
-    // 線の図形は、太らせた形の輪郭でなく、線の中心を通る曲線（両端がアンカー）。面の図形は輪郭（外周と穴。区間の始めが
-    // アンカー）
-    if let Some(c) = shape.center_curve() {
-        draw_seg(&c);
-        if show_anchors {
-            draw_anchor_dot(tab, painter, c.p0);
-            draw_anchor_dot(tab, painter, c.p2);
-        }
-        return;
     }
-    for contour in shape.contours() {
-        for seg in contour.segments.iter() {
-            draw_seg(seg);
-            if show_anchors {
-                draw_anchor_dot(tab, painter, seg.p0);
+
+    fn add_edge(&mut self, q: QuadBez) {
+        // 向きによらず同じ辺：端の点をビットの順に並べた鍵
+        let bits = |p: Point| [p.x.to_bits(), p.y.to_bits()];
+        let (a, b) = if bits(q.p0) <= bits(q.p2) { (q.p0, q.p2) } else { (q.p2, q.p0) };
+        let [ax, ay] = bits(a);
+        let [cx, cy] = bits(q.p1);
+        let [bx, by] = bits(b);
+        if self.seen_edges.insert([ax, ay, cx, cy, bx, by]) {
+            self.edges.push(q);
+        }
+    }
+
+    fn add_node(&mut self, p: Point) {
+        if self.seen_nodes.insert([p.x.to_bits(), p.y.to_bits()]) {
+            self.nodes.push(p);
+        }
+    }
+
+    /// 集めた辺と頂点のうち、画面に見えている範囲にかかるものを描き、空にする（同じ地図の生の図形を描き終えた所で呼ぶ：
+    /// 上に重なる図形には、今までどおり隠される）
+    pub(crate) fn draw(&mut self, tab: &Tab, painter: &egui::Painter) {
+        if self.edges.is_empty() && self.nodes.is_empty() {
+            return;
+        }
+        // 見えている範囲を、アンカーの丸がはみ出す分（半径と、半径を中心に描く縁の太さの半分）だけ広げる：画面の端に
+        // かかるアンカーも描く
+        let pad = f64::from(ANCHOR_RADIUS + ANCHOR_RING / 2.0) / tab.view.zoom() as f64;
+        let view = tab
+            .view
+            .visible_world_rect(painter, tab.doc.stage_size, tab.session.edit_path.shows_stage())
+            .inflate(pad, pad);
+        let stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140));
+        for q in self.edges.drain(..) {
+            if crate::vector_engine::rects_overlap(KRect::from_points(q.p0, q.p2).union_pt(q.p1), view) {
+                painter.add(egui::Shape::line(screen_polyline(tab, q), stroke));
             }
         }
+        for p in self.nodes.drain(..) {
+            if view.contains(p) {
+                draw_anchor_dot(tab, painter, p);
+            }
+        }
+        self.seen_edges.clear();
+        self.seen_nodes.clear();
     }
 }
+
+/// 曲線 `q`（ステージの座標）を、画面で見分けられないずれ（画素の 1/4：`FIT_TOL_PX`）の中に収まる数で等分した、画面の
+/// 座標の折れ線（2次ベジェは n 等分で弦のずれが |p0 − 2·p1 + p2| / (4n²)）。輪郭の表示とカーソル合わせの強調の、曲線を
+/// 折れ線にする決まりはこれ1つ
+fn screen_polyline(tab: &Tab, q: QuadBez) -> Vec<Pos2> {
+    let z = tab.view.zoom() as f64;
+    let dd = ((q.p1 - q.p0) - (q.p2 - q.p1)).hypot() * z;
+    let n = ((dd / (4.0 * crate::vector_stroke::FIT_TOL_PX)).sqrt().ceil() as usize).max(1);
+    (0..=n).map(|k| tab.view.world_to_screen(q.eval(k as f64 / n as f64))).collect()
+}
+
+/// 輪郭の表示のアンカーの丸の半径（画面の点）
+const ANCHOR_RADIUS: f32 = 3.0;
+/// 輪郭の表示のアンカーの丸の縁の太さ（画面の点。縁は半径の所を中心に描く）
+const ANCHOR_RING: f32 = 1.2;
 
 /// 輪郭の表示のアンカー1つ（文書の座標 `p`）
 fn draw_anchor_dot(tab: &Tab, painter: &egui::Painter, p: Point) {
     let a = tab.view.world_to_screen(p);
-    painter.circle_filled(a, 3.0, Color32::WHITE);
-    painter.circle_stroke(a, 3.0, Stroke::new(1.2_f32, Color32::from_rgb(30, 120, 230)));
+    painter.circle_filled(a, ANCHOR_RADIUS, Color32::WHITE);
+    painter.circle_stroke(a, ANCHOR_RADIUS, Stroke::new(ANCHOR_RING, Color32::from_rgb(30, 120, 230)));
 }
 
 pub(crate) fn handle_select_tool_input(
@@ -524,19 +546,10 @@ fn draw_reshape_hover_cursor(tab: &Tab, painter: &egui::Painter) {
 
 /// ホバー・ドラッグ中の2次ベジェ曲線セグメントとその両端アンカーを強調描画（ハンドルは表示しない）
 pub(crate) fn draw_highlighted_quad_segment(tab: &Tab, painter: &egui::Painter, seg: QuadBez) {
-    let steps = 16;
-    let mut prev = seg.p0;
-    for k in 1..=steps {
-        let curr = seg.eval(k as f64 / steps as f64);
-        painter.line_segment(
-            [
-                tab.view.world_to_screen(prev),
-                tab.view.world_to_screen(curr),
-            ],
-            Stroke::new(3.0_f32, Color32::from_rgb(0, 175, 255)),
-        );
-        prev = curr;
-    }
+    painter.add(egui::Shape::line(
+        screen_polyline(tab, seg),
+        Stroke::new(3.0_f32, Color32::from_rgb(0, 175, 255)),
+    ));
     for end_pt in [seg.p0, seg.p2] {
         let p = tab.view.world_to_screen(end_pt);
         painter.circle_filled(p, 4.0, Color32::WHITE);

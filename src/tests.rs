@@ -20673,6 +20673,52 @@ fn the_selection_tint_is_drawn_above_every_shape() {
     assert!(tint_at > last_line, "選択の色（{tint_at} 番目）が、あとから描く線（{last_line} 番目）の下になる");
 }
 
+/// 輪郭の表示（ワイヤーフレーム）は、同じ辺・同じ頂点を1回だけ描く：線で囲んだ四角の塗り（塗りの輪郭の4辺と、それに
+/// 乗った線4本は同じ辺）で、輪郭4本・アンカー4個（レビュー 41766f9 の N-3001：前は図形ごとに描いたので、輪郭8本・
+/// アンカー12個を描いた）。ドラッグで動かしている最中も、輪郭とアンカーは画面の図形（上乗せ）についていく
+#[test]
+fn the_wireframe_draws_each_edge_and_anchor_once() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 400.0, 400.0, Color32::from_rgb(120, 175, 160))]);
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(300.0, 300.0), stroke: EdgeStroke { color: Color32::BLACK, width: 6 } }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    app.tab_mut().view.show_wireframe = true;
+    let ctx = egui::Context::default();
+    let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+    let wire = Color32::from_rgba_unmultiplied(30, 80, 180, 140);
+    let drawn = |app: &mut Is2dApp| {
+        let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+        let mut paths: Vec<Vec<egui::Pos2>> = Vec::new();
+        let mut dots: Vec<egui::Pos2> = Vec::new();
+        for c in &out.shapes {
+            match &c.shape {
+                egui::Shape::Path(p) if p.stroke.color == egui::epaint::ColorMode::Solid(wire) => paths.push(p.points.clone()),
+                egui::Shape::LineSegment { points, stroke } if stroke.color == wire => paths.push(points.to_vec()),
+                egui::Shape::Circle(cs) if cs.fill == Color32::WHITE && cs.radius == 3.0 => dots.push(cs.center),
+                _ => {}
+            }
+        }
+        (paths, dots)
+    };
+    let (paths, dots) = drawn(&mut app);
+    assert_eq!(paths.len(), 4, "輪郭の本数");
+    assert_eq!(dots.len(), 4, "アンカーの数");
+    // 全部を選んで動かし始める：輪郭とアンカーも、動かした所に描かれる
+    assert!(apply(&mut app, Action::SelectAll));
+    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(300.0, 300.0), false);
+    app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+    app.tab_mut().session.translate_move_overlay(KVec2::new(100.0, 0.0));
+    let (moved_paths, moved_dots) = drawn(&mut app);
+    let shift = 100.0 * app.view.zoom();
+    let min_x = |v: &[egui::Pos2]| v.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+    assert_eq!(moved_dots.len(), 4);
+    assert!((min_x(&moved_dots) - (min_x(&dots) + shift)).abs() < 0.01, "アンカーがドラッグについてこない");
+    let all = |v: &[Vec<egui::Pos2>]| v.iter().flatten().copied().collect::<Vec<_>>();
+    assert!((min_x(&all(&moved_paths)) - (min_x(&all(&paths)) + shift)).abs() < 0.01, "輪郭がドラッグについてこない");
+}
+
 /// 描いている間の形（仮表示）は、離したあとの形と同じつなぎ目（`piece_ends`）で区切って作り、区切りどうしは、つなぎ目の
 /// 平らに閉じた端の2点を共有して接する（重ならない）。区切るので、輪郭の自分との交わりは1つの区切りの中だけになる（レビュー
 /// 41766f9 の N-2001：前は描いている間の形だけ区切らず、太いブラシで急に曲がると1回の三角形分けが 50ms を超えた）

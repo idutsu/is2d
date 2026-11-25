@@ -2001,6 +2001,10 @@ fn draw_editable_layer_shapes(
     // 今の段と、その段で選択の色を塗る図形（段が変わる所と、範囲の終わりで塗る）
     let mut tier: Option<SelectionTier> = None;
     let mut tinted: Vec<usize> = Vec::new();
+    // 輪郭の表示：今の階層の生の図形の続き（レイヤー・階層）ごとに輪郭とアンカーを集め、続きが終わる所でまとめて描く（同じ
+    // 辺・頂点は1回だけ：`Wireframe`。上に重なる図形には、今までどおり隠される）
+    let mut wire = crate::tool_select::Wireframe::default();
+    let mut wire_run: Option<(u64, &[u64])> = None;
 
     for idx in range {
         let Some(shape) = tab.scene().get(idx) else {
@@ -2014,6 +2018,12 @@ fn draw_editable_layer_shapes(
             crate::tool_select::draw_selection_overlays(tab, artwork_painter, &tinted);
             tinted.clear();
             tier = Some(here);
+        }
+        let raw = shape.is_raw_at_scope(&tab.session.editing_group_path);
+        let run = raw.then_some((shape.layer_id, shape.group_path.as_slice()));
+        if run != wire_run {
+            wire.draw(tab, gizmo_painter);
+            wire_run = run;
         }
         let shape_sel = has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
@@ -2050,20 +2060,15 @@ fn draw_editable_layer_shapes(
         }
 
         artwork_painter.add(egui::Shape::mesh(shape.screen_mesh(zoom, pan, false)));
-        if show_wf && shape.is_raw_at_scope(&tab.session.editing_group_path) {
-            crate::tool_select::draw_shape_contour_lines(
-                tab,
-                gizmo_painter,
-                shape,
-                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140)),
-                true,
-            );
+        if show_wf && raw {
+            wire.add_shape(shape);
         }
         if shape_sel && sel_gid.is_none() {
             tinted.push(idx);
         }
     }
     crate::tool_select::draw_selection_overlays(tab, artwork_painter, &tinted);
+    wire.draw(tab, gizmo_painter);
 }
 
 /// 選択の色を塗る段：レイヤー・グループの階層・線か（同じ地図の図形は、面の図形を全部並べたあとに線の図形を並べる：
