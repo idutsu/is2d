@@ -2067,6 +2067,9 @@ pub(crate) struct UndoEntry {
     pub(crate) library: Library,
     pub(crate) sounds: crate::sound::SoundLibrary,
     pub(crate) floating: Option<Arc<Floating>>,
+    /// その時の選択（取り消し・やり直しで、絵と一緒に戻す。線の番号は線の位置と形から作るので、絵と別の時の選択を持ち越すと
+    /// 番号が合わず、線が選択から落ちる）
+    pub(crate) selection: Selection,
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,
     pub(crate) stage_size: Vec2,
@@ -2103,6 +2106,10 @@ pub(crate) struct UndoHistory {
     pub(crate) last_coalesce_key: Option<CoalesceKey>,
     /// `apply` 実行中に保持される変更前スナップショットと合流キー（`apply` の末尾でのみ確定または破棄される）
     pub(crate) pending: Option<(UndoEntry, Option<CoalesceKey>)>,
+    /// `apply` 実行中の、操作を始める前の状態（控えにしまうのはこれ：`push_undo`。操作の中で、選択を確定して外すのと控えを
+    /// しまうのが、どちらの順に書かれていても、取り消すと操作を始める前の絵と選択に戻る。前は控えをしまう時の状態だった
+    /// ので、先に選択を外す操作（貼り付け・ブラシなど）を取り消すと、前の選択が戻らなかった）
+    pub(crate) before: Option<UndoEntry>,
 }
 
 impl Default for UndoHistory {
@@ -2115,6 +2122,7 @@ impl Default for UndoHistory {
             next_commit_id: 1,
             last_coalesce_key: None,
             pending: None,
+            before: None,
         }
     }
 }
@@ -2657,13 +2665,13 @@ impl Tab {
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
-        let prev_selection = self.session.selection.clone();
         let prev_floating = self.history.snapshot_floating(self.session.floating());
         let prev_entry = UndoEntry {
             timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
             library: self.doc.library.clone(),
             sounds: self.doc.sounds.clone(),
             floating: prev_floating,
+            selection: std::mem::replace(&mut self.session.selection, entry.selection),
             edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
             editing_group_path: std::mem::replace(
                 &mut self.session.editing_group_path,
@@ -2687,7 +2695,6 @@ impl Tab {
         self.refresh_scene_base();
         self.session
             .set_floating(entry.floating.map(Arc::unwrap_or_clone));
-        self.session.selection = prev_selection;
         self.session.retain_existing_selection();
         if self.session.floating().is_some() {
             // 確定を断ったら、浮いた片と選択はそのまま（知らせは `apply`）

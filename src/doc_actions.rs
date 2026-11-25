@@ -403,25 +403,35 @@ impl Action {
 // 2. Undo 記録・Dirty 更新（このモジュール内でのみ呼び出し可能）
 // ============================================================================
 
-fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
-    if tab.history.pending.is_some() {
-        return;
-    }
-    let tl_snap = tab.doc.root.clone();
+/// 今の状態の控え（絵・浮いた片・選択・階層など。中身は文書と共有するので軽い）
+fn undo_snapshot(tab: &Tab) -> UndoEntry {
     let floating = tab.history.snapshot_floating(tab.session.floating());
-    let entry = UndoEntry {
-        timeline: tl_snap,
+    UndoEntry {
+        timeline: tab.doc.root.clone(),
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
         library: tab.doc.library.clone(),
         // 音のライブラリも文書と共有する
         sounds: tab.doc.sounds.clone(),
         floating,
+        selection: tab.session.selection.clone(),
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
         stage_size: tab.doc.stage_size,
         fps: tab.doc.fps,
         symbols_revision: tab.doc.revision,
         commit_id: tab.history.current_commit_id,
+    }
+}
+
+/// 控えをしまう（`apply` の末尾で、操作ができたときだけ積む）。しまうのは、操作を始める前の状態（`UndoHistory::before`。
+/// `apply` の外（テストが中の関数を直接呼ぶとき）は、今の状態）
+fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
+    if tab.history.pending.is_some() {
+        return;
+    }
+    let entry = match tab.history.before.take() {
+        Some(entry) => entry,
+        None => undo_snapshot(tab),
     };
     tab.history.pending = Some((entry, coalesce));
 }
@@ -531,6 +541,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         // ない。文書を変えた所は、後始末（`finish_cel_writes`・`with_active_timeline_mut` など）でその場で作り直す）
         host.tab_mut().refresh_scene_base();
     }
+    // 操作を始める前の状態（控えにしまうのはこれ：`UndoHistory::before`）
+    let before = undo_snapshot(host.tab());
+    host.tab_mut().history.before = Some(before);
     let check_symbol_nest = matches!(
         action,
         Action::ConvertToSymbol
@@ -543,6 +556,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
     let mut res = dispatch(host, action);
     let (tab, _, clipboard, toast) = host.parts_mut();
+    tab.history.before = None;
     // 地図にできない形を作る編集は、文書を変える前に断ってある（どの入口も同じ決まり）。ここで知らせる
     if let Some(refusal) = tab.session.refusal.take() {
         show_notice(toast, NoticeKind::Warning, refusal.message());

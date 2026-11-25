@@ -1463,8 +1463,14 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
     assert!(!s.shapes[0].contains_point(Point::new(110.0, 200.0)));
     assert!(!s.shapes[0].contains_point(Point::new(290.0, 200.0)));
 
-    // 5. 1回の Undo でスライス前の元の1つのシェイプに完全復帰すること
+    // 5. 1回の Undo で、削除する直前（左右両端のスライスが選ばれたまま）に戻り、選択を外すと、スライス前の元の1つの
+    //    シェイプに完全復帰すること（取り消しは、絵と一緒にその時の選択も戻す）
     app.undo();
+    assert_eq!(app.session.selected_indices().len(), 2, "削除する直前の選択に戻る");
+    for p in [Point::new(110.0, 200.0), Point::new(200.0, 200.0), Point::new(290.0, 200.0)] {
+        assert!(scene_summary(&app).shapes.iter().any(|s| s.contains_point(p)));
+    }
+    assert!(canvas_tool::clear_selection(&mut app));
     let s = scene_summary(&app);
     assert_eq!(s.shapes.len(), 1);
     assert!(s.shapes[0].contains_point(Point::new(110.0, 200.0)));
@@ -11151,7 +11157,9 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
         "Undo で消滅した InstanceGid が古い選択として残らないこと"
     );
 
-    // 新規図形を描画して選択した状態から描画自体を Undo すると、消滅した ShapeId が選択から除去されること
+    // 新規図形を描画して選択した状態から描画自体を Undo すると、消滅した ShapeId が選択から除去され、描画する前の選択に
+    // 戻ること（取り消しは、絵と一緒にその時の選択も戻す）
+    let before_stroke = app.session.selection.clone();
     run(
         &mut app,
         &[
@@ -11171,7 +11179,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
         !app.session.selection.shapes.contains(&transient_shape_id),
         "Undo で消滅した ShapeId が古い選択として残らないこと"
     );
-    assert!(app.session.selection.is_empty());
+    assert_eq!(app.session.selection, before_stroke, "描画する前の選択に戻る");
 }
 
 #[test]
@@ -21322,12 +21330,54 @@ fn pasting_a_fill_in_place_keeps_the_ink_under_its_edge() {
     assert_eq!(hit, Some(Color32::BLACK));
 }
 
+/// 線で縁どった塗りのグループを2つ選んで少し動かし、取り消して（やり直して）すぐドラッグしても、線も一緒に動く（利用者の
+/// 指摘：塗りだけが動いた）。線の番号は線の位置と形から作るので、動かすと変わる。前は、取り消しのとき、取り消す直前の選択
+/// （動かした後の番号）を持ち越し、無くなった番号を外したので、線が選択から落ちた。取り消しの控えに、その時の選択もしまう
+#[test]
+fn undo_and_redo_keep_the_lines_of_selected_groups_selected() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    let ink = EdgeStroke { color: Color32::BLACK, width: 8 };
+    for (x, c) in [(150.0, Color32::from_rgb(120, 175, 160)), (400.0, Color32::from_rgb(230, 180, 60))] {
+        put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(x, 200.0, x + 100.0, 300.0, c)]);
+        assert!(apply(&mut app, Action::InkBottle { pt: Point::new(x + 50.0, 250.0), stroke: ink }));
+        apply(&mut app, Action::SetTool { tool: Tool::Select });
+        assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(x - 20.0, 180.0), p1: Point::new(x + 120.0, 320.0), additive: false }));
+        assert!(apply(&mut app, Action::Group));
+        assert!(apply(&mut app, Action::Deselect));
+    }
+    let scope = app.session.editing_group_path.clone();
+    let all_selected = |app: &Is2dApp| -> bool {
+        app.scene().iter().filter(|s| s.active_group_id_at_scope(&scope).is_some()).all(|s| app.session.selection.contains_shape(s))
+    };
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(all_selected(&app));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(30.0, 20.0), alt_duplicate: false }));
+    assert!(all_selected(&app), "動かした直後に、グループの一部が選ばれていない");
+    assert!(apply(&mut app, Action::Undo));
+    assert!(all_selected(&app), "取り消した後に、グループの一部（線）が選ばれていない");
+    // すぐドラッグすると、線も一緒に動く
+    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(200.0, 250.0), false);
+    app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+    crate::select_ops::update_selection_drag(app.tab_mut(), Point::new(200.0, 400.0));
+    assert!(app.scene().iter().all(|s| s.bounding_box().y0 > 320.0), "ドラッグ中に置いていかれた図形がある");
+    crate::select_ops::finish_selection_drag(&mut app, None);
+    assert!(app.scene().iter().all(|s| s.bounding_box().y0 > 320.0), "離した後に置いていかれた図形がある");
+    // 取り消して、やり直しても
+    assert!(apply(&mut app, Action::Undo));
+    assert!(apply(&mut app, Action::Redo));
+    assert!(all_selected(&app), "やり直した後に、グループの一部（線）が選ばれていない");
+}
+
 /// 線の漏れの洗い出し：線と塗りとグループの混ざった絵で、選び方と、新しい中身ができる操作（グループ化・解除・重ね順・
-/// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転）をでたらめな順に重ね、そのたびに確かめる：
+/// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転・取り消し・やり直し）をでたらめな順に重ね、そのたびに確かめる：
 /// - グループのまとまり：グループの図形は、塗りも線も、みな選ばれているか、みな選ばれていないか
 /// - 選んでいる範囲：形を変えない操作（グループ化・解除・重ね順・シンボル化・その場に貼り付け）のあとは、選んだ絵が覆う所が
 ///   前と同じ。動かす操作（移動・Alt の複製）のあとは、動かした分だけずれた所（線の番号は形から決まるので、形や持ち主が
 ///   変わると番号が変わる。選び直しで線が漏れると、線の所が欠ける）
+/// - 取り消し・やり直しのあとは、その時の選択の範囲に戻っている（取り消しは選択も戻す。前は取り消す直前の選択を持ち越し、
+///   動かして番号の変わった線が落ちた）
 /// - 最後に続けてドラッグしたとき、ドラッグ中の見た目と離した後が同じ
 #[test]
 fn selections_keep_their_lines_through_operations() {
@@ -21392,9 +21442,12 @@ fn selections_keep_their_lines_through_operations() {
             _ => Point::new(420.0 + rng.f64() * 100.0, 300.0),
         };
         let mut ops: Vec<String> = Vec::new();
+        // 取り消しの控えごとの、その時の選択（控えが増えた操作の前の選択。取り消したら戻るはずの選択）と、やり直しの分
+        let (mut undo_sels, mut redo_sels): (Vec<Vec<FillShape>>, Vec<Vec<FillShape>>) = (Vec::new(), Vec::new());
         for _ in 0..(3 + rng.usize(0..8)) {
             let before = selected(&app);
-            let pick = rng.usize(0..14);
+            let (n_undo, n_redo) = (app.history.undo_stack.len(), app.history.redo_stack.len());
+            let pick = rng.usize(0..16);
             // （名前, 選んだ範囲の確かめ：None は確かめない、Some(d) は d だけずれる）
             let (name, expect): (&str, Option<KVec2>) = match pick {
                 0 => {
@@ -21437,8 +21490,36 @@ fn selections_keep_their_lines_through_operations() {
                 }
                 11 => ("拡大", { apply(&mut app, Action::ScaleSelection { sx: 1.25, sy: 0.8 }); None }),
                 12 => ("回転", { apply(&mut app, Action::RotateSelection { angle_rad: 0.4 }); None }),
-                _ => ("反転", { apply(&mut app, Action::FlipSelection { flip_x: true, flip_y: false }); None }),
+                13 => ("反転", { apply(&mut app, Action::FlipSelection { flip_x: true, flip_y: false }); None }),
+                14 => ("取り消し", { apply(&mut app, Action::Undo); None }),
+                _ => ("やり直し", { apply(&mut app, Action::Redo); None }),
             };
+            // 取り消し・やり直しのあとは、絵と一緒に、その時の選択に戻っている（選んだ範囲が欠けない）
+            let (u, r) = (app.history.undo_stack.len(), app.history.redo_stack.len());
+            let restored = if pick == 14 && u + 1 == n_undo {
+                redo_sels.push(before.clone());
+                undo_sels.pop()
+            } else if pick == 15 && r + 1 == n_redo {
+                undo_sels.push(before.clone());
+                redo_sels.pop()
+            } else {
+                for _ in n_undo..u {
+                    undo_sels.push(before.clone());
+                }
+                if r < n_redo {
+                    redo_sels.clear();
+                }
+                None
+            };
+            if let Some(want_sel) = restored {
+                let (got, want) = (covered(&selected(&app), KVec2::ZERO), covered(&want_sel, KVec2::ZERO));
+                let missing = got.iter().zip(&want).filter(|(g, w)| !**g && **w).count();
+                if missing > 0 {
+                    ops.push(name.to_string());
+                    bad.push(format!("{case}（{}）：戻した選択の範囲が {missing} 点欠けた", ops.join("・")));
+                    break;
+                }
+            }
             ops.push(name.to_string());
             // グループのまとまり（今の階層の子グループ・インスタンスごとに、みな選ばれているか、みな選ばれていないか）
             let scope_now = app.session.editing_group_path.clone();
