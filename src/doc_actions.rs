@@ -167,6 +167,8 @@ pub(crate) enum Action {
         grab_t: f64,
         target_pos: Point,
         orig_seg: QuadBez,
+        /// まわりの辺もついてくる引っぱりか（`ReshapeEdit::PullEdge`）
+        follow: bool,
     },
     /// 境目の線で持つ地図（レイヤー `layer_id` の、編集中の階層の生の図形）で、`orig_vertex` にある頂点を `target_pos` へ
     /// 動かす（位置は文書の座標）
@@ -668,6 +670,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             grab_t,
             target_pos,
             orig_seg,
+            follow,
         } => apply_map_reshape(
             tab,
             layer_id,
@@ -676,6 +679,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                 orig_seg,
                 grab_t,
                 target: target_pos,
+                follow,
             },
         ),
         Action::MoveVertex {
@@ -1441,6 +1445,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     };
     let grab_t = crate::planar_map::grab_t(t);
     let target = tab.session.edit_path.world_xform().inverse() * to;
+    let follow = crate::tool_select::drag_follows(tab);
     apply_map_reshape(
         tab,
         layer_id,
@@ -1449,6 +1454,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
             orig_seg,
             grab_t,
             target,
+            follow,
         },
     )
 }
@@ -1473,7 +1479,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         return false;
     };
     let target = tab.session.edit_path.world_xform().inverse() * to;
-    let follow = crate::tool_select::vertex_drag_follows(tab);
+    let follow = crate::tool_select::drag_follows(tab);
     apply_map_reshape(
         tab,
         layer_id,

@@ -7925,6 +7925,49 @@ fn dragging_an_anchor_near_another_anchor_does_not_snap() {
     }
 }
 
+/// 線の上をつかんで引っぱると、アンカーを表示していないときは、まわりのアンカーもついてくる（ざっくりした変形）。表示して
+/// いるときは、つかんだ1区間だけが曲がり、アンカーはどれも動かない（細かい変形。Animate の部分選択ツールの代わり。利用者が
+/// 決めた）
+#[test]
+fn pulling_an_edge_moves_only_that_edge_while_anchors_are_shown() {
+    let center = Point::new(400.0, 700.0);
+    let arc: Vec<Point> = (0..=60)
+        .map(|i| {
+            let a = (-120.0 + i as f64).to_radians();
+            center + KVec2::new(a.cos(), a.sin()) * 450.0
+        })
+        .collect();
+    for show_anchors in [false, true] {
+        let mut app = Is2dApp::default();
+        run(&mut app, &[Action::PaintStroke { points: arc.clone(), radius: 10.0, color: Color32::BLACK }]);
+        app.tab_mut().view.show_wireframe = show_anchors;
+        let segs: Vec<QuadBez> = scene_summary(&app).shapes[0].exterior.segments.to_vec();
+        let anchors: Vec<Point> = segs.iter().map(|q| q.p0).collect();
+        // 外側の縁の真ん中あたりの区間の真ん中をつかむ
+        let outer_mid = center + KVec2::new(0.0, -460.0);
+        let q = *segs
+            .iter()
+            .min_by(|a, b| (a.eval(0.5) - outer_mid).hypot().total_cmp(&(b.eval(0.5) - outer_mid).hypot()))
+            .expect("区間がある");
+        let from = q.eval(0.5);
+        tool_select::start_reshape_drag(&mut app, from, false, false);
+        let to = from + KVec2::new(0.0, -15.0);
+        tool_select::update_reshape_drag(&mut app, to);
+        tool_select::finish_reshape_drag(&mut app, Some(to));
+        let after: Vec<Point> = scene_summary(&app).shapes[0].exterior.segments.iter().map(|q| q.p0).collect();
+        let kept = anchors.iter().filter(|p| after.contains(p)).count();
+        if show_anchors {
+            assert_eq!(kept, anchors.len(), "アンカー表示中に線を引っぱって、アンカーが動いた");
+            let pulled = scene_summary(&app).shapes[0].exterior.segments.iter().any(|s| {
+                ((s.p0, s.p2) == (q.p0, q.p2) || (s.p2, s.p0) == (q.p0, q.p2)) && s.p1 != q.p1
+            });
+            assert!(pulled, "つかんだ区間が曲がっていない");
+        } else {
+            assert!(kept < anchors.len(), "アンカー非表示で線を引っぱって、まわりがついてこない");
+        }
+    }
+}
+
 /// ゆらゆらした長い横線の、波の頂点を引っぱっても、線全体はついてこない（つかんだ波のあたりだけ。利用者が見つけた）。
 /// 回った角度を符号付きで足していたときは、右へ・左へ曲がる波で打ち消し合って `PULL_REACH_TURN` に届かず、線の端まで
 /// ついてきた
@@ -18081,6 +18124,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
             grab_t: 0.5,
             target_pos: Point::new(c.x, c.y + 30.0),
             orig_seg: dummy_seg,
+            follow: true,
         },
     ));
     assert!(!apply(
@@ -18122,6 +18166,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
             grab_t: 0.5,
             target_pos: Point::new(c.x, c.y + 30.0),
             orig_seg: dummy_seg,
+            follow: true,
         },
     ));
     assert_eq!(app.tab().history.undo_stack.len(), undo_len);
@@ -23082,6 +23127,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
             grab_t,
             target_pos: grab_pos + kurbo::Vec2::new(0.0, 50.0),
             orig_seg,
+            follow: true,
         },
     ));
     assert_eq!(app.history.undo_stack.len(), undo_before);
@@ -25644,6 +25690,7 @@ mod map_overlay {
                         orig_seg: q,
                         grab_t: 0.5,
                         target: q.eval(0.5) + d,
+                        follow: true,
                     },
                     format!("辺 {e}"),
                 )
@@ -25704,7 +25751,7 @@ mod map_overlay {
         let q = edge_near(&base, top + kurbo::Vec2::new(10.0, 0.0));
         let t = 0.4;
         let target = q.eval(t) + kurbo::Vec2::new(0.0, -30.0);
-        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: q, grab_t: t }, target).expect("辺がある");
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: q, grab_t: t, follow: true }, target).expect("辺がある");
         assert!(moved.len() > 1, "まわりの辺がついてこない");
         // つかんだ点はカーソルの所
         let (e0, grabbed) = moved[0];
@@ -25731,7 +25778,7 @@ mod map_overlay {
             assert!(v.first().is_some_and(|f| f.1 > 0.0), "片側の頂点が動かない");
             assert_eq!(v.last().map(|l| l.1), Some(0.0), "ついてくる範囲の端の頂点が動いた");
         }
-        assert!(matches!(reshaped(&base, ReshapeEdit::PullEdge { orig_seg: q, grab_t: t, target }), Ok(Some(_))));
+        assert!(matches!(reshaped(&base, ReshapeEdit::PullEdge { orig_seg: q, grab_t: t, target, follow: true }), Ok(Some(_))));
     }
 
     /// 角（向きが `PULL_REACH_TURN` 以上変わる頂点）から先はついてこない。半円の直径（両端が角の1本の辺）を引くと、その辺
@@ -25751,7 +25798,7 @@ mod map_overlay {
         let d = edge_near(&base, Point::new(260.0, 300.0));
         let t = 0.3;
         let target = d.eval(t) + kurbo::Vec2::new(5.0, 25.0);
-        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: d, grab_t: t }, target).expect("辺がある");
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: d, grab_t: t, follow: true }, target).expect("辺がある");
         assert_eq!(moved.len(), 1, "角の先の辺がついてきた");
         let (e, after) = moved[0];
         let before = base.stored.edge_at(e).quad();
@@ -25762,8 +25809,20 @@ mod map_overlay {
         // 角（左端）の隣の弧：角と直径は動かない
         let corner = Point::new(200.0, 300.0);
         let a = edge_near(&base, Point::new(203.0, 285.0));
-        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: a, grab_t: 0.5 }, a.eval(0.5) + kurbo::Vec2::new(-10.0, -10.0)).expect("辺がある");
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: a, grab_t: 0.5, follow: true }, a.eval(0.5) + kurbo::Vec2::new(-10.0, -10.0)).expect("辺がある");
         assert!(moved.len() > 1, "弧の隣の弧がついてこない");
+        // まわりがついてこない引っぱり（アンカーを表示しているとき）：なめらかにつながった弧の途中でも、つかんだ1区間だけが
+        // 前の決まりどおりに曲がる
+        let target = a.eval(0.5) + kurbo::Vec2::new(-10.0, -10.0);
+        let alone = base
+            .pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: a, grab_t: 0.5, follow: false }, target)
+            .expect("辺がある");
+        assert_eq!(alone.len(), 1, "ついてこない引っぱりで、ほかの辺が動いた");
+        let (e, after) = alone[0];
+        let before = base.stored.edge_at(e).quad();
+        let want = before.p1 + (target - before.eval(0.5)) / 0.5;
+        assert_eq!((after.p0, after.p2), (before.p0, before.p2));
+        assert!((after.p1 - want).hypot() < 1e-9, "前の決まりと違う：{:?} {want:?}", after.p1);
         for &(e, after) in &moved {
             let before = base.stored.edge_at(e).quad();
             assert!(before.p0.y < 300.0 - 1e-6 || before.p2.y < 300.0 - 1e-6, "直径がついてきた");
@@ -26138,6 +26197,7 @@ mod map_overlay {
                             orig_seg: q,
                             grab_t: t,
                             target: p + d,
+                            follow: true,
                         },
                         vec![e],
                     )
@@ -30809,6 +30869,7 @@ mod map_overlay {
                             orig_seg: q,
                             grab_t: 0.5,
                             target: q.eval(0.5) + d,
+                            follow: true,
                         }
                     } else {
                         let v = (r.f() * map.nodes.len() as f64) as usize % map.nodes.len();
@@ -31880,6 +31941,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
                 orig_seg: q,
                 grab_t: 0.18,
                 target,
+                follow: true,
             },
         ),
         Err(crate::planar_map::LocalRefusal::OffGrid)
@@ -36815,6 +36877,7 @@ fn edits_do_not_depend_on_edge_and_node_numbering() {
                                 orig_seg: x.quad(e),
                                 grab_t: t,
                                 target: pull,
+                                follow: true,
                             }),
                             5 => x.with_anchor_added(e, t),
                             _ => x.with_anchor_deleted(v),
@@ -37184,6 +37247,7 @@ fn measure_edit_scaling_by_cel_size() {
                     orig_seg: q,
                     grab_t: 0.5,
                     target: q.eval(0.5) + kurbo::Vec2::new(4.0, 3.0),
+                    follow: true,
                 },
                 lid,
                 &[],
@@ -37315,6 +37379,7 @@ fn windowed_overlay_matches_full_on_large_map() {
                                 orig_seg: q,
                                 grab_t: 0.5,
                                 target: q.eval(0.5) + d,
+                                follow: true,
                             }
                         } else {
                             ReshapeEdit::MoveVertex {
@@ -40609,7 +40674,7 @@ mod strokes {
             let orig = QuadBez::new(Point::new(100.0, 100.0), Point::new(200.0, 100.0), Point::new(300.0, 100.0));
             crate::planar_map::reshape_result(
                 &base,
-                crate::planar_map::ReshapeEdit::PullEdge { orig_seg: orig, grab_t: 0.5, target: Point::new(200.0, 60.0) },
+                crate::planar_map::ReshapeEdit::PullEdge { orig_seg: orig, grab_t: 0.5, target: Point::new(200.0, 60.0), follow: true },
                 lid,
                 &[],
                 Affine::IDENTITY,
@@ -40824,6 +40889,7 @@ mod strokes {
                                 grab_t: 0.2 + rng.f64() * 0.6,
                                 target_pos: m.nodes[m.edges[e].a].lerp(target, 0.3),
                                 orig_seg: m.quad(e),
+                                follow: true,
                             }
                         } else {
                             Action::MoveVertex {

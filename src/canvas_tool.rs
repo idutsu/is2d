@@ -211,6 +211,8 @@ pub(crate) enum SelectDragState {
         grab_offset: KVec2,
         target: Point,
         orig_seg: QuadBez,
+        /// まわりの辺もついてくる引っぱりか（`tool_select::drag_follows`。ドラッグを始めたときに決める）
+        follow: bool,
     },
     /// 地図の `orig_vertex` にある頂点を `target` へ動かす（位置は地図の文書の座標）
     MoveVertex {
@@ -219,7 +221,7 @@ pub(crate) enum SelectDragState {
         base: Arc<LayerBase>,
         orig_vertex: Point,
         target: Point,
-        /// まわりがついてくる引っぱりか（`ReshapeEdit::vertex`。ドラッグを始めたときに決める）
+        /// まわりがついてくる引っぱりか（`tool_select::drag_follows`・`ReshapeEdit::vertex`。ドラッグを始めたときに決める）
         follow: bool,
     },
 }

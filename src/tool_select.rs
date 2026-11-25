@@ -269,7 +269,7 @@ pub(crate) fn start_reshape_drag(
             let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
-            let follow = vertex_drag_follows(tab);
+            let follow = drag_follows(tab);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                 layer_id,
                 group_path,
@@ -292,6 +292,7 @@ pub(crate) fn start_reshape_drag(
             let grab_t = crate::planar_map::grab_t(t);
             // マウス pt から、つかむ所（丸めた grab_t の所）までのずれ（ステージの座標）
             let grab_offset = seg.eval(grab_t) - pt;
+            let follow = drag_follows(tab);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::PullEdge {
                 layer_id,
                 group_path,
@@ -300,6 +301,7 @@ pub(crate) fn start_reshape_drag(
                 grab_offset,
                 target: orig_seg.eval(grab_t),
                 orig_seg,
+                follow,
             });
         }
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
@@ -313,9 +315,11 @@ pub(crate) fn start_reshape_drag(
     }
 }
 
-/// アンカー（頂点）をつかんで動かすとき、まわりがついてくる引っぱりにするか：アンカーを表示しているときは、そのアンカー
-/// だけを動かし（Animate の部分選択ツールの代わり）、表示していないときは、線の上と同じく引っぱる（利用者が決めた）
-pub(crate) fn vertex_drag_follows(tab: &Tab) -> bool {
+/// 輪郭をつかんで動かすとき、まわりがついてくる引っぱりにするか（線の上をつかんだときも、アンカーをつかんだときも、決める
+/// のはこれ1つ）：アンカーを表示していないときは、まわりのアンカーも離れるほど小さく動きながらついてくる（ざっくりした
+/// 変形。Animate の選択ツール）。表示しているときは、つかんだ所だけ（線の上ならその1区間、アンカーならそのアンカー：細かい
+/// 変形。Animate の部分選択ツールの代わり。利用者が決めた）
+pub(crate) fn drag_follows(tab: &Tab) -> bool {
     !tab.view.show_wireframe
 }
 
@@ -351,6 +355,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             grab_offset,
             target,
             orig_seg,
+            follow,
         }) => {
             *target = xform.inverse() * (pt + *grab_offset);
             let target = *target;
@@ -360,6 +365,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
                     orig_seg: *orig_seg,
                     grab_t: *grab_t,
                     target,
+                    follow: *follow,
                 },
                 *layer_id,
                 group_path.clone(),
@@ -391,6 +397,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
             grab_t,
             target,
             orig_seg,
+            follow,
             ..
         } => {
             apply(
@@ -400,6 +407,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                     grab_t,
                     target_pos: target,
                     orig_seg,
+                    follow,
                 },
             );
         }
@@ -441,6 +449,7 @@ pub(crate) fn draw_select_tool_cursor(
             orig_seg,
             grab_t,
             target,
+            follow,
             ..
         }) => {
             if tab.view.show_wireframe {
@@ -449,6 +458,7 @@ pub(crate) fn draw_select_tool_cursor(
                 let grab = crate::planar_map::PullGrab::Edge {
                     orig_seg: *orig_seg,
                     grab_t: *grab_t,
+                    follow: *follow,
                 };
                 let moved = base.pulled_edges(grab, *target).unwrap_or_default();
                 let on_grid = moved

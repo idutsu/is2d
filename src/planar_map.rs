@@ -1695,7 +1695,15 @@ impl LayerBase {
                 orig_seg,
                 grab_t,
                 target,
-            } => self.pulled_edges(PullGrab::Edge { orig_seg, grab_t }, target)?,
+                follow,
+            } => self.pulled_edges(
+                PullGrab::Edge {
+                    orig_seg,
+                    grab_t,
+                    follow,
+                },
+                target,
+            )?,
             ReshapeEdit::PullVertex {
                 orig_vertex,
                 target,
@@ -1730,22 +1738,34 @@ impl LayerBase {
     /// 向き）。まわりの辺も、つかんだ所から離れるほど小さく動きながらついてくる（Animate の手ざわり。利用者が決めた。設計
     /// claude/引っぱりでまわりがついてくる設計_ea9f676.md）。つかんだ所から線を外へたどる（辺の上の点なら両側の2方向、
     /// 頂点ならそこから出る辺の数だけ：`pull_side`）。範囲の頂点と制御点を、つかんだ所からの曲線の長さの重み（`PullWeights`）
-    /// に比例して動かし、つかんだ点がちょうど `target` へ行くように大きさを決める。範囲が、つかんだ辺1本のときは、両端を
-    /// 動かさず制御点だけを Δ / (2t(1−t)) 動かす曲線（前の決まり）と同じ。頂点から出る辺がみな1本で止まるときは、まっすぐな
+    /// に比例して動かし、つかんだ点がちょうど `target` へ行くように大きさを決める。範囲が、つかんだ辺1本のとき（辺の上をつかんで、まわりがついて
+    /// こないとき：`follow` でない、も）は、両端を動かさず制御点だけを Δ / (2t(1−t)) 動かす曲線（前の決まり）と同じ。頂点から出る辺がみな1本で止まるときは、まっすぐな
     /// 辺（左右対称の辺）なら頂点を動かし制御点を半分動かす曲線（頂点だけを動かす決まり `moved_quad`）と同じ（片寄って曲がった
     /// 辺では、制御点の重みが t = 1/2 の点までの長さで決まるので、半分から少しずれる）。確定とドラッグ中の表示
     /// （`reshape_change`）・引っぱっている辺の表示が、どれもこれを使う。辺・頂点が無ければ `None`
     pub(crate) fn pulled_edges(&self, grab: PullGrab, target: Point) -> Option<Vec<(usize, QuadBez)>> {
         let mut out = Vec::new();
         match grab {
-            PullGrab::Edge { orig_seg, grab_t } => {
+            PullGrab::Edge {
+                orig_seg,
+                grab_t,
+                follow,
+            } => {
                 let (e0, forward) = self.stored.find_edge(&orig_seg)?;
                 let q0 = self.stored.edge_at(e0).quad();
                 let t = if forward { grab_t } else { 1.0 - grab_t };
-                // 両側（端 b の側と a の側）：先頭は、つかんだ辺の、つかんだ所から端までの切れ端
+                // 両側（端 b の側と a の側）：先頭は、つかんだ辺の、つかんだ所から端までの切れ端。まわりがついてこないとき
+                // （`follow` でない）は、たどらずに切れ端だけ（両端の重みが 0 になり、つかんだ辺だけが曲がる）
                 let mut used = HashSet::from([e0]);
-                let to_b = self.pull_side(e0, q0.subsegment(t..1.0), &mut used);
-                let to_a = self.pull_side(e0, reversed(q0.subsegment(0.0..t)), &mut used);
+                let mut side = |piece: QuadBez| {
+                    if follow {
+                        self.pull_side(e0, piece, &mut used)
+                    } else {
+                        vec![(e0, piece)]
+                    }
+                };
+                let to_b = side(q0.subsegment(t..1.0));
+                let to_a = side(reversed(q0.subsegment(0.0..t)));
                 let (wb, wa) = (PullWeights::new(&to_b), PullWeights::new(&to_a));
                 // つかんだ辺の制御点の重み：t = 1/2 の点のある側の、その点の重み（つかんだ所からの長さは、端から測った長さの
                 // 差。長さ 0 の曲線の長さは式が割り算で壊れるので測らない）
@@ -3193,11 +3213,13 @@ pub(crate) fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
 /// `LayerBase::reshape_change` の1つで作る
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReshapeEdit {
-    /// 形が `orig_seg` の辺の `grab_t` の所を `target` へ引っぱる
+    /// 形が `orig_seg` の辺の `grab_t` の所を `target` へ引っぱる（`follow`：まわりの辺もついてくるか。アンカーを表示して
+    /// いるときは、その辺だけ：`tool_select::drag_follows`）
     PullEdge {
         orig_seg: QuadBez,
         grab_t: f64,
         target: Point,
+        follow: bool,
     },
     /// `orig_vertex` にある頂点を `target` へ動かす（その頂点だけ：アンカーを表示しているとき）
     MoveVertex { orig_vertex: Point, target: Point },
@@ -3226,8 +3248,12 @@ impl ReshapeEdit {
 /// 引っぱりでつかんだ所（`LayerBase::pulled_edges`）
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PullGrab {
-    /// 形が `orig_seg` の辺の `grab_t` の所
-    Edge { orig_seg: QuadBez, grab_t: f64 },
+    /// 形が `orig_seg` の辺の `grab_t` の所（`follow`：まわりの辺もついてくるか。そうでなければ、その辺だけが曲がる）
+    Edge {
+        orig_seg: QuadBez,
+        grab_t: f64,
+        follow: bool,
+    },
     /// その位置にある頂点
     Vertex(Point),
 }
