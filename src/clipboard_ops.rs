@@ -202,7 +202,7 @@ pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: imp
                         written.push(l.layer_id);
                     }
                     let sel = &mut tab.session.selection;
-                    sel.shapes.extend(nested.face_ids());
+                    sel.shapes.extend(nested.shape_ids());
                     sel.instances
                         .extend(nested.instances.iter().map(|i| i.binding.instance_gid));
                 }

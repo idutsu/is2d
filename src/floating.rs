@@ -11,7 +11,7 @@ use kurbo::Affine;
 
 use crate::canvas_tool::{Placement, SceneBaseCache};
 use crate::planar_map::{
-    cut_out, line_id_of, parallel_map, realized, region_map, stacked, CheckedMap, FaceKeep, LayerBase,
+    cut_out, parallel_map, realized, region_map, shape_ids_of, stacked, CheckedMap, FaceKeep, LayerBase,
     LocalEdit, LocalWrite, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
@@ -78,21 +78,16 @@ impl PieceGroup {
             .clone()
     }
 
-    /// 片の番号：面の番号（面の辺の側に記した番号）と、線の番号（線を乗せた辺ごとの `line_id_of`。線の図形の番号と同じ
-    /// 決まり）。同じ番号をくり返す。前は面の番号だけだったので、線だけの片の組は、番号の無い組として、一部を残すとき
+    /// 片の番号：面の番号と線の番号（`shape_ids_of`）。同じ番号をくり返す。前は面の番号だけだったので、線だけの片の組は、番号の無い組として、一部を残すとき
     /// （`restricted`）に丸ごと残り、残りに戻す片（`ids_not_in`）にも数えられず、同じ線が片と残りの両方に入った
     fn ids(&self) -> Vec<ShapeId> {
-        let base = self.base();
-        let ids = ids_of(&base, &self.map).collect();
-        ids
+        shape_ids_of(&self.map).collect()
     }
 
     /// 片の番号のどれか1つ（画面の図形の並びで、この組の片を探す手がかり。線だけの組も。番号の決まりは `ids` と同じ
-    /// `ids_of` で、最初の1つで止める）
+    /// `shape_ids_of` で、最初の1つで止める）
     pub(crate) fn first_id(&self) -> Option<ShapeId> {
-        let base = self.base();
-        let first = ids_of(&base, &self.map).next();
-        first
+        shape_ids_of(&self.map).next()
     }
 
     /// 置いた地図（変換をかけたもの）から、地図の並び `cover`（文書の座標）の色のある所を消した組（変換は恒等）。重なら
@@ -196,14 +191,6 @@ fn restricted_groups(
         .iter()
         .filter_map(|g| g.restricted(keep, scope))
         .collect()
-}
-
-/// 片の組の番号を並べる（`PieceGroup::ids`・`first_id` の決まりはこれ1つ）：計算に使う写し `base` の面の番号と、
-/// しまう形 `map` の線を乗せた辺ごとの線の番号（`line_id_of`）
-fn ids_of<'a>(base: &'a LayerBase, map: &'a StoredMap) -> impl Iterator<Item = ShapeId> + 'a {
-    base.map()
-        .labels()
-        .chain((0..map.edge_count()).filter_map(move |e| line_id_of(&map.edge_at(e))))
 }
 
 /// 持ち上げたレイヤーの残り

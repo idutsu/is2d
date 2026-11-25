@@ -21183,6 +21183,60 @@ fn grouping_moved_duplicates_selects_the_whole_group() {
     }
 }
 
+/// 線と塗りの絵のグループを Alt で複製しながら動かし、続けてそのままドラッグすると、複製したグループの全部（塗りも線も）が
+/// 動く（利用者の指摘：塗りだけが動いた）。ドラッグ中の見た目と、離した後の両方で
+#[test]
+fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    let green = Color32::from_rgb(120, 175, 160);
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(200.0, 200.0, 300.0, 300.0, green)]);
+    let ink = EdgeStroke { color: Color32::BLACK, width: 10 };
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(250.0, 250.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Group));
+    // Alt で複製しながら右へ（画面の操作と同じ道：つかんで、動かして、離す）
+    let grab = Point::new(250.0, 250.0);
+    crate::select_ops::grab_and_move(&mut app, grab, true, true);
+    crate::select_ops::update_selection_drag(app.tab_mut(), grab + KVec2::new(300.0, 0.0));
+    crate::select_ops::finish_selection_drag(&mut app, None);
+    let scope = app.session.editing_group_path.clone();
+    let dup: Vec<(bool, bool)> = app
+        .scene()
+        .iter()
+        .filter(|s| s.bounding_box().x0 > 400.0)
+        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .collect();
+    assert!(dup.iter().any(|d| d.0) && dup.iter().any(|d| !d.0), "複製に塗りと線がある：{dup:?}");
+    assert!(dup.iter().all(|d| d.1), "複製の中に選ばれていない図形がある：{dup:?}");
+    assert!(app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0).all(|s| s.active_group_id_at_scope(&scope).is_some()));
+    // 続けてそのままドラッグ（つかむのは複製の上）
+    let grab = Point::new(550.0, 250.0);
+    crate::select_ops::grab_and_move(&mut app, grab, true, false);
+    crate::select_ops::update_selection_drag(app.tab_mut(), grab + KVec2::new(0.0, 150.0));
+    for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
+        assert!(s.bounding_box().y0 > 330.0, "ドラッグ中に置いていかれた図形がある（線 {}）", s.line.is_some());
+    }
+    crate::select_ops::finish_selection_drag(&mut app, None);
+    for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
+        assert!(s.bounding_box().y0 > 330.0, "離した後に置いていかれた図形がある（線 {}）", s.line.is_some());
+    }
+    // 貼り付けも同じ道（`put_placements`）：グループを貼り付けた直後は、貼り付けた全部（塗りも線も）が選ばれている
+    let before: std::collections::HashSet<u64> = app.scene().iter().map(|s| s.shape_id).collect();
+    assert!(apply(&mut app, Action::Copy));
+    assert!(apply(&mut app, Action::Paste { in_place: false }));
+    let pasted: Vec<(bool, bool)> = app
+        .scene()
+        .iter()
+        .filter(|s| !before.contains(&s.shape_id))
+        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .collect();
+    assert!(pasted.iter().any(|d| d.0) && pasted.iter().any(|d| !d.0), "貼り付けに塗りと線がある：{pasted:?}");
+    assert!(pasted.iter().all(|d| d.1), "貼り付けた中に選ばれていない図形がある：{pasted:?}");
+}
+
 /// 線で囲んだ塗りの、塗りと線1本を一緒に選んでも、選んでいない線は細く見えない：選んだ塗りの選択の色は、同じ段（同じ
 /// レイヤー・同じ階層の塗り）の最後に塗り、線はそのあとに描く（線は塗りより上）。前は選択の色を全部の図形の上に塗ったので、
 /// 塗りの上に乗っている線の内側の半分を、選んだ塗りの色が覆った（利用者の指摘）

@@ -200,6 +200,7 @@ impl PlanarMap {
     }
 
     /// 面の番号（辺の側に記したもの）
+    #[cfg(test)]
     pub(crate) fn labels(&self) -> impl Iterator<Item = ShapeId> + '_ {
         self.edges
             .iter()
@@ -1051,6 +1052,19 @@ pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
     stroke.hash(&mut h);
     srcs.hash(&mut h);
     Some(LINE_ID_BIT | (h.finish() >> 1))
+}
+
+/// しまう形 `stored` の図形の番号：面の番号（色のある側に記した番号）と、線の番号（線を乗せた辺ごとの `line_id_of`。線の
+/// 図形の番号と同じ決まり）。同じ番号をくり返す。地図から図形の番号を並べる決まりはこれ1つ（浮いた片の番号
+/// `PieceGroup::ids`・置いた中身を選ぶ `Cel::shape_ids`）。前は面の番号だけを並べる所があり、線が選択や片の番号から
+/// 漏れた
+pub(crate) fn shape_ids_of(stored: &StoredMap) -> impl Iterator<Item = ShapeId> + '_ {
+    (0..stored.edge_count()).flat_map(move |e| {
+        let te = stored.edge_at(e);
+        [te.left.and(te.left_src), te.right.and(te.right_src), line_id_of(&te)]
+            .into_iter()
+            .flatten()
+    })
 }
 
 /// 地図 `m` の辺 `ed` を、塊から引いた辺の形にする（線の番号 `line_id_of` を引く・差分を当てる・しまう辺にする）

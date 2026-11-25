@@ -1322,11 +1322,11 @@ impl Cel {
         true
     }
 
-    /// 地図の面の番号（みな）
-    pub(crate) fn face_ids(&self) -> HashSet<ShapeId> {
+    /// 地図の図形の番号（みな。面と線：`shape_ids_of`）
+    pub(crate) fn shape_ids(&self) -> HashSet<ShapeId> {
         self.maps
             .iter()
-            .flat_map(|m| m.dense().labels().collect::<Vec<_>>())
+            .flat_map(|m| crate::planar_map::shape_ids_of(m.stored()))
             .collect()
     }
 
