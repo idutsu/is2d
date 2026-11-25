@@ -38970,6 +38970,23 @@ fn menu_key_tap(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> 
         .to_vec()
 }
 
+/// 選択削除のキーは Backspace・Delete・G（利用者が決めた）。入力欄に文字を入れている最中の G は、入力欄の文字（絵を消さない）
+#[test]
+fn g_deletes_the_selection_unless_typing() {
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let none = egui::Modifiers::NONE;
+    put_cel_shapes(&mut app, 0, 0, make_stroke(Point::new(100.0, 100.0), Point::new(180.0, 100.0), 12.0, Color32::RED));
+    app.session.set_selected_indices(vec![0]);
+    let focus = |ctx: &egui::Context, _: &mut Is2dApp| ctx.memory_mut(|m| m.request_focus(egui::Id::new("入力欄")));
+    menu_test_frame(&ctx, &mut app, none, menu_key_tap(egui::Key::G, none), focus);
+    assert_eq!(app.scene().len(), 1, "入力中の G で絵が消えた");
+    let unfocus = |ctx: &egui::Context, _: &mut Is2dApp| ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("入力欄")));
+    menu_test_frame(&ctx, &mut app, none, Vec::new(), unfocus);
+    menu_test_frame(&ctx, &mut app, none, menu_key_tap(egui::Key::G, none), |_, _| {});
+    assert_eq!(app.scene().len(), 0, "G で選択削除にならない");
+}
+
 /// 表の決まり：Mac の OS のメニューに付ける `Cmd` のショートカットは1文字のキー（`keyEquivalent` にする）。
 /// egui のキー処理が受け取るキーは、項目どうしで重ならない（OS のメニューがあってもなくても）
 #[test]
@@ -38981,7 +38998,7 @@ fn menu_table_keys_are_unique_and_command_keys_are_single_characters() {
     }
     let keys: Vec<menu::Shortcut> = menu::COMMANDS
         .iter()
-        .flat_map(|c| c.shortcut.into_iter().chain(c.alias))
+        .flat_map(|c| c.shortcut.into_iter().chain(c.aliases.iter().copied()))
         .collect();
     for (i, a) in keys.iter().enumerate() {
         assert!(!keys[i + 1..].contains(a), "{a:?} が2つの項目にある");
