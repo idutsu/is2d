@@ -269,6 +269,7 @@ pub(crate) fn start_reshape_drag(
             let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
+            let follow = vertex_drag_follows(tab);
             tab.session.drag = ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
                 layer_id,
                 group_path,
@@ -276,6 +277,7 @@ pub(crate) fn start_reshape_drag(
                 orig_vertex,
                 target: orig_vertex,
                 snapped_to: None,
+                follow,
             });
         }
         HoverTarget::Edge {
@@ -312,6 +314,12 @@ pub(crate) fn start_reshape_drag(
     }
 }
 
+/// アンカー（頂点）をつかんで動かすとき、まわりがついてくる引っぱりにするか：アンカーを表示しているときは、そのアンカー
+/// だけを動かし（Animate の部分選択ツールの代わり）、表示していないときは、線の上と同じく引っぱる（利用者が決めた）
+pub(crate) fn vertex_drag_follows(tab: &Tab) -> bool {
+    !tab.view.show_wireframe
+}
+
 pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
     if update_selection_drag(tab, pt) {
         return;
@@ -328,16 +336,14 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
             orig_vertex,
             target,
             snapped_to,
+            follow,
         }) => {
             let snap = base.snap_target(*orig_vertex, pt, snap_radius, xform);
             *target = snap.unwrap_or_else(|| xform.inverse() * pt);
             *snapped_to = snap.map(|p| xform * p);
             Some((
                 base.clone(),
-                ReshapeEdit::MoveVertex {
-                    orig_vertex: *orig_vertex,
-                    target: *target,
-                },
+                ReshapeEdit::vertex(*orig_vertex, *target, *follow),
                 *layer_id,
                 group_path.clone(),
             ))
@@ -406,6 +412,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
             layer_id,
             orig_vertex,
             target,
+            follow,
             ..
         } => {
             apply(
@@ -414,6 +421,7 @@ pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<P
                     layer_id,
                     orig_vertex,
                     target_pos: target,
+                    follow,
                 },
             );
         }
@@ -434,23 +442,31 @@ pub(crate) fn draw_select_tool_cursor(
     ctx.set_cursor_icon(CursorIcon::Default);
     match &tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::PullEdge {
+            base,
             orig_seg,
             grab_t,
             target,
             ..
         }) => {
             if tab.view.show_wireframe {
-                // 引っぱっている辺の今の形（確定と同じ `pulled_quad`）を、ステージに置いて見せる。格子の外へ出る形は、
-                // 塗りの仮表示と同じく元の形のまま（確定は断る）
-                let mut seg = crate::planar_map::pulled_quad(*orig_seg, *grab_t, *target);
-                if !crate::planar_map::on_grid([seg.p0, seg.p1, seg.p2].into_iter()) {
-                    seg = *orig_seg;
+                // 引っぱっている辺（ついてくる辺も）の今の形（確定と同じ `pulled_edges`）を、ステージに置いて見せる。格子の
+                // 外へ出る形は、塗りの仮表示と同じく元の形のまま（確定は断る）
+                let grab = crate::planar_map::PullGrab::Edge {
+                    orig_seg: *orig_seg,
+                    grab_t: *grab_t,
+                };
+                let moved = base.pulled_edges(grab, *target).unwrap_or_default();
+                let on_grid = moved
+                    .iter()
+                    .all(|(_, q)| crate::planar_map::on_grid([q.p0, q.p1, q.p2].into_iter()));
+                let xform = tab.session.edit_path.world_xform();
+                if on_grid && !moved.is_empty() {
+                    for (_, q) in moved {
+                        draw_highlighted_quad_segment(tab, painter, xform * q);
+                    }
+                } else {
+                    draw_highlighted_quad_segment(tab, painter, xform * *orig_seg);
                 }
-                draw_highlighted_quad_segment(
-                    tab,
-                    painter,
-                    tab.session.edit_path.world_xform() * seg,
-                );
             }
         }
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex { snapped_to, .. }) => {

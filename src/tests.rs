@@ -1272,14 +1272,15 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
         split_shapes.len()
     );
 
-    // 左右の半円領域は塗られており、突っ切った中央 (200, 200) と突き抜けた先 (200, 265) は空であること
+    // 左右の半円領域は塗られており、突っ切った中央 (200, 200) と突き抜けた先 (200, 265) は空であること。左右の点は、
+    // 引っぱりでついてくる範囲（つかんだ所から向きが `PULL_REACH_TURN` 回る所まで）から遠い、円の下寄りの縁の近く
     let any_contains = |pt: Point| split_shapes.iter().any(|s| s.contains_point(pt));
     assert!(
-        any_contains(Point::new(165.0, 200.0)),
+        any_contains(Point::new(160.0, 225.0)),
         "左側の分割片が存在すること"
     );
     assert!(
-        any_contains(Point::new(235.0, 200.0)),
+        any_contains(Point::new(240.0, 225.0)),
         "右側の分割片が存在すること"
     );
     assert!(
@@ -7873,29 +7874,97 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
         orig_seg.p1,
         "ドラッグ中はセル内の図形が書き換えられないこと"
     );
-    // 引っぱった辺は、両端が同じ区間（書き直した輪郭は、区間の並びの始まりが元と違うことがある）
-    let pulled = app
-        .scene()
-        .get(0)
-        .unwrap()
-        .exterior
-        .segments
-        .iter()
-        .find_map(|q| {
-            if (q.p0, q.p2) == (orig_seg.p0, orig_seg.p2) {
-                Some(*q)
-            } else if (q.p2, q.p0) == (orig_seg.p0, orig_seg.p2) {
-                Some(QuadBez::new(q.p2, q.p1, q.p0))
-            } else {
-                None
-            }
-        })
-        .expect("引っぱった辺が輪郭にあること");
-    let grab_after = pulled.eval(grab_t);
+    // つかんだ点はカーソルの動きどおりに動く：輪郭が、つかんだ点をカーソルの動いた分だけずらした所を通る（引っぱった辺の
+    // 両端も、なめらかにつながる丸い端と一緒についてくるので、辺は両端では探さない）
+    let moved_to = grab_before + kurbo::Vec2::new(0.0, 2.0);
+    let gap = app.scene().get(0).unwrap().exterior.segments.iter()
+        .map(|q| crate::vector_engine::nearest_on_quad(q, moved_to).1)
+        .fold(f64::MAX, f64::min);
+    // 許容は地図の格子の1目（ついてきて動いた頂点は、確定で格子の点に丸まる）
     assert!(
-        ((grab_after - grab_before) - kurbo::Vec2::new(0.0, 2.0)).hypot() < 1e-5,
-        "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)"
+        gap < 1.0 / 4096.0,
+        "微小ドラッグ時の曲線変化量がカーソル移動量と正確に一致すること (#5)：ずれ {gap}"
     );
+}
+
+/// ゆらゆらした長い横線の、波の頂点を引っぱっても、線全体はついてこない（つかんだ波のあたりだけ。利用者が見つけた）。
+/// 回った角度を符号付きで足していたときは、右へ・左へ曲がる波で打ち消し合って `PULL_REACH_TURN` に届かず、線の端まで
+/// ついてきた
+#[test]
+fn pulling_a_wave_crest_does_not_drag_the_whole_wavy_line() {
+    let mut app = Is2dApp::default();
+    // 横 800px に 8つの波（高さ ±8px、いちばん急な所の傾き 27°）
+    let wave: Vec<Point> = (0..=400)
+        .map(|i| {
+            let x = 100.0 + 2.0 * i as f64;
+            Point::new(x, 300.0 + 8.0 * (std::f64::consts::TAU * (x - 100.0) / 100.0).sin())
+        })
+        .collect();
+    run(&mut app, &[Action::PaintStroke { points: wave, radius: 4.0, color: Color32::BLACK }]);
+    let before: Vec<Point> = scene_summary(&app).shapes[0].exterior.segments.iter().map(|q| q.p0).collect();
+    // 真ん中あたりの、上の縁の波の頂点（x = 525 の山。y が小さい方が上）
+    let crest = Point::new(525.0, 300.0 - 8.0 - 4.0);
+    let v = *before.iter().min_by(|a, b| (**a - crest).hypot().total_cmp(&(**b - crest).hypot())).expect("頂点がある");
+    tool_select::start_reshape_drag(&mut app, v, false, false);
+    let to = v + KVec2::new(0.0, -20.0);
+    tool_select::update_reshape_drag(&mut app, to);
+    tool_select::finish_reshape_drag(&mut app, Some(to));
+    let after: Vec<Point> = scene_summary(&app).shapes.iter().flat_map(|s| s.exterior.segments.iter().map(|q| q.p0)).collect();
+    let far_moved: Vec<&Point> = before.iter().filter(|p| (p.x - v.x).abs() > 150.0 && !after.contains(p)).collect();
+    assert!(far_moved.is_empty(), "つかんだ所から 150px より遠い頂点が動いた：{} 個", far_moved.len());
+    assert!(before.iter().any(|p| *p != v && (p.x - v.x).abs() < 50.0 && !after.contains(p)), "まわりがついてこない");
+}
+
+/// 選択ツールでアンカーをつかんで動かすと、アンカーを表示していないときは、まわりがついてくる引っぱりになり、表示している
+/// ときは、そのアンカーだけが動く（Animate の部分選択ツールの代わり。どちらも吸い付く。利用者が決めた）
+#[test]
+fn dragging_an_anchor_pulls_its_neighbours_only_while_anchors_are_hidden() {
+    // ゆるい弧に沿ったブラシの線（外側の縁に、向きが少しずつ変わるアンカーが並ぶ）。外側の縁の真ん中のアンカーをつかむ
+    let center = Point::new(400.0, 700.0);
+    let arc: Vec<Point> = (0..=60)
+        .map(|i| {
+            let a = (-120.0 + i as f64).to_radians();
+            center + KVec2::new(a.cos(), a.sin()) * 450.0
+        })
+        .collect();
+    let outer_mid = center + KVec2::new(0.0, -460.0);
+    for show_anchors in [false, true] {
+        let mut app = Is2dApp::default();
+        run(
+            &mut app,
+            &[Action::PaintStroke {
+                points: arc.clone(),
+                radius: 10.0,
+                color: Color32::BLACK,
+            }],
+        );
+        app.tab_mut().view.show_wireframe = show_anchors;
+        let before: Vec<Point> = scene_summary(&app).shapes[0].exterior.segments.iter().map(|q| q.p0).collect();
+        let v = *before
+            .iter()
+            .min_by(|a, b| (**a - outer_mid).hypot().total_cmp(&(**b - outer_mid).hypot()))
+            .expect("頂点がある");
+        tool_select::start_reshape_drag(&mut app, v, false, false);
+        assert!(
+            matches!(
+                app.session.drag,
+                canvas_tool::ActiveCanvasDrag::Select(canvas_tool::SelectDragState::MoveVertex { follow, .. })
+                    if follow != show_anchors
+            ),
+            "アンカーの表示 {show_anchors}：引っぱりかアンカーだけかが違う"
+        );
+        let to = v + KVec2::new(0.0, -20.0);
+        tool_select::update_reshape_drag(&mut app, to);
+        tool_select::finish_reshape_drag(&mut app, Some(to));
+        let after: Vec<Point> = scene_summary(&app).shapes[0].exterior.segments.iter().map(|q| q.p0).collect();
+        assert!(after.iter().any(|p| (*p - to).hypot() < 1e-3), "つかんだアンカーがカーソルの所に無い");
+        let kept = before.iter().filter(|p| **p != v && after.contains(p)).count();
+        if show_anchors {
+            assert_eq!(kept, before.len() - 1, "アンカーだけのはずが、まわりが動いた");
+        } else {
+            assert!(kept < before.len() - 1, "まわりがついてこない");
+        }
+    }
 }
 
 #[test]
@@ -17982,6 +18051,7 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
             layer_id: empty_layer,
             orig_vertex: c,
             target_pos: Point::new(c.x, c.y + 30.0),
+            follow: false,
         },
     ));
     assert_eq!(app.tab().history.undo_stack.len(), 0);
@@ -25199,6 +25269,173 @@ mod map_overlay {
             }
         }
         (done, bad)
+    }
+
+    /// 中心 `c`・半径 `r` の、角度 `a` から `b` への弧の2次ベジェ（両端の接線の交点を制御点にする）
+    fn arc_quad(c: Point, r: f64, a: f64, b: f64) -> QuadBez {
+        let at = |t: f64, rr: f64| c + kurbo::Vec2::new(t.cos(), t.sin()) * rr;
+        QuadBez::new(at(a, r), at((a + b) / 2.0, r / ((b - a) / 2.0).cos()), at(b, r))
+    }
+
+    /// 輪郭 `segs` の塗りの地図の、本番と同じ計算に使う写し
+    fn base_of_outline(segs: Vec<QuadBez>) -> LayerBase {
+        let shape = FillShape::new(Color32::RED, crate::vector_engine::Contour::new(segs), vec![]);
+        let m = PlanarMap::default()
+            .overlay(MapInput::Shapes(&[shape]), MapRule::Paint(Some(Color32::RED)))
+            .expect("地図にできる");
+        labeled_base(&m)
+    }
+
+    /// 地図の辺のうち、点 `p` にいちばん近い辺の曲線
+    fn edge_near(base: &LayerBase, p: Point) -> QuadBez {
+        let m = base.stored.to_dense();
+        (0..m.edges.len())
+            .map(|e| m.quad(e))
+            .min_by(|a, b| nearest_on_quad(a, p).1.total_cmp(&nearest_on_quad(b, p).1))
+            .expect("辺がある")
+    }
+
+    /// 引っぱりで、まわりの辺が、つかんだ所から離れるほど小さく動きながらついてくる（利用者が決めた）。丸の上の辺を引くと、
+    /// つかんだ点はちょうどカーソルの所へ行き、頂点の動きは、つかんだ所から離れるほど小さく、向きが `PULL_REACH_TURN`
+    /// 回った先（下半分）は動かない。確定（1本の道。お手本との比べは道の中で毎回）もできる
+    #[test]
+    fn pulling_a_circle_drags_its_neighbours_less_and_less_but_not_the_far_side() {
+        let c = Point::new(300.0, 300.0);
+        let n = 16;
+        let step = std::f64::consts::TAU / n as f64;
+        let base = base_of_outline((0..n).map(|k| arc_quad(c, 100.0, k as f64 * step, (k + 1) as f64 * step)).collect());
+        let top = Point::new(300.0, 200.0);
+        let q = edge_near(&base, top + kurbo::Vec2::new(10.0, 0.0));
+        let t = 0.4;
+        let target = q.eval(t) + kurbo::Vec2::new(0.0, -30.0);
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: q, grab_t: t }, target).expect("辺がある");
+        assert!(moved.len() > 1, "まわりの辺がついてこない");
+        // つかんだ点はカーソルの所
+        let (e0, grabbed) = moved[0];
+        let tt = if base.stored.edge_at(e0).quad().p0 == q.p0 { t } else { 1.0 - t };
+        let got = grabbed.eval(tt);
+        assert!((got - target).hypot() < 1e-9, "つかんだ点がカーソルの所へ行かない：{got:?} {target:?}");
+        // 頂点の動き：つかんだ所から（丸の上で）離れるほど小さく、下半分は動かない
+        let grab_angle = (q.eval(t) - c).atan2();
+        let mut moves: Vec<(f64, f64)> = Vec::new();
+        for &(e, after) in &moved {
+            let before = base.stored.edge_at(e).quad();
+            for (b, a) in [(before.p0, after.p0), (before.p2, after.p2)] {
+                let off = ((b - c).atan2() - grab_angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                moves.push((off, (a - b).hypot()));
+                if b.y > c.y {
+                    assert_eq!(a, b, "下半分の頂点が動いた");
+                }
+            }
+        }
+        for side in [1.0, -1.0] {
+            let mut v: Vec<(f64, f64)> = moves.iter().filter(|(o, _)| o * side > 0.0).map(|&(o, d)| (o.abs(), d)).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            assert!(v.windows(2).all(|w| w[1].1 <= w[0].1 + 1e-12), "離れるほど小さくならない：{v:?}");
+            assert!(v.first().is_some_and(|f| f.1 > 0.0), "片側の頂点が動かない");
+            assert_eq!(v.last().map(|l| l.1), Some(0.0), "ついてくる範囲の端の頂点が動いた");
+        }
+        assert!(matches!(reshaped(&base, ReshapeEdit::PullEdge { orig_seg: q, grab_t: t, target }), Ok(Some(_))));
+    }
+
+    /// 角（向きが `PULL_REACH_TURN` 以上変わる頂点）から先はついてこない。半円の直径（両端が角の1本の辺）を引くと、その辺
+    /// だけが前の決まり（両端を動かさず制御点を Δ / (2t(1−t)) 動かす）どおりに動く。角の隣の弧を引くと、角の頂点と直径は
+    /// 動かない
+    #[test]
+    fn pulling_stops_at_corners_and_a_lone_edge_moves_as_before() {
+        let c = Point::new(300.0, 300.0);
+        let n = 8;
+        let step = std::f64::consts::PI / n as f64;
+        let mut segs: Vec<QuadBez> = (0..n)
+            .map(|k| arc_quad(c, 100.0, std::f64::consts::PI + k as f64 * step, std::f64::consts::PI + (k + 1) as f64 * step))
+            .collect();
+        segs.push(QuadBez::new(Point::new(400.0, 300.0), Point::new(300.0, 300.0), Point::new(200.0, 300.0)));
+        let base = base_of_outline(segs);
+        // 直径：1本だけ、前の決まりどおり
+        let d = edge_near(&base, Point::new(260.0, 300.0));
+        let t = 0.3;
+        let target = d.eval(t) + kurbo::Vec2::new(5.0, 25.0);
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: d, grab_t: t }, target).expect("辺がある");
+        assert_eq!(moved.len(), 1, "角の先の辺がついてきた");
+        let (e, after) = moved[0];
+        let before = base.stored.edge_at(e).quad();
+        let tt = if before.p0 == d.p0 { t } else { 1.0 - t };
+        let want = before.p1 + (target - before.eval(tt)) / (2.0 * tt * (1.0 - tt));
+        assert_eq!((after.p0, after.p2), (before.p0, before.p2), "両端の角が動いた");
+        assert!((after.p1 - want).hypot() < 1e-9, "前の決まりと違う：{:?} {want:?}", after.p1);
+        // 角（左端）の隣の弧：角と直径は動かない
+        let corner = Point::new(200.0, 300.0);
+        let a = edge_near(&base, Point::new(203.0, 285.0));
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Edge { orig_seg: a, grab_t: 0.5 }, a.eval(0.5) + kurbo::Vec2::new(-10.0, -10.0)).expect("辺がある");
+        assert!(moved.len() > 1, "弧の隣の弧がついてこない");
+        for &(e, after) in &moved {
+            let before = base.stored.edge_at(e).quad();
+            assert!(before.p0.y < 300.0 - 1e-6 || before.p2.y < 300.0 - 1e-6, "直径がついてきた");
+            for (b, a) in [(before.p0, after.p0), (before.p2, after.p2)] {
+                if (b - corner).hypot() < 1e-3 {
+                    assert_eq!(a, b, "角の頂点が動いた");
+                }
+            }
+        }
+    }
+
+    /// アンカー（頂点）を引っぱると、線の上を引っぱるのと同じく、まわりがついてくる（アンカーを表示していないとき。利用者が
+    /// 決めた）。丸の頂点を引くと、その頂点はちょうどカーソルの所へ行き、まわりは離れるほど小さく動き、下半分は動かない
+    #[test]
+    fn pulling_a_circle_vertex_drags_its_neighbours_less_and_less() {
+        let c = Point::new(300.0, 300.0);
+        let n = 16;
+        let step = std::f64::consts::TAU / n as f64;
+        let base = base_of_outline((0..n).map(|k| arc_quad(c, 100.0, k as f64 * step, (k + 1) as f64 * step)).collect());
+        let m = base.stored.to_dense();
+        let v = *m.nodes.iter().min_by(|a, b| a.y.total_cmp(&b.y)).expect("頂点がある");
+        let target = v + kurbo::Vec2::new(8.0, -30.0);
+        let moved = base.pulled_edges(crate::planar_map::PullGrab::Vertex(v), target).expect("頂点がある");
+        assert!(moved.len() > 2, "まわりの辺がついてこない");
+        let grab_angle = (v - c).atan2();
+        let mut moves: Vec<(f64, f64)> = Vec::new();
+        for &(e, after) in &moved {
+            let before = base.stored.edge_at(e).quad();
+            for (b, a) in [(before.p0, after.p0), (before.p2, after.p2)] {
+                if b == v {
+                    assert_eq!(a, target, "つかんだ頂点がカーソルの所へ行かない");
+                    continue;
+                }
+                let off = ((b - c).atan2() - grab_angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                moves.push((off, (a - b).hypot()));
+                if b.y > c.y {
+                    assert_eq!(a, b, "下半分の頂点が動いた");
+                }
+            }
+        }
+        for side in [1.0, -1.0] {
+            let mut d: Vec<(f64, f64)> = moves.iter().filter(|(o, _)| o * side > 0.0).map(|&(o, d)| (o.abs(), d)).collect();
+            d.sort_by(|a, b| a.0.total_cmp(&b.0));
+            assert!(d.windows(2).all(|w| w[1].1 <= w[0].1 + 1e-12), "離れるほど小さくならない：{d:?}");
+            assert!(d.first().is_some_and(|f| f.1 > 0.0), "片側の頂点が動かない");
+            assert_eq!(d.last().map(|l| l.1), Some(0.0), "ついてくる範囲の端の頂点が動いた");
+        }
+        assert!(matches!(reshaped(&base, ReshapeEdit::PullVertex { orig_vertex: v, target }), Ok(Some(_))));
+    }
+
+    /// 頂点から出る辺が、みな隣の角で止まるとき（正方形の角）、頂点の引っぱりは、頂点だけを動かす決まり（`moved_quad`：
+    /// 頂点を動かし、制御点を半分動かす）と同じ曲線になる（アンカーを表示しているときの動かし方と、表示していないときの
+    /// 動かし方が、ここでは同じ形）
+    #[test]
+    fn pulling_a_square_corner_moves_it_like_moving_the_vertex_alone() {
+        let p = [Point::new(200.0, 200.0), Point::new(400.0, 200.0), Point::new(400.0, 400.0), Point::new(200.0, 400.0)];
+        let base = base_of_outline((0..4).map(|k| { let (a, b) = (p[k], p[(k + 1) % 4]); QuadBez::new(a, a.midpoint(b), b) }).collect());
+        let v = p[0];
+        let target = Point::new(185.0, 190.0);
+        let mut moved = base.pulled_edges(crate::planar_map::PullGrab::Vertex(v), target).expect("頂点がある");
+        assert_eq!(moved.len(), 2, "角の先の辺がついてきた");
+        moved.sort_by_key(|&(e, _)| e);
+        for (e, after) in moved {
+            let want = crate::planar_map::moved_quad(base.stored.edge_at(e).quad(), v, target);
+            for (a, b) in [(after.p0, want.p0), (after.p1, want.p1), (after.p2, want.p2)] {
+                assert!((a - b).hypot() < 1e-9, "頂点だけを動かす決まりと違う：{after:?} {want:?}");
+            }
+        }
     }
 
     /// とても小さい形でも、頂点の移動・辺のつまみの結果は正しい地図（レビュー 7f63b04 の N-1002）。直す前（N-1003 の前）は、
@@ -40182,6 +40419,8 @@ mod strokes {
                                 layer_id: lid,
                                 orig_vertex: m.nodes[m.edges[e].a],
                                 target_pos: m.nodes[m.edges[e].a].lerp(target, 0.2),
+                                // 頂点だけの移動と、まわりがついてくる引っぱりの両方（乱数は引かない）
+                                follow: e.is_multiple_of(2),
                             }
                         };
                         apply(&mut app, action);

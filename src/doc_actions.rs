@@ -174,6 +174,8 @@ pub(crate) enum Action {
         layer_id: LayerId,
         orig_vertex: Point,
         target_pos: Point,
+        /// まわりがついてくる引っぱりか（`ReshapeEdit::vertex`）
+        follow: bool,
     },
     #[cfg(test)]
     PullEdgeFromTo {
@@ -680,14 +682,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             layer_id,
             orig_vertex,
             target_pos,
+            follow,
         } => apply_map_reshape(
             tab,
             layer_id,
             (orig_vertex, target_pos),
-            ReshapeEdit::MoveVertex {
-                orig_vertex,
-                target: target_pos,
-            },
+            ReshapeEdit::vertex(orig_vertex, target_pos, follow),
         ),
         #[cfg(test)]
         Action::PullEdgeFromTo { from, to } => apply_pull_edge_from_to(tab, from, to),
@@ -1473,14 +1473,12 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         return false;
     };
     let target = tab.session.edit_path.world_xform().inverse() * to;
+    let follow = crate::tool_select::vertex_drag_follows(tab);
     apply_map_reshape(
         tab,
         layer_id,
         (orig_vertex, target),
-        ReshapeEdit::MoveVertex {
-            orig_vertex,
-            target,
-        },
+        ReshapeEdit::vertex(orig_vertex, target, follow),
     )
 }
 

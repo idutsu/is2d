@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui::Color32;
-use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape};
+use kurbo::{Affine, ParamCurve, ParamCurveArclen, Point, QuadBez, Rect as KRect, Shape as KurboShape};
 
 use crate::stored_map::StoredMap;
 use crate::vector_engine::{nearest_on_quad, rects_overlap, Contour, FillShape, SyncCache};
@@ -1672,8 +1672,8 @@ impl LayerBase {
         }
     }
 
-    /// 道具の側（輪郭の変形）：辺の引っぱり・頂点の移動 `edit` で、重ね合わせに渡すもの（動かした辺と、動かした後の曲線：
-    /// `pulled_quad`・`moved_quad`。辺・頂点は塊から引く）。確定（`edit_local`）とドラッグ中の表示（`reshape_result`）の
+    /// 道具の側（輪郭の変形）：辺・頂点の引っぱり・頂点の移動 `edit` で、重ね合わせに渡すもの（動かした辺と、動かした後の曲線：
+    /// `pulled_edges`・`moved_quad`。辺・頂点は塊から引く）。確定（`edit_local`）とドラッグ中の表示（`reshape_result`）の
     /// どちらもこれで作る。辺・頂点が無ければ `None`
     pub(crate) fn reshape_change(&self, edit: ReshapeEdit) -> Option<LocalChange<'static>> {
         let moved: Vec<(usize, QuadBez)> = match edit {
@@ -1681,11 +1681,11 @@ impl LayerBase {
                 orig_seg,
                 grab_t,
                 target,
-            } => {
-                let (e, forward) = self.stored.find_edge(&orig_seg)?;
-                let t = if forward { grab_t } else { 1.0 - grab_t };
-                vec![(e, pulled_quad(self.stored.edge_at(e).quad(), t, target))]
-            }
+            } => self.pulled_edges(PullGrab::Edge { orig_seg, grab_t }, target)?,
+            ReshapeEdit::PullVertex {
+                orig_vertex,
+                target,
+            } => self.pulled_edges(PullGrab::Vertex(orig_vertex), target)?,
             ReshapeEdit::MoveVertex {
                 orig_vertex,
                 target,
@@ -1710,6 +1710,121 @@ impl LayerBase {
             lines,
             rule: MapRule::Sweep,
         })
+    }
+
+    /// 輪郭の引っぱり：つかんだ所 `grab`（辺の上の点か頂点）を `target` へ引っぱったときに動く辺と、動かした後の曲線（しまう
+    /// 向き）。まわりの辺も、つかんだ所から離れるほど小さく動きながらついてくる（Animate の手ざわり。利用者が決めた。設計
+    /// claude/引っぱりでまわりがついてくる設計_ea9f676.md）。つかんだ所から線を外へたどる（辺の上の点なら両側の2方向、
+    /// 頂点ならそこから出る辺の数だけ：`pull_side`）。範囲の頂点と制御点を、つかんだ所からの曲線の長さの重み（`PullWeights`）
+    /// に比例して動かし、つかんだ点がちょうど `target` へ行くように大きさを決める。範囲が、つかんだ辺1本のときは、両端を
+    /// 動かさず制御点だけを Δ / (2t(1−t)) 動かす曲線（前の決まり）と同じ。頂点から出る辺がみな1本で止まるときは、頂点を
+    /// 動かし制御点を半分動かす曲線（頂点だけを動かす決まり `moved_quad`）と同じ。確定とドラッグ中の表示
+    /// （`reshape_change`）・引っぱっている辺の表示が、どれもこれを使う。辺・頂点が無ければ `None`
+    pub(crate) fn pulled_edges(&self, grab: PullGrab, target: Point) -> Option<Vec<(usize, QuadBez)>> {
+        let mut out = Vec::new();
+        match grab {
+            PullGrab::Edge { orig_seg, grab_t } => {
+                let (e0, forward) = self.stored.find_edge(&orig_seg)?;
+                let q0 = self.stored.edge_at(e0).quad();
+                let t = if forward { grab_t } else { 1.0 - grab_t };
+                // 両側（端 b の側と a の側）：先頭は、つかんだ辺の、つかんだ所から端までの切れ端
+                let mut used = HashSet::from([e0]);
+                let to_b = self.pull_side(e0, q0.subsegment(t..1.0), &mut used);
+                let to_a = self.pull_side(e0, reversed(q0.subsegment(0.0..t)), &mut used);
+                let (wb, wa) = (PullWeights::new(&to_b), PullWeights::new(&to_a));
+                // つかんだ辺の制御点の重み：t = 1/2 の点のある側の、その点の重み（つかんだ所からの長さは、端から測った長さの
+                // 差。長さ 0 の曲線の長さは式が割り算で壊れるので測らない）
+                let from_grab = (q0.subsegment(0.0..0.5).arclen(FLAT_TOL)
+                    - q0.subsegment(0.0..t).arclen(FLAT_TOL))
+                .abs();
+                let w_ctrl = if t <= 0.5 { wb.at(from_grab) } else { wa.at(from_grab) };
+                let (w_a, w_b) = (wa.verts[0], wb.verts[0]);
+                let reach =
+                    (1.0 - t) * (1.0 - t) * w_a + 2.0 * t * (1.0 - t) * w_ctrl + t * t * w_b;
+                let amp = (target - q0.eval(t)) / reach;
+                out.push((
+                    e0,
+                    QuadBez::new(q0.p0 + amp * w_a, q0.p1 + amp * w_ctrl, q0.p2 + amp * w_b),
+                ));
+                self.push_pulled(&to_b[1..], &wb, 1, w_b, amp, &mut out);
+                self.push_pulled(&to_a[1..], &wa, 1, w_a, amp, &mut out);
+            }
+            PullGrab::Vertex(v) => {
+                let at = self.edges_at_node(v);
+                if at.is_empty() {
+                    return None;
+                }
+                // 頂点の重みは 1 なので、大きさは動かした量そのもの。頂点から出る辺は、みな、たどる前から使ったことにする
+                // （ほかの方向から回ってきて、頂点から出る辺に入らない）
+                let amp = target - v;
+                let mut used: HashSet<usize> = at.iter().copied().collect();
+                for &e in &at {
+                    let te = self.stored.edge_at(e);
+                    let first = if te.a == v { te.quad() } else { reversed(te.quad()) };
+                    let side = self.pull_side(e, first, &mut used);
+                    self.push_pulled(&side, &PullWeights::new(&side), 0, 1.0, amp, &mut out);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// 引っぱりの片側 `side`（外へ向けた曲線の並び。片側の `from` 番目から）の、動かした後の曲線（しまう向き）を `out` に足す。
+    /// 曲線の始めの頂点の重みは、前の曲線の終わりの頂点の重み（先頭は `start_w`）
+    fn push_pulled(
+        &self,
+        side: &[(usize, QuadBez)],
+        w: &PullWeights,
+        from: usize,
+        start_w: f64,
+        amp: kurbo::Vec2,
+        out: &mut Vec<(usize, QuadBez)>,
+    ) {
+        let mut w0 = start_w;
+        for (k, &(e, q)) in side.iter().enumerate() {
+            let (wm, w2) = (w.mids[from + k], w.verts[from + k]);
+            let m = QuadBez::new(q.p0 + amp * w0, q.p1 + amp * wm, q.p2 + amp * w2);
+            let stored_forward = self.stored.edge_at(e).a == q.p0;
+            out.push((e, if stored_forward { m } else { reversed(m) }));
+            w0 = w2;
+        }
+    }
+
+    /// 引っぱりの片側：辺 `e0` の、つかんだ所から外へ向けた曲線 `piece`（辺の上をつかんだときは切れ端、頂点をつかんだときは
+    /// 辺全体）から、線を外へたどって、ついてくる辺を（外へ向けた曲線で）並べる（先頭は `piece`）。たどった辺は `used` に
+    /// 入れ、入っている辺には進まない（閉じた線をぐるりと回って、ほかの方向に着いたとき）。両端が同じ辺（自分に戻る輪）は
+    /// 無い（2次ベジェで両端が同じなら、行って同じ道を戻る線になり自分と重なるので、正しい地図に無い）。止まるのは、頂点につながる辺が2本でないとき（線の端・ほかの線と
+    /// つながる所）と、つかんだ所から向きが `PULL_REACH_TURN` 以上回るとき（その頂点は動かない）。回った量は、右へ・左へ
+    /// 曲がった量を打ち消さずに足したもの（符号付きで足すと、ゆらゆらした波の線は打ち消し合っていつまでも届かず、線全体が
+    /// ついてきた。2次ベジェは1本の中で曲がる向きが変わらないので、1本の回った量は両端の向きの間の角）
+    fn pull_side(
+        &self,
+        e0: usize,
+        piece: QuadBez,
+        used: &mut HashSet<usize>,
+    ) -> Vec<(usize, QuadBez)> {
+        let mut turn = turn_between(start_dir(piece), end_dir(piece)).abs();
+        let mut side = vec![(e0, piece)];
+        loop {
+            let (cur, q) = *side.last().expect("先頭は切れ端");
+            let v = q.p2;
+            let at = self.edges_at_node(v);
+            let [x, y] = at[..] else { break };
+            let next = if x == cur { y } else { x };
+            if used.contains(&next) {
+                break;
+            }
+            let te = self.stored.edge_at(next);
+            let nq = if te.a == v { te.quad() } else { reversed(te.quad()) };
+            let joined = turn + turn_between(end_dir(q), start_dir(nq)).abs();
+            if joined >= PULL_REACH_TURN {
+                break;
+            }
+            turn = joined + turn_between(start_dir(nq), end_dir(nq)).abs();
+            used.insert(next);
+            side.push((next, nq));
+        }
+        side
     }
 
     /// 1本の道：道具が作った重ね合わせに渡すもの `change` で、地図を触った所だけで編集する（設計 段2b の 7. の 2b-7c と
@@ -3093,8 +3208,37 @@ pub(crate) enum ReshapeEdit {
         grab_t: f64,
         target: Point,
     },
-    /// `orig_vertex` にある頂点を `target` へ動かす
+    /// `orig_vertex` にある頂点を `target` へ動かす（その頂点だけ：アンカーを表示しているとき）
     MoveVertex { orig_vertex: Point, target: Point },
+    /// `orig_vertex` にある頂点を `target` へ引っぱる（まわりがついてくる：アンカーを表示していないとき。線の上を引っぱるのと
+    /// 同じ決まり `LayerBase::pulled_edges`）
+    PullVertex { orig_vertex: Point, target: Point },
+}
+
+impl ReshapeEdit {
+    /// 頂点 `orig_vertex` を `target` へ動かす1回分：まわりがついてくる引っぱり（`follow`）か、その頂点だけの移動か
+    pub(crate) fn vertex(orig_vertex: Point, target: Point, follow: bool) -> Self {
+        if follow {
+            Self::PullVertex {
+                orig_vertex,
+                target,
+            }
+        } else {
+            Self::MoveVertex {
+                orig_vertex,
+                target,
+            }
+        }
+    }
+}
+
+/// 引っぱりでつかんだ所（`LayerBase::pulled_edges`）
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PullGrab {
+    /// 形が `orig_seg` の辺の `grab_t` の所
+    Edge { orig_seg: QuadBez, grab_t: f64 },
+    /// その位置にある頂点
+    Vertex(Point),
 }
 
 /// アンカーの追加・削除の1回分（どの辺・頂点かは、形と位置で探す）
@@ -3420,14 +3564,66 @@ impl PlanarMap {
     }
 }
 
-/// 曲線 `q` の `t` の所を `target` へ引っぱった曲線（両端は動かさず、制御点を動かす。輪郭のつまみの決まり。確定と
-/// ドラッグ中の表示が同じこれを使う：`reshape_change`）。`t` は `grab_t` で寄せたもの
-pub(crate) fn pulled_quad(q: QuadBez, t: f64, target: Point) -> QuadBez {
-    QuadBez::new(
-        q.p0,
-        q.p1 + (target - q.eval(t)) / (2.0 * t * (1.0 - t)),
-        q.p2,
-    )
+/// 引っぱりで、まわりの辺がついてくる範囲：つかんだ所から線をたどって、向きがこれだけ回る手前まで（45°：線の向きが、
+/// つかんだ所の向きに沿うより横切る向きに近くなる所。「V」「L」の先（90° 前後回る所。直角を境にすると、ちょうど直角の
+/// 角や少し開いた L が、計算の端数しだいで越えてしまう）・「U」の底からの立ち上がり・丸の8分の1周で止まり、反対側は
+/// 動かない（利用者が決めた動き）：`LayerBase::pulled_edges`）
+pub(crate) const PULL_REACH_TURN: f64 = std::f64::consts::FRAC_PI_4;
+
+/// 引っぱりの片側の重み（`LayerBase::pulled_edges`）：つかんだ所からの曲線の長さ s、その側の端までの長さ L について
+/// (1 + cos(πs/L)) / 2（つかんだ所で 1、端で 0。両端で傾きが 0 なので、つかんだ所と、動かない所とのつなぎ目に折れが
+/// 出ない）
+struct PullWeights {
+    /// 片側の長さ L
+    total: f64,
+    /// 外へ向けた曲線 k の終わりの頂点の重み（最後は端なので 0：動かない）
+    verts: Vec<f64>,
+    /// 曲線 k の t = 1/2 の点の重み（その曲線の制御点を動かす重み）
+    mids: Vec<f64>,
+}
+
+impl PullWeights {
+    fn new(side: &[(usize, QuadBez)]) -> Self {
+        let lens: Vec<f64> = side.iter().map(|(_, q)| q.arclen(FLAT_TOL)).collect();
+        let mut w = Self {
+            total: lens.iter().sum(),
+            verts: Vec::with_capacity(side.len()),
+            mids: Vec::with_capacity(side.len()),
+        };
+        let mut at = 0.0;
+        for ((_, q), len) in side.iter().zip(&lens) {
+            w.mids.push(w.at(at + q.subsegment(0.0..0.5).arclen(FLAT_TOL)));
+            at += len;
+            w.verts.push(w.at(at));
+        }
+        *w.verts.last_mut().expect("片側には曲線がある") = 0.0;
+        w
+    }
+
+    /// つかんだ所から曲線の長さ `s` の所の重み
+    fn at(&self, s: f64) -> f64 {
+        0.5 * (1.0 + (std::f64::consts::PI * (s / self.total).min(1.0)).cos())
+    }
+}
+
+/// 曲線の向きを逆にしたもの
+fn reversed(q: QuadBez) -> QuadBez {
+    QuadBez::new(q.p2, q.p1, q.p0)
+}
+
+/// 曲線の始めの向き（制御点が端と同じなら、もう一方の端への向き）
+fn start_dir(q: QuadBez) -> kurbo::Vec2 {
+    if q.p1 == q.p0 { q.p2 - q.p0 } else { q.p1 - q.p0 }
+}
+
+/// 曲線の終わりの向き（制御点が端と同じなら、もう一方の端からの向き）
+fn end_dir(q: QuadBez) -> kurbo::Vec2 {
+    if q.p1 == q.p2 { q.p2 - q.p0 } else { q.p2 - q.p1 }
+}
+
+/// 向き `a` から `b` へ回る角（左回りが正、−π〜π）
+fn turn_between(a: kurbo::Vec2, b: kurbo::Vec2) -> f64 {
+    a.cross(b).atan2(a.dot(b))
 }
 
 /// 曲線 `q` の、`orig` にある端を `target` へ動かした曲線（輪郭の頂点の移動の決まり：動かす端は `target` へ、制御点は
@@ -3442,7 +3638,7 @@ pub(crate) fn moved_quad(q: QuadBez, orig: Point, target: Point) -> QuadBez {
     )
 }
 
-/// 輪郭のつまみで、つかんだ所の t（曲線の上）を、引っぱる所に寄せたもの（0.18〜0.82）。`pulled_quad` は制御点を
+/// 輪郭のつまみで、つかんだ所の t（曲線の上）を、引っぱる所に寄せたもの（0.18〜0.82）。引っぱる辺1本だけが動くとき（`pulled_edges`）は制御点を
 /// 1 / (2t(1−t)) 倍動かすので、端に近い t ほど少しの動きで辺全体が大きく膨らむ。端の近くをつかむと、端から 18% の所が
 /// カーソルの動きどおりに動く（曲線はカーソルから離れた所を通る）。曲線がいつもカーソルの下を通る決まりは、長い辺の端の
 /// 近くを少し引くと辺全体が大きく膨らむので採らなかった（GEOMETRY.md 5.1）

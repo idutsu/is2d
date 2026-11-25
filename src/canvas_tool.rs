@@ -221,6 +221,8 @@ pub(crate) enum SelectDragState {
         target: Point,
         /// 吸い付いた頂点の、ステージの座標の位置（表示）
         snapped_to: Option<Point>,
+        /// まわりがついてくる引っぱりか（`ReshapeEdit::vertex`。ドラッグを始めたときに決める）
+        follow: bool,
     },
 }
 
