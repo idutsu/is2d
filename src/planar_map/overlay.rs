@@ -72,7 +72,10 @@ impl MapRule {
     /// 区間（か中の辺）の新しい線（線の決まりはこれ1つ。設計：claude/線の設計_68a596e.md の 6.2 の (b)）：重ねるものの線の辺
     /// がそこを通れば（`input`。重ねる地図の辺・輪郭の変形で動かした辺）、上に置くその辺の線。通らなければ前の線 `old`。
     /// ただし、両側とも決まりが前の色によらず色を決める所（`covers`：塗った所・中だけ残すときの外・片の色のある所）なら、
-    /// 前の線は消える（ブラシで線の上を塗ると、下の線が消える）
+    /// 前の線は消える（ブラシで線の上を塗ると、下の線が消える）。塗る・消す決まり（`Paint`）で地図を重ねるとき（片を切り
+    /// 出すときの残り・浮いた片から覆う所を消すとき）は、重ねる地図の線は塗る所の一部（選んだ線）なので、そこの線は消え、
+    /// 重ねる地図の線の無い辺（選ぶ所の境目）は前の線を変えない（前は、重ねる地図の線を上に置いたので、選んだ線が片にも
+    /// 残りにも入り、境目の選んでいない線は消えた）
     pub(super) fn stroke(
         self,
         left: &Over,
@@ -80,6 +83,11 @@ impl MapRule {
         input: Option<Option<EdgeStroke>>,
         old: Option<EdgeStroke>,
     ) -> Option<EdgeStroke> {
+        let input = match (self, input) {
+            (MapRule::Paint(_), Some(Some(_))) => return None,
+            (MapRule::Paint(_), Some(None)) => None,
+            (_, input) => input,
+        };
         match input {
             Some(s) => s,
             None if self.covers(left) && self.covers(right) => None,

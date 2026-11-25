@@ -1575,12 +1575,24 @@ impl Session {
         }
         let restaged: HashSet<ShapeId> = staying.iter().map(|f| f.shape_id).collect();
 
+        // 浮いている残りのうち選んでいるもの（矩形で切った後、残りの線を選び足したとき）は、確定と同じく持ち上げて動かす
+        // （`lift_selected_raw_shapes_to_floating`）ので、止まった絵には出さず、下で動かす（複製のときは元が残る）
+        let selected_remainder: HashSet<ShapeId> = self
+            .floating
+            .iter()
+            .flat_map(|fl| fl.remainder())
+            .map(|r| r.shape_id)
+            .filter(|id| self.selection.shapes.contains(id))
+            .collect();
         if let Some(fl) = &self.floating {
             self.overlay.hide = fl.hidden().clone();
             self.overlay.add.extend(
                 fl.placed_remainder()
                     .iter()
-                    .filter(|r| !restaged.contains(&r.1.shape_id))
+                    .filter(|r| {
+                        !restaged.contains(&r.1.shape_id)
+                            && (alt_duplicate || !selected_remainder.contains(&r.1.shape_id))
+                    })
                     .cloned(),
             );
             if alt_duplicate {
@@ -1629,6 +1641,18 @@ impl Session {
             }
         }
         if let Some(fl) = &self.floating {
+            for r in fl.remainder() {
+                if selected_remainder.contains(&r.shape_id) {
+                    let cloned = moving.remove(&r.shape_id).unwrap_or_else(|| r.clone());
+                    if for_transform {
+                        let _ = cloned.fill_mesh();
+                        orig_shapes.push(cloned.clone());
+                    }
+                    self.overlay
+                        .add
+                        .push((Placement::TopOfLayer(r.layer_id, scope.clone()), cloned));
+                }
+            }
             for piece in fl.pieces() {
                 if self.selection.contains_shape(piece) {
                     if for_transform {

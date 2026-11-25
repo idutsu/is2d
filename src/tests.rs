@@ -24288,6 +24288,108 @@ fn test_reshape_preview_matches_commit_when_crossing() {
     }
 }
 
+/// 矩形選択・クリック・ダブルクリック（Shift で足すものも）を混ぜて選んだあとのドラッグ（Alt の複製も）でも、ドラッグ中の
+/// 見た目（どの点が何色か）は離した後の形と同じ（利用者の指摘：きのこの線の絵で、ドラッグ中だけ一部の線が置いていかれ、
+/// 離すと正しく動いた）。直す前は、線だけの絵の 200 通り中 17 通りで違った。原因は3つ：
+/// - 片を切り出すとき、選ぶ所の線を、中を消す側（残り）にも置いた（`MapRule::stroke`：選んだ線が片と残りの両方に入った）
+/// - 片の番号の一覧が面の番号だけで、線の番号を含まなかった（`PieceGroup::ids`：クリックで一部の片だけ残すとき、線の片を
+///   残りに戻せず、片と残りの両方に残った）
+/// - ドラッグ中の見た目が、選んでいる残り（矩形の後に Shift のダブルクリックで足した線）を動かさなかった
+///   （`Session::begin_selection_overlay`。確定は持ち上げて動かす）
+#[test]
+fn dragging_after_mixed_selections_matches_the_drop() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::from_rgb(20, 40, 90), width: 8 };
+    let line = |a: Point, b: Point| -> Vec<Point> { (0..=40).map(|i| a.lerp(b, i as f64 / 40.0)).collect() };
+    let colors_on_grid = |shapes: &[FillShape]| -> Vec<Option<Color32>> {
+        let mut out = Vec::new();
+        let mut y = 150.0;
+        while y < 640.0 {
+            let mut x = 80.0;
+            while x < 680.0 {
+                let p = Point::new(x + 0.137, y + 0.173);
+                out.push(shapes.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color));
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+        out
+    };
+    let mut rng = fastrand::Rng::with_seed(0x6b17_0c0de);
+    let mut bad = Vec::new();
+    for case in 0..400 {
+        let mut app = Is2dApp::default();
+        apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+        for (a, b) in [
+            (Point::new(100.0, 200.0), Point::new(500.0, 200.0)),
+            (Point::new(220.0, 200.0), Point::new(220.0, 450.0)),
+            (Point::new(380.0, 200.0), Point::new(380.0, 450.0)),
+        ] {
+            assert!(apply(&mut app, Action::PencilStroke { points: line(a, b), stroke: ink }));
+        }
+        // 半分の回は、線で縁どった塗りも置く（塗りと線は別々に選ぶ。選んだ塗りの縁の、選んでいない線が残りに残るか）
+        let with_fill = case % 2 == 1;
+        if with_fill {
+            put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(420.0, 300.0, 520.0, 420.0, Color32::from_rgb(230, 180, 60))]);
+            assert!(apply(&mut app, Action::InkBottle { pt: Point::new(470.0, 360.0), stroke: ink }));
+        }
+        apply(&mut app, Action::SetTool { tool: Tool::Select });
+        let rect = |rng: &mut fastrand::Rng| {
+            let (x, y) = (90.0 + rng.f64() * 400.0, 150.0 + rng.f64() * 300.0);
+            (Point::new(x, y), Point::new(x + 30.0 + rng.f64() * 250.0, y + 30.0 + rng.f64() * 250.0))
+        };
+        // 選び方：矩形・Shift の矩形・クリック・Shift のクリック・ダブルクリック・Shift のダブルクリックを混ぜる（線の上の点）
+        let on_line = |rng: &mut fastrand::Rng| match rng.usize(0..5) {
+            0 => Point::new(100.0 + rng.f64() * 400.0, 200.0),
+            1 => Point::new(220.0, 200.0 + rng.f64() * 250.0),
+            2 => Point::new(380.0, 200.0 + rng.f64() * 250.0),
+            3 => Point::new(430.0 + rng.f64() * 80.0, 310.0 + rng.f64() * 100.0),
+            _ => Point::new(420.0 + rng.f64() * 100.0, 300.0),
+        };
+        let n = 1 + rng.usize(0..5);
+        let mut ops = Vec::new();
+        for k in 0..n {
+            let shift = k > 0 && rng.bool();
+            match rng.usize(0..3) {
+                0 => {
+                    let (p0, p1) = rect(&mut rng);
+                    ops.push(format!("矩形{}", if shift { "+" } else { "" }));
+                    apply(&mut app, Action::SelectMarquee { p0, p1, additive: shift });
+                }
+                1 => {
+                    let pt = on_line(&mut rng);
+                    ops.push(format!("クリック{}", if shift { "+" } else { "" }));
+                    crate::select_ops::apply_click_selection(&mut app, pt, shift, true);
+                }
+                _ => {
+                    let pt = on_line(&mut rng);
+                    ops.push(format!("ダブル{}", if shift { "+" } else { "" }));
+                    tool_select::handle_canvas_double_click(&mut app, pt, shift);
+                }
+            }
+        }
+        if app.session.selection.is_empty() {
+            continue;
+        }
+        let from = Point::new(300.0, 300.0);
+        // Alt の複製は線だけの絵で確かめる。塗りのある絵では、その場に残る元の片の塗りが、矩形の枠のすぐ近くを通る残りの線の
+        // 半分を覆って見える（浮いた片はレイヤーのいちばん上に描くため。離すと線は塗りの上。今回とは別の、前からあるずれ）
+        let alt = rng.bool() && !with_fill;
+        let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, alt);
+        app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+        crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(15.0, 140.0));
+        let during: Vec<FillShape> = app.scene().iter().cloned().collect();
+        let during = colors_on_grid(&during);
+        crate::select_ops::finish_selection_drag(&mut app, None);
+        let after = colors_on_grid(&app.scene().iter().cloned().collect::<Vec<_>>());
+        let diff = during.iter().zip(&after).filter(|(a, b)| a != b).count();
+        if diff > 0 {
+            bad.push(format!("{case}（{}{}）：{diff} 点", ops.join("・"), if alt { "・Alt" } else { "" }));
+        }
+    }
+    assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
+}
+
 /// 円の上のフチを下のフチの向こうまで引っぱると、離す前から2つに分かれて見える
 #[test]
 fn test_reshape_preview_shows_split_during_drag() {
