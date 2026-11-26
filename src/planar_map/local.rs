@@ -1174,7 +1174,7 @@ impl LocalMap<'_> {
                 left_src: l,
                 right_src: r,
                 stroke: ed.stroke,
-                line_id: super::edge_line_id((q.p0, q.p2, q.p1), (l, r), ed.stroke, ed.line_id),
+                line_id: super::written_line_id(ed.stroke, ed.line_id),
             });
         }
         (changed_base, add)

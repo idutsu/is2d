@@ -2106,8 +2106,7 @@ pub(crate) struct UndoEntry {
     pub(crate) library: Library,
     pub(crate) sounds: crate::sound::SoundLibrary,
     pub(crate) floating: Option<Arc<Floating>>,
-    /// その時の選択（取り消し・やり直しで、絵と一緒に戻す。線の番号は線の位置と形から作るので、絵と別の時の選択を持ち越すと
-    /// 番号が合わず、線が選択から落ちる）
+    /// その時の選択（取り消し・やり直しで、絵と一緒に戻す。取り消すと、操作の前の選択に戻る）
     pub(crate) selection: Selection,
     pub(crate) edit_path: EditPath,
     pub(crate) editing_group_path: Vec<u64>,

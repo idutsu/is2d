@@ -2307,7 +2307,7 @@ impl PlanarMap {
                                 left_src: c.left.1,
                                 right_src: c.right.1,
                                 stroke: c.stroke,
-                                // 切った区間の続き（曲線に戻すまでの仮の辺）は、新しい線（番号はしまうときに振る）
+                                // 切った区間の続き（曲線に戻すまでの仮の辺）は、新しい線（番号は書き戻しで取る：`written_line_id`）
                                 line_id: None,
                             });
                             edges.len() - 1
@@ -3303,9 +3303,10 @@ impl ChainRestorer {
             left_src: c.left.1,
             right_src: c.right.1,
             stroke: c.stroke,
-            // 切った区間を曲線に戻した辺：出どころの線の辺を丸ごと覆えば、その番号を引き継ぐ（`Chain::line_id`）。ほかは
-            // 新しい線（番号はしまうときに振る）
-            line_id: c.line_id,
+            // 切った区間を曲線に戻した辺：鎖を丸ごと1本に戻し、鎖が出どころの線の辺を丸ごと覆えば、その番号を引き継ぐ
+            // （`Chain::line_id`）。鎖を分けて戻した辺は、どれも新しい線（番号は書き戻しで取る：`written_line_id`。前は
+            // 分けたどれもが同じ番号を引き継ぎえた：レビュー de92ceb の N-1002）
+            line_id: (i == 0 && j == ids.len()).then_some(c.line_id).flatten(),
         });
         self.alive.push(true);
         if let Some(index) = self.index.as_mut() {

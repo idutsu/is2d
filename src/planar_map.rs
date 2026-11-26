@@ -79,7 +79,7 @@ pub(crate) struct MapEdge {
     pub(crate) right_src: Option<ShapeId>,
     pub(crate) stroke: Option<EdgeStroke>,
     /// 線の番号（線のある辺だけ：`line_id_of`）。番号を引き継ぐ辺（動かした・そのまま残った辺）は持ったまま運び、新しく
-    /// できた線の辺（引いた・切られた・まとめた辺）は `None` で運んで、しまうときに形から振る（`tile_edge`・`edge_line_id`）
+    /// できた線の辺（引いた・切られた・まとめた辺）は `None` で運んで、書き戻しで新しい番号を取る（`written_line_id`）
     pub(crate) line_id: Option<ShapeId>,
 }
 
@@ -407,8 +407,8 @@ impl PlanarMap {
         self.check()
     }
 
-    /// 線の番号の決まり：番号は線のある辺だけが持ち、しまうときの番号（`edge_line_id`）が、同じ地図の中で重ならない（線の
-    /// 図形は番号で引くので、重なると選ぶ・外す線を取り違える）
+    /// 線の番号の決まり：番号は線のある辺だけが持ち、同じ地図の中で重ならない（線の図形は番号で引くので、重なると選ぶ・
+    /// 外す線を取り違える）。新しくできた線の辺はまだ番号を持たず、書き戻しで新しい番号を取る（`written_line_id`）
     fn line_ids_ok(&self) -> bool {
         if self.edges.iter().any(|e| e.line_id.is_some() && e.stroke.is_none()) {
             return false;
@@ -986,7 +986,7 @@ impl PlanarMap {
                 a: e1.a,
                 b: e2.b,
                 ctrl: q.p1,
-                // まとめた辺は新しい線（番号はしまうときに振る：`edge_line_id`）
+                // まとめた辺は新しい線（番号は書き戻しで取る：`written_line_id`）
                 line_id: None,
                 ..e1
             };
@@ -1066,32 +1066,14 @@ pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
     te.line_id
 }
 
-/// しまう辺の線の番号（番号の決まりはこれ1つ）：線の無い辺は `None`。番号を引き継ぐ辺（`line_id` が `Some`）はその番号。
-/// 新しくできた線の辺（`None`）は、形（決まった向きの両端と制御点のビット）・線・辺の側の番号（面の番号と線のラベル：
-/// `line_label`。決まった向きにそろえる）から振る（決まった計算なので、窓で重ねた答えとお手本の地図全体で重ねた答えが同じ
-/// 番号になる。側の番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。線の番号の印
-/// `LINE_ID_BIT` を立てる）
-pub(crate) fn edge_line_id(
-    (a, b, ctrl): (Point, Point, Point),
-    (left_src, right_src): (Option<ShapeId>, Option<ShapeId>),
-    stroke: Option<EdgeStroke>,
-    line_id: Option<ShapeId>,
-) -> Option<ShapeId> {
-    use std::hash::{Hash, Hasher};
-    let stroke = stroke?;
-    if line_id.is_some() {
-        return line_id;
-    }
-    let (a, b, srcs) = if point_order(a, b).is_le() {
-        (a, b, [left_src, right_src])
-    } else {
-        (b, a, [right_src, left_src])
-    };
-    let mut h = IntHasher::default();
-    [a.x, a.y, b.x, b.y, ctrl.x, ctrl.y].map(f64::to_bits).hash(&mut h);
-    stroke.hash(&mut h);
-    srcs.hash(&mut h);
-    Some(LINE_ID_BIT | (h.finish() >> 1))
+/// 書き戻す辺の線の番号（線の番号の決め方はこれ1つ）：線の無い辺は `None`。番号を引き継ぐ辺（`line_id` が `Some`）は
+/// その番号。新しくできた線の辺（`None`：引いた・切られた・まとめた辺）は、新しい番号を取る（塗りの新しい面と同じく
+/// `next_shape_id`。線の番号の印 `LINE_ID_BIT` を立てる）。新しい番号は今ある番号と必ず違うので、どの道で線ができても
+/// 重ならない。呼ぶのは書き戻しの2か所だけ：地図全体から書く所（`CheckedMap::labeled`）と、触った所だけ書く所
+/// （`LocalMap::relabeled_edges`）。前は新しい線の番号を形・線・側の番号から計算で振ったので、動かした線が持ち続ける
+/// 元の所の番号と、元の所に新しくできた同じ形の線の番号が同じになり、書き込みが断られた（レビュー de92ceb の N-1002）
+pub(crate) fn written_line_id(stroke: Option<EdgeStroke>, line_id: Option<ShapeId>) -> Option<ShapeId> {
+    stroke.map(|_| line_id.unwrap_or_else(|| LINE_ID_BIT | crate::vector_engine::next_shape_id()))
 }
 
 /// しまう形 `stored` の図形の番号：面の番号（色のある側に記した番号）と、線の番号（線を乗せた辺ごとの `line_id_of`。線の
@@ -1119,7 +1101,7 @@ pub(crate) fn tile_edge(m: &PlanarMap, ed: &MapEdge) -> crate::stored_map::TileE
         left_src: ed.left_src,
         right_src: ed.right_src,
         stroke: ed.stroke,
-        line_id: edge_line_id((a, b, ed.ctrl), (ed.left_src, ed.right_src), ed.stroke, ed.line_id),
+        line_id: ed.stroke.and(ed.line_id),
     }
 }
 
@@ -2357,8 +2339,8 @@ impl LayerBase {
     }
 
     /// テスト用（お手本との比べ）：この地図を地図 `next` にする1本の道の答え `got` が、地図全体を触った所として行った答え
-    /// （`whole_touched`）と同じか（書けるか・しまう形・消す図形・入れる図形・面の表。新しく振る番号は、入れる図形の形で
-    /// 対応づけて比べる）。書けるかは、`next` が正しい地図か（本番の判定 `check`）とも食い違わない
+    /// （`whole_touched`）と同じか（書けるか・しまう形・消す図形・入れる図形・面の表。新しく取る番号は、面の番号は入れる
+    /// 図形の形で、線の番号は辺の形で対応づけて比べる）。書けるかは、`next` が正しい地図か（本番の判定 `check`）とも食い違わない
     #[cfg(test)]
     fn matches_whole(&self, next: &PlanarMap, group_path: &[u64], got: &LocalEdit) -> bool {
         let valid = next.is_valid();
@@ -2412,6 +2394,27 @@ impl LayerBase {
                 }
             } else {
                 rename.insert(*id, fid);
+            }
+        }
+        // 新しく取った線の番号も、辺の形で対応づける（前の地図の線の番号を引き継いだ辺は、番号まで同じ）
+        let edge_key = |te: &crate::stored_map::TileEdge| local::quad_key(&QuadBez::new(te.a, te.ctrl, te.b));
+        let whole_lines: HashMap<[u64; 6], ShapeId> = (0..f.stored.edge_count())
+            .map(|e| f.stored.edge_at(e))
+            .filter_map(|te| Some((edge_key(&te), te.line_id?)))
+            .collect();
+        for te in (0..w.stored.edge_count()).map(|e| w.stored.edge_at(e)) {
+            let Some(id) = te.line_id else {
+                continue;
+            };
+            let Some(&fid) = whole_lines.get(&edge_key(&te)) else {
+                return false;
+            };
+            if self.line_edge(id, group_path).is_some() || self.line_edge(fid, group_path).is_some() {
+                if fid != id {
+                    return false;
+                }
+            } else {
+                rename.insert(id, fid);
             }
         }
         let renamed = |id: ShapeId| rename.get(&id).copied().unwrap_or(id);
@@ -3380,7 +3383,7 @@ impl PlanarMap {
         let q = m.quad(e);
         m.nodes.push(q.eval(t));
         let v = m.nodes.len() - 1;
-        // 分けた2本は新しい線（番号はしまうときに振る：`edge_line_id`）
+        // 分けた2本は新しい線（番号は書き戻しで取る：`written_line_id`）
         m.edges[e] = MapEdge {
             b: v,
             ctrl: q.subsegment(0.0..t).p1,
@@ -3435,7 +3438,7 @@ impl PlanarMap {
             a: e1.a,
             b: e2.b,
             ctrl: pa.midpoint(pb),
-            // つないだ1本は新しい線（番号はしまうときに振る：`edge_line_id`）
+            // つないだ1本は新しい線（番号は書き戻しで取る：`written_line_id`）
             line_id: None,
             ..e1
         };
@@ -3880,6 +3883,10 @@ impl CheckedMap {
     fn labeled(self, how: FaceIds) -> CheckedMap {
         let ids = face_ids(&self.map, &self.faces, how);
         let mut c = self.with_ids(&ids);
+        // 新しくできた線の辺は、新しい番号を取る（`written_line_id`。みな新しい番号にするときは、引き継ぐ番号も替える：下）
+        for ed in &mut c.map.edges {
+            ed.line_id = written_line_id(ed.stroke, ed.line_id);
+        }
         // みな新しい番号にするときは、線のラベルも新しい番号にする（同じラベルは同じ新しい番号）
         if matches!(how, FaceIds::Fresh) {
             let mut fresh: IntMap<ShapeId, ShapeId> = IntMap::default();
@@ -3895,9 +3902,9 @@ impl CheckedMap {
                 if ed.right.is_none() {
                     renew(&mut ed.right_src);
                 }
-                // 線の番号も、みな新しい番号にする（塗りの番号と同じく、新しく取る。形から振ると、線のラベルの無い線を同じ
-                // 位置のまま写した片（位置は片の変換で持つ）が、元の線と同じ番号になる）
-                ed.line_id = ed.stroke.map(|_| LINE_ID_BIT | crate::vector_engine::next_shape_id());
+                // 線の番号も、みな新しい番号にする（塗りの番号と同じく、新しく取る。引き継ぐと、線を同じ位置のまま写した片
+                // （位置は片の変換で持つ）が、元の線と同じ番号になる）
+                ed.line_id = written_line_id(ed.stroke, None);
             }
         }
         c

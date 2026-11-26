@@ -133,6 +133,10 @@ impl StoredEdge {
 }
 
 /// 中身が同じか（座標はビットまで）
+/// 辺の中身が同じか：`Hash` と同じ項目（形・左右の色・側の図形の番号・線・線の番号）を見る（辺の比べ方はこれ1つ。差分を
+/// 作る所・塊の使い回し・お手本との比べが使う）。前は線の番号を見ず `Hash` と食い違ったので、番号だけ違う辺を、塊の使い
+/// 回しでは同じとみなして古い番号を残し、集まりで引く所では表の並びしだいで答えが変わり、確定がときどき断られた（レビュー
+/// de92ceb の N-1003）
 impl PartialEq for StoredEdge {
     fn eq(&self, other: &Self) -> bool {
         self.geom_bits() == other.geom_bits()
@@ -141,6 +145,7 @@ impl PartialEq for StoredEdge {
             && self.left_src == other.left_src
             && self.right_src == other.right_src
             && self.stroke == other.stroke
+            && self.line_id == other.line_id
     }
 }
 

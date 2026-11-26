@@ -21331,8 +21331,8 @@ fn pasting_a_fill_in_place_keeps_the_ink_under_its_edge() {
 }
 
 /// 線で縁どった塗りのグループを2つ選んで少し動かし、取り消して（やり直して）すぐドラッグしても、線も一緒に動く（利用者の
-/// 指摘：塗りだけが動いた）。線の番号は線の位置と形から作るので、動かすと変わる。前は、取り消しのとき、取り消す直前の選択
-/// （動かした後の番号）を持ち越し、無くなった番号を外したので、線が選択から落ちた。取り消しの控えに、その時の選択もしまう
+/// 指摘：塗りだけが動いた）。前は線の番号を線の位置と形から作ったので、動かすと変わり、取り消しのとき、取り消す直前の
+/// 選択（動かした後の番号）を持ち越して無くなった番号を外したので、線が選択から落ちた。取り消しの控えに、その時の選択もしまう
 #[test]
 fn undo_and_redo_keep_the_lines_of_selected_groups_selected() {
     use crate::doc_actions::{apply, Action};
@@ -21437,6 +21437,58 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選んだまま、ほかのインスタンスに映らない：{}", sibling_bottom(&mut app));
     assert!(apply(&mut app, Action::Deselect));
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
+}
+
+/// 線を1本動かしたあと、元の所に同じ色・太さでインクボトルをかけ直しても付く（新しい線の番号は、塗りの番号と同じく、
+/// 書き戻しで新しく取る。前は形・線・側の番号から計算で振ったので、動かした線が持ち続ける元の所の番号と、かけ直した線の
+/// 番号が同じになり、重なりの確かめが書き込みを断った：レビュー de92ceb の N-1002）
+#[test]
+fn ink_bottle_again_where_a_line_was_moved_away() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 100.0), false, true);
+    assert!(app.scene().iter().any(|s| s.line.is_some() && app.session.selection.contains_shape(s)), "上の辺の線を選んだ");
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, -50.0) }));
+    assert!(apply(&mut app, Action::Deselect));
+    assert!(app.session.floating().is_none());
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }), "かけ直したインクボトルが断られた: {:?}", app.toast.as_ref().map(|t| &t.message));
+    let ids: Vec<u64> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| s.shape_id).collect();
+    let mut uniq = ids.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    assert_eq!(uniq.len(), ids.len(), "線の番号が重なった");
+}
+
+/// 線の番号だけが違う辺は、違う辺として比べる（辺の比べ方 `==` が `Hash` と同じく線の番号まで見る）。前は `==` が線の
+/// 番号を見ず `Hash` が見たので、差分を作る所（`diff_tiles` など）が、番号だけ入れ替わった辺（左右対称な線を反転した
+/// ときなど）を「変わっていない」と答えたり、集まりの引き方しだいで答えが食い違ったりして、同じ辺が2本できる・線の番号が
+/// 重なり、確定が「置けない」で断られた（番号の進み方しだいで、ときどき起きた：レビュー de92ceb の N-1003）
+#[test]
+fn edges_that_differ_only_in_line_id_are_different() {
+    use crate::doc_actions::{apply, Action};
+    use crate::planar_map::LINE_ID_BIT;
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let pts: Vec<Point> = (0..=20).map(|i| Point::new(100.0 + 10.0 * i as f64, 200.0)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: pts, stroke: ink }));
+    let cel = &app.doc.root.layers.iter().find_map(|l| l.keyframes.first().filter(|k| !k.cel.maps.is_empty())).expect("線のあるセル画").cel;
+    let stored = cel.maps[0].stored().clone();
+    // 線の番号だけを替えた地図（形・色・側の番号は同じ）
+    let renumbered = stored.relabeled(|id| if id & LINE_ID_BIT != 0 { id + 1 } else { id }, &mut Default::default());
+    let lines = |m: &crate::stored_map::StoredMap| (0..m.edge_count()).filter_map(|e| m.edge_at(e).line_id).collect::<Vec<_>>();
+    assert_ne!(lines(&stored), lines(&renumbered));
+    assert!(!stored.same_content(&renumbered), "番号だけ替えた地図を、同じ中身とみなした");
+    // 前の地図の塊を使い回してしまう形を作っても、新しい番号のまま（番号の違う塊を「同じ塊」として使い回さない）
+    let rebuilt = crate::stored_map::StoredMap::from_dense(&renumbered.to_dense(), Some(&stored));
+    assert_eq!(lines(&rebuilt), lines(&renumbered), "前の地図の塊を使い回して、線の番号が古いまま残った");
+    let (removed, added) = stored.diff_tiles(&renumbered);
+    assert_eq!(removed.len(), lines(&stored).len(), "番号だけ替えた辺を、変わっていないとみなした");
+    assert_eq!(added.iter().filter_map(|e| e.line_id).collect::<Vec<_>>(), lines(&renumbered));
 }
 
 /// コマを別のレイヤーへ写しても、線の番号は写した元と重ならない（番号を付け替える `StoredMap::relabeled` が、線の番号も新しく
