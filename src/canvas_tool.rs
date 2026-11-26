@@ -960,6 +960,40 @@ pub(crate) fn build_scene_order_by_layer_ids(
     let mut before_all: Vec<(usize, usize)> = Vec::new();
     let mut after_base: Vec<Vec<(usize, usize)>> = vec![Vec::new(); base.len()];
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
+    // 置き場の表：（引き方, レイヤー, 階層）ごとの土台の位置を、初めて引くときに土台を1回なめて控える（上乗せ1つごとに
+    // 土台をなめない。上乗せの置き場の（レイヤー, 階層）は、ふつう数個。前は上乗せ1つごとに土台の並び全体をなめたので、
+    // 動かし始め・浮いた片が変わるたびの1コマが、選んだ数 × コマの図形の数で重くなった：レビュー de92ceb の N-3002）
+    #[derive(Clone, Copy, PartialEq)]
+    enum Find {
+        FirstInScope,
+        LastRaw,
+        LastInScope,
+        LastOfLayer,
+    }
+    let mut slots: Vec<((Find, LayerId, Scope), Option<usize>)> = Vec::new();
+    let mut slot = |find: Find, lid: LayerId, scope: &[u64]| -> Option<usize> {
+        if let Some(&(_, pos)) = slots
+            .iter()
+            .find(|(k, _)| k.0 == find && k.1 == lid && k.2 == scope)
+        {
+            return pos;
+        }
+        let pos = match find {
+            Find::FirstInScope => base
+                .iter()
+                .position(|s| s.layer_id == lid && s.is_in_editing_scope(scope)),
+            Find::LastRaw => base
+                .iter()
+                .rposition(|s| s.layer_id == lid && s.is_raw_at_scope(scope)),
+            Find::LastInScope => base
+                .iter()
+                .rposition(|s| s.layer_id == lid && s.is_in_editing_scope(scope)),
+            Find::LastOfLayer => base.iter().rposition(|s| s.layer_id == lid),
+        };
+        slots.push(((find, lid, scope.to_vec()), pos));
+        pos
+    };
+    let mut index_of: Option<HashMap<ShapeId, usize>> = None;
 
     for (add_idx, (placement, shape)) in overlay.add.iter().enumerate() {
         // そのレイヤー・階層に土台の図形が無いとき（空のレイヤー）に、レイヤーの順番で入れる位置を決めるレイヤー
@@ -967,26 +1001,21 @@ pub(crate) fn build_scene_order_by_layer_ids(
             Placement::ReplaceAt(target_id) => {
                 // 元の図形は、この上乗せを作った土台にいつもある（`Placement::ReplaceAt`。レイヤーの順で入れる逃げ道は
                 // 置かない）
-                let pos = base
-                    .iter()
-                    .position(|s| s.shape_id == *target_id)
+                let pos = *index_of
+                    .get_or_insert_with(|| base.iter().enumerate().map(|(i, s)| (s.shape_id, i)).collect())
+                    .get(target_id)
                     .expect("ReplaceAt の相手は、上乗せを作った土台にある");
                 replace_at_base[pos].push(add_idx);
                 None
             }
             Placement::RawOf(lid, scope) => {
                 // 線は塗りより上：その階層の生の図形（面の図形のあとに線の図形）のいちばん上に置く
-                let line_pos = shape
-                    .line
-                    .and_then(|_| base.iter().rposition(|s| s.layer_id == *lid && s.is_raw_at_scope(scope)));
+                let line_pos = shape.line.and_then(|_| slot(Find::LastRaw, *lid, scope));
                 if let Some(pos) = line_pos {
                     after_base[pos].push((0, add_idx));
                     None
                 } else {
-                    match base
-                        .iter()
-                        .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
-                    {
+                    match slot(Find::FirstInScope, *lid, scope) {
                         Some(pos) => {
                             replace_at_base[pos].push(add_idx);
                             None
@@ -997,18 +1026,12 @@ pub(crate) fn build_scene_order_by_layer_ids(
             }
             Placement::AboveRaw(lid, scope) => {
                 // その階層の生の図形のいちばん上（生の図形が無ければ、その階層のいちばん下）
-                match base
-                    .iter()
-                    .rposition(|s| s.layer_id == *lid && s.is_raw_at_scope(scope))
-                {
+                match slot(Find::LastRaw, *lid, scope) {
                     Some(pos) => {
                         after_base[pos].push((0, add_idx));
                         None
                     }
-                    None => match base
-                        .iter()
-                        .position(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
-                    {
+                    None => match slot(Find::FirstInScope, *lid, scope) {
                         Some(pos) => {
                             replace_at_base[pos].push(add_idx);
                             None
@@ -1019,15 +1042,12 @@ pub(crate) fn build_scene_order_by_layer_ids(
             }
             Placement::TopOfLayer(lid, scope) => {
                 let scope_pos = (!scope.is_empty())
-                    .then(|| {
-                        base.iter()
-                            .rposition(|s| s.layer_id == *lid && s.is_in_editing_scope(scope))
-                    })
+                    .then(|| slot(Find::LastInScope, *lid, scope))
                     .flatten();
                 if let Some(pos) = scope_pos {
                     after_base[pos].push((1, add_idx));
                     None
-                } else if let Some(pos) = base.iter().rposition(|s| s.layer_id == *lid) {
+                } else if let Some(pos) = slot(Find::LastOfLayer, *lid, scope) {
                     after_base[pos].push((2, add_idx));
                     None
                 } else {
@@ -1407,6 +1427,26 @@ pub(crate) struct Session {
     pub(crate) planar_maps: SyncCache<Option<Arc<ScopeMaps>>>,
     /// この操作で編集を断った理由（`apply` が知らせて戻す）
     pub(crate) refusal: Option<Refusal>,
+    /// ドラッグを始めるときに作った、離したときの計算の答え（離したときに使い回す：`DropAhead`）
+    drop_ahead: Option<DropAhead>,
+}
+
+/// ドラッグを始めるときに、離したときと同じ計算で作った答え（ドラッグ中の見た目に使い、離したときに使い回す：設計
+/// claude/浮いた片と選択の決まりを1つにする設計_ddcd41e.md の 2.2）。使い回すのは、作ったときと今とで、浮いた片
+/// （同じ中身かは `Floating::matches_undo_snapshot`）・選択・階層・計算に使ったセル画の地図がみな同じときだけ（違えば
+/// 作り直す。同じ入力からは同じ答えなので、使い回しても作り直しても答えは同じ）
+struct DropAhead {
+    floating: Option<Floating>,
+    selection: Selection,
+    scope: Vec<u64>,
+    /// 計算に使ったセル画の地図（生かしておくので、番地が別の地図に使い回されない）
+    cels: Vec<Arc<LayerBase>>,
+    /// 選んだ生の図形を持ち上げた浮いた片（移動・拡大・回転：`Session::lifted_floating`）
+    lifted: Option<Result<Option<Floating>, ()>>,
+    /// 浮いた片の確定の計画（複製：`plan_commit`）
+    commit: Option<CommitPlan>,
+    /// 写す中身（複製：`clipboard_ops::selected_content`）
+    content: Option<crate::clipboard_ops::Content>,
 }
 
 impl Session {
@@ -1561,20 +1601,104 @@ impl Session {
         self.invalidate_scene_order();
     }
 
-    /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる
-    pub(crate) fn begin_move_overlay(&mut self, alt_duplicate: bool) {
-        self.begin_selection_overlay(alt_duplicate, false);
+    /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる。複製のときは、写す中身 `content` と、
+    /// 動かす生の絵 `copy`（離したときに置く写しの絵：`clipboard_ops::begin_move_selection_drag`）
+    pub(crate) fn begin_move_overlay(
+        &mut self,
+        alt_duplicate: bool,
+        content: Option<crate::clipboard_ops::Content>,
+        copy: Vec<FillShape>,
+    ) {
+        if alt_duplicate {
+            let mut layers: Vec<LayerId> = content
+                .iter()
+                .flat_map(|c| c.layers.iter().map(|l| l.0))
+                .collect();
+            layers.extend(self.floating.iter().flat_map(|fl| fl.layers().iter().map(|l| l.layer_id)));
+            let mut ahead = self.new_ahead(&layers);
+            ahead.content = content;
+            self.drop_ahead = Some(ahead);
+        }
+        self.begin_selection_overlay(alt_duplicate, false, copy);
+    }
+
+    /// 今の浮いた片・選択・階層と、レイヤー `layers` のセル画の地図で作る答えの入れ物（答えはまだ無い）
+    fn new_ahead(&self, layers: &[LayerId]) -> DropAhead {
+        let scope = self.editing_group_path.clone();
+        let mut cels: Vec<Arc<LayerBase>> = Vec::new();
+        let mut seen: Vec<LayerId> = Vec::new();
+        for &lid in layers {
+            if seen.contains(&lid) {
+                continue;
+            }
+            seen.push(lid);
+            if let Some(cel) = self.base_cache.cel(lid) {
+                cels.push(cel.scope_base(&scope));
+            }
+        }
+        DropAhead {
+            floating: self.floating.clone(),
+            selection: self.selection.clone(),
+            scope,
+            cels,
+            lifted: None,
+            commit: None,
+            content: None,
+        }
+    }
+
+    /// 答え `ahead` を、今（浮いた片 `floating`）使い回してよいか：作ったときと、浮いた片・選択・階層・セル画の地図がみな同じ
+    fn ahead_holds(&self, ahead: &DropAhead, floating: Option<&Floating>) -> bool {
+        let same_floating = match (&ahead.floating, floating) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.matches_undo_snapshot(b),
+            _ => false,
+        };
+        same_floating
+            && ahead.selection == self.selection
+            && ahead.scope == self.editing_group_path
+            && ahead.cels.iter().all(|b| {
+                self.base_cache
+                    .layer_order_ids()
+                    .iter()
+                    .filter_map(|&lid| self.base_cache.cel(lid))
+                    .any(|c| c.scope_base(&ahead.scope).stored.id() == b.stored.id())
+            })
+    }
+
+    /// ドラッグを始めるときに作った、浮いた片 `fl` の確定の計画（使い回してよいときだけ。取り出す）
+    pub(crate) fn take_ahead_commit(&mut self, fl: &Floating) -> Option<CommitPlan> {
+        let ahead = self.drop_ahead.as_ref()?;
+        if !self.ahead_holds(ahead, Some(fl)) {
+            return None;
+        }
+        self.drop_ahead.as_mut()?.commit.take()
+    }
+
+    /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
+    pub(crate) fn take_ahead_content(&mut self) -> Option<crate::clipboard_ops::Content> {
+        let ahead = self.drop_ahead.as_ref()?;
+        if !self.ahead_holds(ahead, self.floating.as_ref()) {
+            return None;
+        }
+        self.drop_ahead.as_mut()?.content.take()
+    }
+
+    /// 離したときの答えを捨てる（ドラッグを確定したあと）
+    pub(crate) fn drop_ahead_done(&mut self) {
+        self.drop_ahead = None;
     }
 
     /// 自由変形（拡大・回転）の仮表示用に、選択中図形を `Overlay` に載せ、変形元のクローン列を返す
     pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
-        self.begin_selection_overlay(false, true)
+        self.begin_selection_overlay(false, true, Vec::new())
     }
 
     fn begin_selection_overlay(
         &mut self,
         alt_duplicate: bool,
         for_transform: bool,
+        copy: Vec<FillShape>,
     ) -> Vec<FillShape> {
         self.overlay.clear();
         self.overlay_only_selected = alt_duplicate;
@@ -1583,136 +1707,98 @@ impl Session {
             self.rebuild_overlay_from_floating();
             return Vec::new();
         }
+        // ドラッグ中の見た目は、離したときと同じ計算から作る（設計 claude/浮いた片と選択の決まりを1つにする設計_ddcd41e.md の
+        // 2.2）：止まった絵は離したあとに残る絵、動かす生の絵は離したあとの浮いた片の片。計算した答えは、離したときに使い
+        // 回す（`DropAhead`）。前は、選んだ面・線・片・残りを場面ごとに拾って並べ直したので、離すと見た目が変わることがあった
+        // （設計審査 de92ceb の D-1 の (c)・レビュー de92ceb の N-3001）
         let scope = self.editing_group_path.clone();
-        // 線の端の形は隣の線で決まるので、動かす線と、その端につながる残る線は、持ち上げたときの形に作り直して出す
-        // （`LayerBase::detached_lines`。確定のときの浮いた片と残りの線と同じ形）。複製のときは元の線が残るので、残る線は
-        // そのまま
         let world = self.edit_path.world_xform();
-        let mut moving: HashMap<ShapeId, FillShape> = HashMap::new();
-        let mut staying: Vec<FillShape> = Vec::new();
-        for (layer_id, ids) in self.selected_raw_ids_by_layer(true) {
-            let base = match self.floating.as_ref().and_then(|fl| fl.origin_base(layer_id)) {
-                Some(b) => b,
-                None => match self.base_cache.cel(layer_id) {
-                    Some(cel) => cel.scope_base(&scope),
-                    None => continue,
-                },
-            };
-            let (m, s) = base.detached_lines(&ids, &scope);
-            let placed = |mut f: FillShape| {
-                f.layer_id = layer_id;
-                f.place(world);
-                f
-            };
-            moving.extend(m.into_iter().map(|f| (f.shape_id, placed(f))));
-            if !alt_duplicate {
-                staying.extend(s.into_iter().map(placed));
-            }
-        }
-        let restaged: HashSet<ShapeId> = staying.iter().map(|f| f.shape_id).collect();
-
-        // 浮いている残りのうち選んでいるもの（矩形で切った後、残りの線を選び足したとき）は、確定と同じく持ち上げて動かす
-        // （`lift_selected_raw_shapes_to_floating`）ので、止まった絵には出さず、下で動かす（複製のときは元が残る）
-        let selected_remainder: HashSet<ShapeId> = self
-            .floating
-            .iter()
-            .flat_map(|fl| fl.remainder())
-            .map(|r| r.shape_id)
-            .filter(|id| self.selection.shapes.contains(id))
-            .collect();
-        // 複製のとき、動かしていない矩形の切り口（`modified` でない浮いた片）は、確定で捨てて元に戻してから写しを置く
-        // （`duplicate_selected_in_working_copy` の `commit_floating`）ので、止まった絵はセル画のまま（切った片と残りを
-        // 出さない。出すと、浮いた片は生の図形のいちばん上に描くので、片の塗りが、切り口のすぐ近くを通る残りの線の半分を
-        // 覆って見えた）
-        let stationary_floating = self
-            .floating
-            .as_ref()
-            .filter(|fl| !alt_duplicate || fl.modified);
-        if let Some(fl) = stationary_floating {
-            self.overlay.hide = fl.hidden().clone();
-            self.overlay.add.extend(
-                fl.placed_remainder()
-                    .iter()
-                    .filter(|r| {
-                        !restaged.contains(&r.1.shape_id)
-                            && (alt_duplicate || !selected_remainder.contains(&r.1.shape_id))
-                    })
-                    .cloned(),
-            );
-            if alt_duplicate {
-                for piece in fl.pieces() {
-                    self.overlay.add.push((
-                        Placement::AboveRaw(piece.layer_id, scope.clone()),
-                        piece.clone(),
-                    ));
+        let moving_raw: Vec<FillShape> = if alt_duplicate {
+            // 複製は、離すとき、今の浮いた片を確定してから写しを置く（`duplicate_selected_in_working_copy`）ので、止まった絵は
+            // 確定した絵（確定の計算 `FloatLayer::commit_edit`。動かしていない切り口は確定で捨てて元に戻るので、セル画のまま）、
+            // 動かす生の絵は、離したときに置く写しの絵（`copy`：`clipboard_ops::begin_move_selection_drag`）
+            let mut plan = Some(crate::canvas_tool::CommitPlan::new());
+            if let Some(fl) = self.floating.as_ref().filter(|fl| fl.modified) {
+                let outcomes = fl.commit_edits(self.stage());
+                for (l, outcome) in fl.layers().iter().zip(outcomes) {
+                    match outcome {
+                        Some((crate::planar_map::LocalEdit::Changed(w), base)) => {
+                            // 確定で変わる所だけを隠して出す（浮いた片の残りと同じ見た目の変わり方：
+                            // `LayerBase::written_view`。手間は変わる所の分）
+                            let (committed, hidden, shown) = base.written_view(w.clone(), &scope);
+                            self.overlay.hide.extend(hidden);
+                            let shown: HashSet<ShapeId> = shown.into_iter().collect();
+                            let at = Placement::RawOf(l.layer_id, scope.clone());
+                            for f in committed.drawn_shapes(&scope) {
+                                if !shown.contains(&f.shape_id) {
+                                    continue;
+                                }
+                                let mut f = (*f).clone();
+                                f.layer_id = l.layer_id;
+                                f.place(world);
+                                self.overlay.add.push((at.clone(), f));
+                            }
+                            if let Some(p) = &mut plan {
+                                p.push((l.layer_id, w, base));
+                            }
+                        }
+                        Some((crate::planar_map::LocalEdit::Same, _)) => {}
+                        _ => plan = None,
+                    }
                 }
             }
-        }
-        for f in staying {
-            self.overlay.hide.insert(f.shape_id);
-            self.overlay
-                .add
-                .push((Placement::RawOf(f.layer_id, scope.clone()), f));
-        }
+            if let Some(ahead) = &mut self.drop_ahead {
+                ahead.commit = plan;
+            }
+            copy
+        } else {
+            match self.lift_ahead() {
+                Ok(Some(mut fl)) => {
+                    fl.refresh(world, &scope, self.base_cache.layer_order_ids());
+                    self.overlay.hide = fl.hidden().clone();
+                    self.overlay.add.extend(fl.placed_remainder().iter().cloned());
+                    fl.pieces().to_vec()
+                }
+                Ok(None) => Vec::new(),
+                // 持ち上げられなければ、離したときに断るので、何も動かさない
+                Err(()) => {
+                    self.rebuild_overlay_from_floating();
+                    return Vec::new();
+                }
+            }
+        };
         self.overlay_movable_start = self.overlay.add.len();
-
         let mut orig_shapes = Vec::new();
-        for shape in self.base_cache.shapes() {
-            if self
-                .floating
-                .as_ref()
-                .is_some_and(|fl| fl.hidden().contains(&shape.shape_id))
-            {
-                continue;
-            }
-            if self.selection.contains_shape(shape) {
-                let cloned = moving.remove(&shape.shape_id).unwrap_or_else(|| shape.clone());
-                if for_transform {
-                    let _ = cloned.fill_mesh();
-                }
-                if !alt_duplicate {
-                    self.overlay.hide.insert(shape.shape_id);
-                }
-                let placement = if shape.is_raw_at_scope(&scope) {
-                    Placement::AboveRaw(shape.layer_id, scope.clone())
-                } else if alt_duplicate {
-                    Placement::TopOfLayer(shape.layer_id, scope.clone())
+        let moving = moving_raw
+            .into_iter()
+            .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone()), f));
+        // 選んだグループ・インスタンスの図形（生の図形でないもの）は、その図形を動かす（離したあとは、グループの地図・
+        // インスタンスの置き方の変換を動かす。複製は、写しを今の階層のいちばん上に置く）
+        let nested: Vec<(Placement, FillShape)> = self
+            .base_cache
+            .shapes()
+            .iter()
+            .filter(|s| !s.is_raw_at_scope(&scope) && self.selection.contains_shape(s))
+            .map(|s| {
+                let at = if alt_duplicate {
+                    Placement::TopOfLayer(s.layer_id, scope.clone())
                 } else {
-                    Placement::ReplaceAt(shape.shape_id)
+                    Placement::ReplaceAt(s.shape_id)
                 };
-                if for_transform {
-                    orig_shapes.push(cloned.clone());
-                }
-                self.overlay.add.push((placement, cloned));
-            }
-        }
-        if let Some(fl) = &self.floating {
-            for r in fl.remainder() {
-                if selected_remainder.contains(&r.shape_id) {
-                    let cloned = moving.remove(&r.shape_id).unwrap_or_else(|| r.clone());
-                    if for_transform {
-                        let _ = cloned.fill_mesh();
-                        orig_shapes.push(cloned.clone());
-                    }
-                    self.overlay
-                        .add
-                        .push((Placement::AboveRaw(r.layer_id, scope.clone()), cloned));
+                (at, s.clone())
+            })
+            .collect();
+        for (at, f) in moving.chain(nested) {
+            if !alt_duplicate {
+                if let Placement::ReplaceAt(id) = at {
+                    self.overlay.hide.insert(id);
                 }
             }
-            for piece in fl.pieces() {
-                if self.selection.contains_shape(piece) {
-                    if for_transform {
-                        let _ = piece.fill_mesh();
-                    }
-                    let cloned = piece.clone();
-                    if for_transform {
-                        orig_shapes.push(cloned.clone());
-                    }
-                    self.overlay
-                        .add
-                        .push((Placement::AboveRaw(piece.layer_id, scope.clone()), cloned));
-                }
+            if for_transform {
+                let _ = f.fill_mesh();
+                orig_shapes.push(f.clone());
             }
+            self.overlay.add.push((at, f));
         }
         self.invalidate_scene_order();
         orig_shapes
@@ -1758,20 +1844,51 @@ impl Session {
     /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（操作を断る呼ぶ側が
     /// `refusal` に記す）
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
+        // ドラッグを始めるときに同じ計算をしてあれば、それを使い回す（`DropAhead`）
+        let holds = self
+            .drop_ahead
+            .as_ref()
+            .is_some_and(|a| self.ahead_holds(a, self.floating.as_ref()));
+        let ahead = holds
+            .then(|| self.drop_ahead.as_mut().and_then(|a| a.lifted.take()))
+            .flatten();
+        match ahead.unwrap_or_else(|| self.lifted_floating()) {
+            Ok(None) => true,
+            Ok(Some(fl)) => {
+                self.floating = Some(fl);
+                self.sync_floating();
+                true
+            }
+            Err(()) => false,
+        }
+    }
+
+    /// 選んでいる生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げた浮いた片（文書と今の浮いた片は
+    /// 変えない。持ち上げの計算はこれ1つ：確定する前の `lift_selected_raw_shapes_to_floating` と、ドラッグ中の見た目
+    /// `lift_ahead`）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。`Ok(None)`：持ち上げるものも
+    /// 浮いた片も無い。`Err`：切れないレイヤー（地図にできない）がある
+    fn lifted_floating(&self) -> Result<Option<Floating>, ()> {
         let by_layer = self.selected_raw_ids_by_layer(true);
         if by_layer.is_empty() && self.floating.is_none() {
-            return true;
+            return Ok(None);
         }
-        let before = self.floating.clone();
-        let mut failed = false;
-        self.with_floating(|fl, stage| {
-            failed = !fl.cut(stage, &by_layer, None).is_empty();
-            fl.modified = true;
-        });
-        if failed {
-            self.set_floating(before);
+        let mut fl = self.floating.clone().unwrap_or_else(|| Floating::new(false));
+        if !fl.cut(self.stage(), &by_layer, None).is_empty() {
+            return Err(());
         }
-        !failed
+        fl.modified = true;
+        Ok(Some(fl))
+    }
+
+    /// ドラッグを始めるときに、離したときと同じ持ち上げをして（`lifted_floating`）、答えを離したときのためにしまう
+    fn lift_ahead(&mut self) -> Result<Option<Floating>, ()> {
+        let lifted = self.lifted_floating();
+        let mut layers: Vec<LayerId> = self.selected_raw_ids_by_layer(true).into_iter().map(|l| l.0).collect();
+        layers.extend(self.floating.iter().flat_map(|fl| fl.layers().iter().map(|l| l.layer_id)));
+        let mut ahead = self.new_ahead(&layers);
+        ahead.lifted = Some(lifted.clone());
+        self.drop_ahead = Some(ahead);
+        lifted
     }
 
     /// 選んでいるものに変換をかけて置けるかを決めるもの（`TransformFit`）：浮いた片と、まだ持ち上げていない選んだ生の

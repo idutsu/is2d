@@ -12558,7 +12558,7 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         // 下側のシンボル (BottomSym) を TopSym とさらに重なる位置へ移動
         app.session.selection.clear();
         app.session.selection.insert_shape(&bottom_sym);
-        app.session.begin_move_overlay(false);
+        app.session.begin_move_overlay(false, None, Vec::new());
         app.session.translate_move_overlay(KVec2::new(10.0, 10.0));
         assert_eq!(
             app.scene()
@@ -25176,6 +25176,132 @@ fn dragging_after_mixed_selections_matches_the_drop() {
         }
     }
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
+}
+
+/// ドラッグ中の最後の見た目と、離したあとの見た目が同じ（お手本の比べ：設計 claude/浮いた片と選択の決まりを1つにする設計_ddcd41e.md
+/// の 2.2）。ブラシ・鉛筆・インクボトル・グループ・2枚目のレイヤーを混ぜた絵で、矩形・クリック・ダブルクリック（Shift も）
+/// で選び、半分の回は先に選んだものを動かしてから（動かした浮いた片がある所で）選び足し、移動・Alt の複製・拡大・回転の
+/// ドラッグをする（設計審査 de92ceb の D-1 の (c)・レビュー de92ceb の N-3001）
+#[test]
+fn drag_previews_match_the_drop() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::from_rgb(20, 40, 90), width: 6 };
+    let line = |a: Point, b: Point| -> Vec<Point> { (0..=30).map(|i| a.lerp(b, i as f64 / 30.0)).collect() };
+    let colors_on_grid = |app: &Is2dApp| -> Vec<Option<Color32>> {
+        let shapes: Vec<FillShape> = app.scene().iter().cloned().collect();
+        let mut out = Vec::new();
+        let mut y = 60.0;
+        while y < 760.0 {
+            let mut x = 40.0;
+            while x < 900.0 {
+                let p = Point::new(x + 0.137, y + 0.173);
+                out.push(shapes.iter().rev().find(|s| s.contains_point(p)).map(|s| s.color));
+                x += 4.0;
+            }
+            y += 4.0;
+        }
+        out
+    };
+    let mut rng = fastrand::Rng::with_seed(0xd1_0e_51);
+    let mut bad: Vec<String> = Vec::new();
+    let cases: usize = std::env::var("IS2D_DRAG_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    for case in 0..cases {
+        let mut app = Is2dApp::default();
+        let colors = [Color32::from_rgb(230, 80, 60), Color32::from_rgb(70, 160, 90), Color32::from_rgb(240, 200, 60)];
+        for _ in 0..(2 + rng.usize(0..3)) {
+            let a = Point::new(150.0 + rng.f64() * 450.0, 150.0 + rng.f64() * 350.0);
+            let b = a + KVec2::new(rng.f64() * 200.0 - 100.0, rng.f64() * 200.0 - 100.0);
+            apply(&mut app, Action::PaintStroke { points: line(a, b), radius: 20.0 + rng.f32() * 30.0, color: colors[rng.usize(0..3)] });
+        }
+        apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+        for _ in 0..rng.usize(0..3) {
+            let a = Point::new(120.0 + rng.f64() * 500.0, 120.0 + rng.f64() * 400.0);
+            let b = a + KVec2::new(rng.f64() * 300.0 - 150.0, rng.f64() * 300.0 - 150.0);
+            apply(&mut app, Action::PencilStroke { points: line(a, b), stroke: ink });
+        }
+        if rng.bool() {
+            apply(&mut app, Action::InkBottle { pt: Point::new(150.0 + rng.f64() * 450.0, 150.0 + rng.f64() * 350.0), stroke: ink });
+        }
+        apply(&mut app, Action::SetTool { tool: Tool::Select });
+        if rng.bool() {
+            let p0 = Point::new(100.0 + rng.f64() * 300.0, 100.0 + rng.f64() * 300.0);
+            apply(&mut app, Action::SelectMarquee { p0, p1: p0 + KVec2::new(150.0, 150.0), additive: false });
+            apply(&mut app, Action::Group);
+            apply(&mut app, Action::Deselect);
+        }
+        if rng.bool() {
+            apply(&mut app, Action::AddLayer);
+            apply(&mut app, Action::PaintStroke { points: line(Point::new(300.0, 300.0), Point::new(520.0, 380.0)), radius: 25.0, color: colors[rng.usize(0..3)] });
+        }
+        let on_art = |rng: &mut fastrand::Rng| Point::new(120.0 + rng.f64() * 520.0, 120.0 + rng.f64() * 420.0);
+        let mut ops: Vec<String> = Vec::new();
+        let select = |app: &mut Is2dApp, rng: &mut fastrand::Rng, ops: &mut Vec<String>, first: bool| {
+            for k in 0..(1 + rng.usize(0..4)) {
+                let shift = (k > 0 || !first) && rng.bool();
+                match rng.usize(0..3) {
+                    0 => {
+                        let p0 = on_art(rng);
+                        let p1 = p0 + KVec2::new(30.0 + rng.f64() * 250.0, 30.0 + rng.f64() * 250.0);
+                        ops.push(format!("矩形{}", if shift { "+" } else { "" }));
+                        apply(app, Action::SelectMarquee { p0, p1, additive: shift });
+                    }
+                    1 => {
+                        ops.push(format!("クリック{}", if shift { "+" } else { "" }));
+                        crate::select_ops::apply_click_selection(app, on_art(rng), shift, true);
+                    }
+                    _ => {
+                        ops.push(format!("ダブル{}", if shift { "+" } else { "" }));
+                        tool_select::handle_canvas_double_click(app, on_art(rng), shift);
+                    }
+                }
+            }
+        };
+        select(&mut app, &mut rng, &mut ops, true);
+        if rng.bool() && !app.session.selection.is_empty() {
+            ops.push("移動".into());
+            apply(&mut app, Action::MoveSelected { delta: KVec2::new(rng.f64() * 120.0 - 60.0, rng.f64() * 120.0 - 60.0) });
+            select(&mut app, &mut rng, &mut ops, false);
+        }
+        if app.session.selection.is_empty() {
+            continue;
+        }
+        let kind = rng.usize(0..4);
+        let during;
+        match kind {
+            0 | 1 => {
+                let from = Point::new(300.0, 300.0);
+                let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, kind == 1);
+                app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+                crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(23.0, 117.0));
+                during = colors_on_grid(&app);
+                crate::select_ops::finish_selection_drag(&mut app, None);
+            }
+            _ => {
+                let zoom = app.tab().view.zoom();
+                let Some((bbox, pivot)) = app.session.selection_bbox_and_pivot(zoom) else {
+                    continue;
+                };
+                let (start, end) = if kind == 2 {
+                    let start = Point::new(bbox.x1, bbox.center().y);
+                    (start, start + KVec2::new(60.0, 0.0))
+                } else {
+                    let start = Point::new(bbox.x1 + 15.0 / zoom as f64, bbox.y0 - 15.0 / zoom as f64);
+                    (start, kurbo::Affine::rotate_about(0.5, pivot) * start)
+                };
+                tool_transform::start_transform_drag(&mut app, start, false, false);
+                tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
+                during = colors_on_grid(&app);
+                tool_transform::finish_transform_drag(&mut app, Some(end));
+            }
+        }
+        let after = colors_on_grid(&app);
+        let diff = during.iter().zip(&after).filter(|(a, b)| a != b).count();
+        if diff > 0 {
+            let name = ["移動", "Alt", "拡大", "回転"][kind];
+            bad.push(format!("{case}（{}・{name}）：{diff} 点", ops.join("・")));
+        }
+    }
+    assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う（{} 回）：{bad:?}", bad.len());
 }
 
 /// 円の上のフチを下のフチの向こうまで引っぱると、離す前から2つに分かれて見える
@@ -41201,7 +41327,7 @@ mod strokes {
         let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
         assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
         assert!(app.session.lift_selected_raw_shapes_to_floating());
-        app.session.begin_move_overlay(false);
+        app.session.begin_move_overlay(false, None, Vec::new());
         let remade = app.session.floating().unwrap().remainder().filter(|s| s.line.is_some()).count();
         assert!(remade > 0, "角の輪郭の線を作り直す");
         assert!(lines_above_fills(&app));
@@ -41270,7 +41396,7 @@ mod strokes {
                 let orig = app.session.begin_transform_overlay();
                 app.session.update_transform_overlay(&orig, Affine::translate((0.0, 50.0)));
             } else {
-                app.session.begin_move_overlay(false);
+                app.session.begin_move_overlay(false, None, Vec::new());
                 app.session.translate_move_overlay(KVec2::new(0.0, 50.0));
             }
             let place = if transform { "変形のドラッグ" } else { "移動のドラッグ" };

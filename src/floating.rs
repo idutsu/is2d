@@ -217,12 +217,7 @@ impl Origin {
     /// （`LayerBase::line_changes`）。升目の索引は、セル画の写しから変わった所だけ
     /// 作る。答えが変わらない（セル画の地図のまま）ときは、使う側が残りを持たない
     fn of_local(w: LocalWrite, cel: &LayerBase, scope: &[u64]) -> Self {
-        let base = LayerBase::of_local(w.stored, scope, w.faces, cel);
-        let (gone, made) = cel.line_changes(&base, scope);
-        let mut hidden = w.removed;
-        hidden.extend(gone);
-        let mut remainder = w.added;
-        remainder.extend(made.iter().map(|s| s.shape_id));
+        let (base, hidden, remainder) = cel.written_view(w, scope);
         Self {
             rest: base.stored.clone(),
             held: Some(base),
@@ -297,6 +292,17 @@ impl FloatLayer {
             .restricted(ids);
         let groups = restricted_groups(&self.groups, ids, stage.scope);
         stacked(start, groups.iter().map(PieceGroup::placed))?.checked()
+    }
+
+    /// 確定でセル画の地図 `cel`（階層 `scope`）に書くもの（1本の道の答え：`LayerBase::replace_local`）。確定の計算はこれ1つ
+    /// （確定の計画 `plan_commit` と、複製のドラッグ中の止まった絵）。`None`：持ち上げた絵と違うセル画（`still_on`）か、
+    /// 格子に置けない座標がある
+    pub(crate) fn commit_edit(&self, cel: &Arc<LayerBase>, scope: &[u64]) -> Option<LocalEdit> {
+        if !self.still_on(cel) {
+            return None;
+        }
+        let next = self.committed_local(cel)?;
+        Some(cel.replace_local(&next, scope))
     }
 
     /// 確定した地図のしまう形：中身の地図に、片の組を下から順に重ねる（組ごとに変換をかけて、その座標の格子で正しい地図に
@@ -438,14 +444,16 @@ impl Floating {
         self.hidden = HashSet::new();
     }
 
-    /// レイヤー `layer_id` の、持ち上げた残りの地図の計算に使う写し（そのレイヤーから持ち上げていなければ `None`）
-    pub(crate) fn origin_base(&self, layer_id: LayerId) -> Option<Arc<LayerBase>> {
-        self.layers
-            .iter()
-            .find(|l| l.layer_id == layer_id)?
-            .origin
-            .as_ref()
-            .map(Origin::base)
+    /// 確定でレイヤーごとに書くもの（`FloatLayer::commit_edit` と、それを作ったセル画の地図の写し。レイヤーをまたがないので、
+    /// 同時に計算する：待ち時間はいちばん重いレイヤー1つ分）。確定の計算はこれ1つ（確定の計画 `plan_commit` と、複製の
+    /// ドラッグ中の確定した絵）。`None` のレイヤー：画面に出していないか、確定できない
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn commit_edits(&self, stage: Stage<'_>) -> Vec<Option<(LocalEdit, Arc<LayerBase>)>> {
+        parallel_map(&self.layers, |l| {
+            let base = stage.cel(l.layer_id)?;
+            let r = l.commit_edit(&base, stage.scope)?;
+            Some((r, base))
+        })
     }
 
     /// 直前の履歴スナップショットと同じ中身か（地図は同じ `Arc`、変換は同じ値）

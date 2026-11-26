@@ -699,7 +699,11 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::FinishMoveSelectionDrag {
             total_delta,
             alt_duplicate,
-        } => apply_finish_move_selection_drag(tab, total_delta, alt_duplicate),
+        } => {
+            let done = apply_finish_move_selection_drag(tab, total_delta, alt_duplicate);
+            tab.session.drop_ahead_done();
+            done
+        }
         Action::DeleteSelection => prepare_delete_selected_shapes(tab, |tab| push_undo(tab, None)),
         Action::ClearActiveFrame => {
             prepare_clear_active_frame_shapes(tab, |tab| push_undo(tab, None))
@@ -795,7 +799,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         } => {
             tab.session.clear_overlay();
             tab.session.transform_pivot = had_custom_pivot.then_some(orig_pivot);
-            if changed && !tab.session.selection.is_empty() {
+            let done = if changed && !tab.session.selection.is_empty() {
                 let applied = apply_affine_to_selected_inner(tab, affine);
                 if applied && had_custom_pivot && tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * orig_pivot);
@@ -803,7 +807,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                 applied
             } else {
                 false
-            }
+            };
+            tab.session.drop_ahead_done();
+            done
         }
         Action::CommitPivotDrag {
             new_pivot,
@@ -1353,7 +1359,8 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
 /// `Alt` 複製：選んでいるものの中身（`selected_content`）を、ステージで `offset` ずらした所に置く（面・グループ・
 /// インスタンスには新しい番号）。置いたものを選ぶ。置けなければ（格子の外）文書を変えずに `false`
 fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
-    let Some(content) = selected_content(tab) else {
+    // ドラッグを始めるときに同じ中身を作ってあれば、それを使い回す（`Session::take_ahead_content`）
+    let Some(content) = tab.session.take_ahead_content().or_else(|| selected_content(tab)) else {
         return false;
     };
     let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);

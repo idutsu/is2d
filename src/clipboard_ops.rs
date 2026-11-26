@@ -222,8 +222,39 @@ pub(crate) fn begin_move_selection_drag(
     pt: Point,
     alt_held: bool,
 ) -> MoveSelectionDrag {
-    tab.session.begin_move_overlay(alt_held);
+    // 複製のときは、離したときと同じ写す中身（`duplicate_selected_in_working_copy` の `selected_content`）を作り、
+    // 動かす生の絵はその生の図形の地図の絵（地図の決まりで、線は塗りの上）。中身は離したときに使い回す
+    let (content, copy) = if alt_held {
+        let content = selected_content(tab);
+        let copy = content
+            .as_ref()
+            .map(|c| copied_raw_shapes(c, &tab.session.editing_group_path))
+            .unwrap_or_default();
+        (content, copy)
+    } else {
+        (None, Vec::new())
+    };
+    tab.session.begin_move_overlay(alt_held, content, copy);
     MoveSelectionDrag::new(pt, alt_held)
+}
+
+/// 写す中身 `content` の、生の図形の地図の絵（ステージの写し。レイヤーごとに、面の図形のあとに線の図形：
+/// `LayerBase::drawn_shapes`）。複製のドラッグ中に動かす絵（離したときに置く浮いた片と同じ絵）
+fn copied_raw_shapes(content: &Content, scope: &[u64]) -> Vec<crate::vector_engine::FillShape> {
+    let mut out = Vec::new();
+    for (layer_id, cel) in &content.layers {
+        let (Some(raw), _) = cel.split_raw() else {
+            continue;
+        };
+        let base = crate::planar_map::LayerBase::of_stored(&raw.into_stored(None));
+        for f in base.drawn_shapes(scope) {
+            let mut f = (*f).clone();
+            f.layer_id = *layer_id;
+            f.place(content.world);
+            out.push(f);
+        }
+    }
+    out
 }
 
 fn collect_symbol_and_descendants(

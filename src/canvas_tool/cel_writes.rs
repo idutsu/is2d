@@ -306,7 +306,7 @@ pub(crate) type CommitPlan = Vec<(
 )>;
 
 /// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
-/// を下から順に重ねた地図（`FloatLayer::committed_local`）を、今の階層の地図にするとき何を書くか（1本の道の答え：`LayerBase::replace_local`）。重ねる
+/// を下から順に重ねた地図を、今の階層の地図にするとき何を書くか（確定の計算の1つ `FloatLayer::commit_edit`：1本の道の答え `LayerBase::replace_local`）。重ねる
 /// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
 /// 全部か無しか：1つでも書けない（編集できないレイヤー・持ち上げた絵と違うセル画（`FloatLayer::still_on`）を含む）なら
 /// `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
@@ -321,24 +321,18 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
         tab.scene_base_is_fresh(),
         "浮いた片を確定するとき、画面の土台が古い"
     );
-    let scope = tab.session.editing_group_path.clone();
     let editable = editable_layer_ids(tab);
+    // 複製のドラッグを始めるときに同じ計算をしてあれば、それを使い回す（`Session::take_ahead_commit`。同じ浮いた片・
+    // 選択・階層・セル画の地図のときだけ）
+    if fl.layers().iter().all(|l| editable.contains(&l.layer_id)) {
+        if let Some(plan) = tab.session.take_ahead_commit(fl) {
+            return Some(plan);
+        }
+    }
     // 1本の道（設計 段2b の 11. の F2）：片を窓で重ねたしまう形（`committed_local`）とセル画のしまう形の違いを差分にして、
-    // 差分から先（`apply_diff`）に渡す
-    let outcomes: Vec<Option<(LocalEdit, Arc<crate::planar_map::LayerBase>)>> = {
-        let cache = &tab.session.base_cache;
-        crate::planar_map::parallel_map(fl.layers(), |l| {
-            let cel = cache.cel(l.layer_id)?;
-            let base = cel.scope_base(&scope);
-            // 持ち上げた絵（出どころ）でないセル画には書かない（`FloatLayer::still_on`：設計審査 de92ceb の D-3）
-            if !l.still_on(&base) {
-                return None;
-            }
-            let next = l.committed_local(&base)?;
-            let r = base.replace_local(&next, &scope);
-            Some((r, base))
-        })
-    };
+    // 差分から先（`apply_diff`）に渡す（`Floating::commit_edits`。持ち上げた絵（出どころ）でないセル画には書かない：
+    // `FloatLayer::still_on`、設計審査 de92ceb の D-3）
+    let outcomes = fl.commit_edits(tab.session.stage());
     let mut plan = CommitPlan::new();
     for (l, outcome) in fl.layers().iter().zip(outcomes) {
         match outcome {
