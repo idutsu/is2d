@@ -522,3 +522,67 @@ impl<'a, T> IntoIterator for &'a ChunkedList<T> {
         }
     }
 }
+
+/// 足していくだけの、長さの前もって分からない列（保存・読み込みで、作品の大きさに比例する数の塊を並べる：`WriteTiles`・
+/// `ReadTiles`）。1つの並びを押し足しで伸ばすと、伸ばすたびに取り直す（realloc）ので、Mac では捨てたあとも、その広さが
+/// アプリのメモリとして残る（保存や開閉のたびに増えたまま戻らない：レビュー de92ceb の N-5001。測った：130 万個の並びを
+/// 押し足しで作って捨てると1回ごと +10MB 残り、大きさを決めて1回で取った並びでは残らない）。そこで、k 番目の塊を
+/// ちょうど 2^k 個の大きさで1回だけ取り、取り直さない（塊の数は長さの対数だけ。要素は写さない）
+pub(crate) struct GrowingList<T> {
+    segs: Vec<Vec<T>>,
+    len: usize,
+}
+
+impl<T> Default for GrowingList<T> {
+    fn default() -> Self {
+        Self {
+            segs: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: Clone> Clone for GrowingList<T> {
+    fn clone(&self) -> Self {
+        Self {
+            segs: self.segs.clone(),
+            len: self.len,
+        }
+    }
+}
+
+impl<T> GrowingList<T> {
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn push(&mut self, item: T) {
+        let k = self.segs.len();
+        if self.segs.last().is_none_or(|s| s.len() == 1 << (k - 1)) {
+            self.segs.push(Vec::with_capacity(1 << k));
+        }
+        self.segs.last_mut().expect("塊を足した").push(item);
+        self.len += 1;
+    }
+
+    /// 番号 `i` の要素の、塊と塊の中の番号（k 番目の塊は、番号 2^k − 1 から 2^k 個）
+    fn at(i: usize) -> (usize, usize) {
+        let k = (i + 1).ilog2() as usize;
+        (k, i + 1 - (1 << k))
+    }
+
+    pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        let (k, j) = Self::at(i);
+        self.segs.get_mut(k)?.get_mut(j)
+    }
+
+    /// 前から順に（数は `len`）
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.segs.iter().flatten()
+    }
+
+    /// 前から順に、要素を取り出して
+    pub(crate) fn into_iter(self) -> impl Iterator<Item = T> {
+        self.segs.into_iter().flatten()
+    }
+}

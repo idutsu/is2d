@@ -1050,15 +1050,17 @@ pub(crate) struct SavedEdge {
 pub(crate) struct WriteTiles {
     /// 塊の番地から、塊の番号
     index: IntMap<usize, u32>,
-    /// 番号の順の塊
-    tiles: Vec<Tile>,
+    /// 番号の順の塊（押し足しで取り直さない列：`GrowingList`）
+    tiles: crate::chunked_list::GrowingList<Tile>,
     /// 色から、色の番号（1 から。初めて出てきた順）と、番号の順の色
     color_no: std::collections::HashMap<[u8; 4], u32>,
     colors: Vec<[u8; 4]>,
     /// 図形の番号から、書く印（1 からの通し番号。初めて出てきた順）
     labels: IntMap<ShapeId, u64>,
-    /// 線の並び（塊の順、塊の中は辺の順。塊を表に足すときに、色を数えるのと同じなめ方で拾う）
-    strokes: Vec<SavedStroke>,
+    /// 線の並びの長さ（線を乗せた辺の数。塊を表に足すときに数える）。線の並びは持たず、書くときに塊の順になめて、その場で
+    /// 作って流す（`Strokes`。前は並びを押し足しで育てて持ったので、線の多い作品では保存のたびに、Mac でアプリのメモリが
+    /// 約 140MB ずつ増えたまま戻らなかった：レビュー de92ceb の N-5001）
+    stroke_count: usize,
 }
 
 impl WriteTiles {
@@ -1073,7 +1075,7 @@ impl WriteTiles {
                     return i;
                 }
                 let i = self.tiles.len() as u32;
-                for (ei, e) in t.iter().enumerate() {
+                for e in t.iter() {
                     let stroke = e.stroke.map(|s| s.color);
                     for c in [e.left, e.right, stroke].into_iter().flatten() {
                         let next = self.colors.len() as u32 + 1;
@@ -1085,16 +1087,10 @@ impl WriteTiles {
                         let next = self.labels.len() as u64 + 1;
                         self.labels.entry(id.get()).or_insert(next);
                     }
-                    if let (Some(st), Some(line_id)) = (e.stroke, e.line_id) {
+                    if let (Some(_), Some(line_id)) = (e.stroke, e.line_id) {
                         let next = self.labels.len() as u64 + 1;
-                        let id = *self.labels.entry(line_id.get()).or_insert(next);
-                        self.strokes.push(SavedStroke {
-                            tile: i,
-                            edge: ei as u32,
-                            color: self.color_no[&st.color.to_array()],
-                            width: st.width,
-                            id,
-                        });
+                        self.labels.entry(line_id.get()).or_insert(next);
+                        self.stroke_count += 1;
                     }
                 }
                 self.tiles.push(t.clone());
@@ -1141,13 +1137,42 @@ impl Serialize for WriteTiles {
         struct Tiles<'a>(&'a WriteTiles);
         impl Serialize for Tiles<'_> {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                s.collect_seq(self.0.tiles.iter().map(|t| self.0.saved_tile(t)))
+                use serde::ser::SerializeSeq;
+                let mut seq = s.serialize_seq(Some(self.0.tiles.len()))?;
+                for t in self.0.tiles.iter() {
+                    seq.serialize_element(&self.0.saved_tile(t))?;
+                }
+                seq.end()
+            }
+        }
+        // 線の並び：塊の順、塊の中は辺の順に、線を乗せた辺の線をその場で作って書く（並びは持たない。長さは `tiles_of` で
+        // 数えた `stroke_count`）
+        struct Strokes<'a>(&'a WriteTiles);
+        impl Serialize for Strokes<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let w = self.0;
+                let mut seq = s.serialize_seq(Some(w.stroke_count))?;
+                for (ti, t) in w.tiles.iter().enumerate() {
+                    for (ei, e) in t.iter().enumerate() {
+                        if let (Some(st), Some(line_id)) = (e.stroke, e.line_id) {
+                            seq.serialize_element(&SavedStroke {
+                                tile: ti as u32,
+                                edge: ei as u32,
+                                color: w.color_no[&st.color.to_array()],
+                                width: st.width,
+                                id: w.labels[&line_id.get()],
+                            })?;
+                        }
+                    }
+                }
+                seq.end()
             }
         }
         let mut st = s.serialize_struct("SavedTiles", 3)?;
         st.serialize_field("colors", &self.colors)?;
         st.serialize_field("tiles", &Tiles(self))?;
-        st.serialize_field("strokes", &self.strokes)?;
+        st.serialize_field("strokes", &Strokes(self))?;
         st.end()
     }
 }
@@ -1159,7 +1184,8 @@ impl Serialize for WriteTiles {
 #[derive(Default)]
 pub(crate) struct ReadTiles {
     colors: Vec<[u8; 4]>,
-    tiles: Vec<Box<[StoredEdge]>>,
+    /// 読んだ塊（押し足しで取り直さない列：`GrowingList`。ファイルに書いた長さは信じないので、前もって取らない）
+    tiles: crate::chunked_list::GrowingList<Box<[StoredEdge]>>,
     /// 辺の側の数と、いちばん大きい印
     sides: u64,
     labels: u64,
@@ -1213,38 +1239,34 @@ impl ReadTiles {
         }
     }
 
-    /// 線の並びの線を、読んだ塊の辺に乗せる。塊・辺の番号が表の内、色が表の内（線なしの 0 でない）、太さが範囲の内で、
-    /// 同じ辺に2回乗せないこと。そうでない線があれば `broken` に記す（壊れた塊があれば、塊の番号がずれるので乗せない）
-    fn put_strokes(&mut self, strokes: &[SavedStroke]) {
+    /// 線の並びの線 `s` を、読んだ塊の辺に乗せる（線の並びは持たず、1本ずつ読んで乗せる：`Strokes`）。塊・辺の番号が表の
+    /// 内、色が表の内（線なしの 0 でない）、太さが範囲の内で、同じ辺に2回乗せないこと。そうでない線があれば `broken` に
+    /// 記す（壊れた塊・線があれば、塊の番号がずれる・あとの線を信じられないので、それからあとは乗せない）
+    fn put_stroke(&mut self, s: &SavedStroke) {
         if self.broken {
             return;
         }
-        for s in strokes {
-            let color = match s.color {
-                0 => None,
-                i => self.colors.get(i as usize - 1).copied(),
-            };
-            let stroke = color.filter(|_| STROKE_WIDTHS.contains(&s.width)).map(|c| EdgeStroke {
-                color: Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]),
-                width: s.width,
-            });
-            let edge = self
-                .tiles
-                .get_mut(s.tile as usize)
-                .and_then(|t| t.get_mut(s.edge as usize));
-            // 線の番号の印も、側の図形の印と同じく数える（新しい番号に替えるのは `TileReader::new`）
-            self.sides += 1;
-            self.labels = self.labels.max(s.id);
-            match (edge, stroke, NonZeroU64::new(s.id)) {
-                (Some(e), Some(stroke), Some(id)) if e.stroke.is_none() => {
-                    e.stroke = Some(stroke);
-                    e.line_id = Some(id);
-                }
-                _ => {
-                    self.broken = true;
-                    return;
-                }
+        let color = match s.color {
+            0 => None,
+            i => self.colors.get(i as usize - 1).copied(),
+        };
+        let stroke = color.filter(|_| STROKE_WIDTHS.contains(&s.width)).map(|c| EdgeStroke {
+            color: Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]),
+            width: s.width,
+        });
+        let edge = self
+            .tiles
+            .get_mut(s.tile as usize)
+            .and_then(|t| t.get_mut(s.edge as usize));
+        // 線の番号の印も、側の図形の印と同じく数える（新しい番号に替えるのは `TileReader::new`）
+        self.sides += 1;
+        self.labels = self.labels.max(s.id);
+        match (edge, stroke, NonZeroU64::new(s.id)) {
+            (Some(e), Some(stroke), Some(id)) if e.stroke.is_none() => {
+                e.stroke = Some(stroke);
+                e.line_id = Some(id);
             }
+            _ => self.broken = true,
         }
     }
 }
@@ -1274,11 +1296,37 @@ impl<'de> Visitor<'de> for ReadTiles {
             .ok_or_else(|| de::Error::invalid_length(0, expected))?;
         seq.next_element_seed(&mut self)?
             .ok_or_else(|| de::Error::invalid_length(1, expected))?;
-        let strokes: Vec<SavedStroke> = seq
-            .next_element()?
+        seq.next_element_seed(Strokes(&mut self))?
             .ok_or_else(|| de::Error::invalid_length(2, expected))?;
-        self.put_strokes(&strokes);
         Ok(self)
+    }
+}
+
+/// 線の並びを、1本ずつ読んで塊の辺に乗せる（保存の形の線は、読んでいる1本だけ持つ。前は並びを丸ごと読んでから乗せた
+/// ので、線の多い作品を開いて閉じるたびに、Mac でアプリのメモリが約 160MB ずつ増えたまま戻らなかった：レビュー de92ceb
+/// の N-5001）
+struct Strokes<'a>(&'a mut ReadTiles);
+
+impl<'de> DeserializeSeed<'de> for Strokes<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Strokes<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("線の並び")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while let Some(s) = seq.next_element::<SavedStroke>()? {
+            self.0.put_stroke(&s);
+        }
+        Ok(())
     }
 }
 
@@ -1323,19 +1371,17 @@ impl TileReader {
         }
         let first = crate::vector_engine::new_shape_ids(read.labels);
         let label = |n: Option<NonZeroU64>| n.and_then(|n| NonZeroU64::new(first + n.get() - 1));
-        let tiles = read
-            .tiles
-            .into_iter()
-            .map(|mut edges| {
-                for e in edges.iter_mut() {
-                    e.left_src = label(e.left_src);
-                    e.right_src = label(e.right_src);
-                    e.line_id = label(e.line_id)
-                        .and_then(|id| NonZeroU64::new(id.get() | crate::planar_map::LINE_ID_BIT));
-                }
-                TileData::new(edges)
-            })
-            .collect();
+        // 塊の並びは、ちょうどの大きさで1回だけ取る（押し足しで伸ばさない：`GrowingList`）
+        let mut tiles = Vec::with_capacity(read.tiles.len());
+        tiles.extend(read.tiles.into_iter().map(|mut edges| {
+            for e in edges.iter_mut() {
+                e.left_src = label(e.left_src);
+                e.right_src = label(e.right_src);
+                e.line_id = label(e.line_id)
+                    .and_then(|id| NonZeroU64::new(id.get() | crate::planar_map::LINE_ID_BIT));
+            }
+            TileData::new(edges)
+        }));
         Some(Self { tiles })
     }
 

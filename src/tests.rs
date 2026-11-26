@@ -21439,6 +21439,27 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
 }
 
+/// 足していくだけの列（`GrowingList`）は、ふつうの並びと同じ順・同じ中身で、番号で引ける（塊の境目をまたいでも）
+#[test]
+fn growing_list_matches_a_plain_vec() {
+    for n in [0usize, 1, 2, 3, 4, 7, 8, 9, 100, 1023, 1024, 1025, 5000] {
+        let mut g = crate::chunked_list::GrowingList::default();
+        let mut v = Vec::new();
+        for i in 0..n {
+            g.push(i * 3);
+            v.push(i * 3);
+        }
+        assert_eq!(g.len(), n);
+        assert!(g.iter().copied().eq(v.iter().copied()));
+        for (i, x) in v.iter_mut().enumerate() {
+            *g.get_mut(i).unwrap() += 1;
+            *x += 1;
+        }
+        assert!(g.get_mut(n).is_none());
+        assert!(g.clone().into_iter().eq(v.into_iter()));
+    }
+}
+
 /// 操作の途中で止まって（panic）も、アプリは落ちず、その操作を無かったことにして、操作の前の文書・選択・取り消しの控えに
 /// 戻り、知らせて、続けて使える（設計審査 de92ceb の D-2：落ちたときの最後の砦）。止まる操作には、今ある本物の道を使う：
 /// ブラシの点が格子のはるか外（1e300）にあると、ブラシの形を作る所（i_overlay）が止まる。この道を直したら（点を断る）、
