@@ -954,7 +954,7 @@ fn layer_order_index(layer_order_ids: &[LayerId], lid: LayerId) -> usize {
 
 /// 土台の図形列 `base` と上乗せ `overlay` から画面の重なり順リストを構築する（レイヤーID順序配列指定）
 pub(crate) fn build_scene_order_by_layer_ids(
-    base: &[FillShape],
+    base: &[Arc<FillShape>],
     overlay: &Overlay,
     layer_order_ids: &[LayerId],
 ) -> Vec<SceneEntry> {
@@ -1137,7 +1137,7 @@ impl<'a> ExactSizeIterator for SceneIter<'a> {}
 /// 現在のフレームと編集位置で解決した、描画・当たり判定用の読み取り専用図形ビュー（土台＋上乗せの合成）
 #[derive(Clone, Copy)]
 pub(crate) struct Scene<'a> {
-    base: &'a [FillShape],
+    base: &'a [Arc<FillShape>],
     overlay: &'a Overlay,
     order: &'a [SceneEntry],
     /// 上乗せが空なので、土台をそのまま読む（`order` は空）
@@ -1159,10 +1159,10 @@ impl<'a> Scene<'a> {
     #[inline]
     pub(crate) fn get(self, idx: usize) -> Option<&'a FillShape> {
         if self.base_only {
-            return self.base.get(idx);
+            return self.base.get(idx).map(|s| &**s);
         }
         match self.order.get(idx)? {
-            SceneEntry::Base(i) => self.base.get(*i),
+            SceneEntry::Base(i) => self.base.get(*i).map(|s| &**s),
             SceneEntry::Overlay(j) => self.overlay.add.get(*j).map(|(_, s)| s),
         }
     }
@@ -1782,7 +1782,7 @@ impl Session {
                 } else {
                     Placement::ReplaceAt(s.shape_id)
                 };
-                (at, s.clone())
+                (at, (**s).clone())
             })
             .collect();
         for (at, f) in moving.chain(nested) {

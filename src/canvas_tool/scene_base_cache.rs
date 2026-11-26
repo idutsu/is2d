@@ -10,7 +10,7 @@ use kurbo::{Affine, Point};
 
 use crate::planar_map::LayerBase;
 use crate::symbol::{
-    compute_resolved_cel_signature, Library, ResolvedCelSig, SymbolEvalCtx, SymbolLoopMode,
+    compute_resolved_cel_signature, CelShape, Library, ResolvedCelSig, SymbolEvalCtx, SymbolLoopMode,
 };
 use crate::timeline::{Layer, Timeline};
 use crate::vector_engine::{tinted_screen_mesh, CelTint, FillShape};
@@ -29,6 +29,10 @@ struct CachedLayer {
     /// そのセル画（と、中のシンボルのセル画）の地図の、計算に使う写し。画面に出している間、写しの持ち主はここ
     /// （`LayerBase::of_stored` は、ここが持っている写しを返す）
     bases: Vec<Arc<LayerBase>>,
+    /// 図形（`range`）ごとの、元の地図の図形（地図の図形の表にある図形そのもの。インスタンスを展開した図形は `None`）。
+    /// 作り直すとき、元の地図の図形が前と同じ物（番地）なら、前の画面の写しを使い回す（持っているので、番地が別の図形に
+    /// 使い回されない）
+    sources: Vec<Option<Arc<FillShape>>>,
 }
 
 /// `Document`（編集中タイムライン＋シンボルライブラリ＋`world_xform`）から構築されるレイヤー別の読み取り専用土台キャッシュ
@@ -36,7 +40,8 @@ struct CachedLayer {
 #[derive(Default)]
 pub(crate) struct SceneBaseCache {
     layers: Vec<CachedLayer>,
-    flat_shapes: Vec<FillShape>,
+    /// 今のコマの全レイヤーの図形（画面の写し。レイヤーの順。変わらない図形は、作り直しても同じ物を使い回す）
+    flat_shapes: Vec<Arc<FillShape>>,
     layer_order_ids: Vec<LayerId>,
 }
 
@@ -115,10 +120,10 @@ impl CachedLayer {
 }
 
 fn drain_cached_layer_range(
-    iter: &mut std::vec::IntoIter<FillShape>,
+    iter: &mut std::vec::IntoIter<Arc<FillShape>>,
     cursor: &mut usize,
     range: Range<usize>,
-    out: &mut Vec<FillShape>,
+    out: &mut Vec<Arc<FillShape>>,
 ) {
     for _ in 0..range.start.saturating_sub(*cursor) {
         let _ = iter.next();
@@ -129,7 +134,7 @@ fn drain_cached_layer_range(
 
 impl SceneBaseCache {
     #[inline]
-    pub(crate) fn shapes(&self) -> &[FillShape] {
+    pub(crate) fn shapes(&self) -> &[Arc<FillShape>] {
         &self.flat_shapes
     }
 
@@ -192,7 +197,7 @@ impl SceneBaseCache {
 
         let old_layers = std::mem::take(&mut self.layers);
         let old_flat = std::mem::take(&mut self.flat_shapes);
-        let mut old_by_id: HashMap<LayerId, (CachedLayer, Vec<FillShape>)> =
+        let mut old_by_id: HashMap<LayerId, (CachedLayer, Vec<Arc<FillShape>>)> =
             HashMap::with_capacity(old_layers.len());
         let mut old_flat_iter = old_flat.into_iter();
         let mut cursor = 0usize;
@@ -220,6 +225,7 @@ impl SceneBaseCache {
                     range: start..start,
                     cel: None,
                     bases: Vec::new(),
+                    sources: Vec::new(),
                 });
                 continue;
             };
@@ -240,20 +246,66 @@ impl SceneBaseCache {
                         range: start..end,
                         cel: Some(layer.keyframes[kf_idx].cel.clone()),
                         bases: old_cl.bases,
+                        sources: old_cl.sources,
                     });
                     continue;
                 }
             }
             let ctx = SymbolEvalCtx::new(library);
-            let mut evaluated = layer.evaluate_shapes_at(frame, layer.id, ctx.clone());
+            let cel_shapes = layer.evaluate_cel_shapes_at(frame, ctx.clone());
             let bases = ctx.into_state().take_held();
-            for s in &mut evaluated {
-                s.place(world_xform);
-            }
+            // 地図の図形の画面の写しは、元の地図の図形が前と同じ物（番地）で、画面への変換も前と同じなら、前の写しを使い
+            // 回す（地図の書き戻しは、変わった所の図形だけを新しくし、ほかは前と同じ物を分け合う：`LayerBase` の面の表・
+            // 線の表）。新しい図形だけを写して置く（前は、そのレイヤーの図形を全部写して置き直したので、1か所描き足すだけで、
+            // 今のコマのそのレイヤーの図形の数に比例して重くなった：レビュー de92ceb の N-6001。設計：claude/画面の図形の
+            // 一覧を触った所だけで作る設計_f8b299c.md）
+            let mut reused: crate::planar_map::IntMap<usize, Arc<FillShape>> = Default::default();
+            let mut donors: Vec<Arc<FillShape>> = Vec::new();
             if let Some((old_cl, old_shapes)) = prev {
                 if old_cl.world_xform_bits == xform_bits {
-                    reuse_caches_by_key(&mut evaluated, &old_shapes);
+                    reused.reserve(old_shapes.len());
+                    for (src, placed) in old_cl.sources.iter().zip(&old_shapes) {
+                        if let Some(src) = src {
+                            reused.insert(Arc::as_ptr(src) as usize, placed.clone());
+                        }
+                    }
+                    donors = old_shapes;
                 }
+            }
+            let mut evaluated: Vec<Arc<FillShape>> = Vec::with_capacity(cel_shapes.len());
+            let mut sources: Vec<Option<Arc<FillShape>>> = Vec::with_capacity(cel_shapes.len());
+            let mut made: Vec<usize> = Vec::new();
+            for s in cel_shapes {
+                let (src, mut f) = match s {
+                    CelShape::Map(src) => {
+                        if let Some(placed) = reused.get(&(Arc::as_ptr(&src) as usize)) {
+                            evaluated.push(placed.clone());
+                            sources.push(Some(src));
+                            continue;
+                        }
+                        let f = (*src).clone();
+                        (Some(src), f)
+                    }
+                    CelShape::Made(f) => (None, *f),
+                };
+                f.layer_id = layer.id;
+                f.place(world_xform);
+                made.push(evaluated.len());
+                evaluated.push(Arc::new(f));
+                sources.push(src);
+            }
+            reuse_caches_by_key(&mut evaluated, &made, &donors);
+            // お手本：使い回して作った図形の並びが、そのレイヤーの図形をみな写して置いた並び（前の作り方）と同じ
+            #[cfg(test)]
+            if crate::planar_map::test_checks() {
+                let mut whole = layer.evaluate_shapes_at(frame, layer.id, SymbolEvalCtx::new(library));
+                for s in &mut whole {
+                    s.place(world_xform);
+                }
+                assert!(
+                    same_screen_shapes(&evaluated, &sources, &whole),
+                    "画面の土台の図形を使い回して作った並びが、みな写して作った並びと違う"
+                );
             }
             let sig = compute_resolved_cel_signature(layer, kf_idx, None, library);
             let start = new_flat.len();
@@ -269,6 +321,7 @@ impl SceneBaseCache {
                 range: start..end,
                 cel: Some(layer.keyframes[kf_idx].cel.clone()),
                 bases,
+                sources,
             });
         }
 
@@ -279,16 +332,40 @@ impl SceneBaseCache {
     }
 }
 
-/// `(shape_id, mesh_revision)` が同じ図形から描画・当たり判定のキャッシュを引き継ぐ
-fn reuse_caches_by_key(shapes: &mut [FillShape], donors: &[FillShape]) {
-    if donors.is_empty() {
+/// テスト用（お手本との比べ）：画面の図形の並び `a`（元の地図の図形 `sources`）と `b` が、同じ図形（番号・色・レイヤー・
+/// 階層・線・輪郭）の同じ並びか。インスタンスを展開した図形（元の地図の図形が無い）は、展開するたびに新しい番号が付く
+/// ので、番号は比べない
+#[cfg(test)]
+fn same_screen_shapes(a: &[Arc<FillShape>], sources: &[Option<Arc<FillShape>>], b: &[FillShape]) -> bool {
+    let same_contour = |x: &crate::vector_engine::Contour, y: &crate::vector_engine::Contour| {
+        x.segments[..] == y.segments[..]
+    };
+    a.len() == b.len()
+        && a.iter().zip(sources).zip(b).all(|((x, src), y)| {
+            (src.is_none() || x.shape_id == y.shape_id)
+                && x.color == y.color
+                && x.layer_id == y.layer_id
+                && x.group_path == y.group_path
+                && x.line == y.line
+                && x.symbol_instance.is_some() == y.symbol_instance.is_some()
+                && same_contour(&x.exterior, &y.exterior)
+                && x.holes.len() == y.holes.len()
+                && x.holes.iter().zip(&y.holes).all(|(h, k)| same_contour(h, k))
+        })
+}
+
+/// 新しく写して置いた図形（`shapes` の番号 `made`。まだ誰とも分け合っていない）に、`(shape_id, mesh_revision)` が同じ
+/// 前の図形 `donors` から描画・当たり判定のキャッシュを引き継ぐ（形が同じで色だけ変わった面など）
+fn reuse_caches_by_key(shapes: &mut [Arc<FillShape>], made: &[usize], donors: &[Arc<FillShape>]) {
+    if donors.is_empty() || made.is_empty() {
         return;
     }
     let donor_map: HashMap<(ShapeId, u64), &FillShape> = donors
         .iter()
-        .map(|d| ((d.shape_id, d.mesh_revision), d))
+        .map(|d| ((d.shape_id, d.mesh_revision), &**d))
         .collect();
-    for s in shapes {
+    for &i in made {
+        let s = Arc::get_mut(&mut shapes[i]).expect("写したばかりの図形は分け合っていない");
         if let Some(donor) = donor_map.get(&(s.shape_id, s.mesh_revision)) {
             s.reuse_caches_from(donor);
         }

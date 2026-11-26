@@ -910,24 +910,6 @@ impl GridRect {
         KRect::from_points(from_grid(self.x0, self.y0), from_grid(self.x1, self.y1))
     }
 
-    /// どの向きにも `d` 目広げた矩形
-    pub(super) fn grown(&self, d: i64) -> GridRect {
-        GridRect {
-            x0: self.x0 - d,
-            y0: self.y0 - d,
-            x1: self.x1 + d,
-            y1: self.y1 + d,
-        }
-    }
-
-    /// この矩形にかかる、升目の索引の升目（矩形の中の点は、その点を含むマスの升目にある）
-    pub(super) fn index_tiles(&self) -> impl Iterator<Item = (i64, i64)> {
-        span_tiles([
-            index_tile(cell_of((self.x0, self.y0))),
-            index_tile(cell_of((self.x1, self.y1))),
-        ])
-    }
-
     pub(super) fn union(&self, o: &GridRect) -> GridRect {
         GridRect {
             x0: self.x0.min(o.x0),

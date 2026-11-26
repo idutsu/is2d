@@ -307,31 +307,43 @@ impl<'a> SymbolEvalCtx<'a> {
     }
 }
 
+/// セル画を展開した図形1つ：地図の図形の表にある図形そのもの（`Map`。地図の書き戻しで変わらなければ、前と同じ物）か、
+/// シンボルインスタンスを展開して作った図形（`Made`。インスタンスのレイヤーの番号が付いている）
+pub(crate) enum CelShape {
+    Map(Arc<FillShape>),
+    Made(Box<FillShape>),
+}
+
 /// 入れ子シンボル対応でセル画（階層の地図の面の図形と、シンボルインスタンス）を、背面→前面の重なりの順
-/// （`Cel::parts`）に再帰展開して返す共通ヘルパー
+/// （`Cel::parts`）に再帰展開して返す共通ヘルパー。地図の図形は写さずに、表の図形そのものを返す（`CelShape::Map`）
 pub(crate) fn resolve_cel_with_library(
     cel: &Cel,
     kf_start_frame: usize,
     frame: usize,
     ctx: SymbolEvalCtx<'_>,
-) -> Vec<FillShape> {
+) -> Vec<CelShape> {
     let mut out = Vec::new();
     for m in cel.maps.iter() {
         ctx.hold(m.base());
     }
     for part in cel.parts() {
         match part {
-            crate::timeline::Part::Shape(s) => out.push((*s).clone()),
+            crate::timeline::Part::Shape(s) => out.push(CelShape::Map(s)),
             crate::timeline::Part::Instance(inst) => {
                 if ctx.depth < MAX_SYMBOL_NEST_DEPTH
                     && ctx.library.iter().any(|s| s.id == inst.binding.symbol_id)
                 {
-                    out.extend(inst.binding.expand(
-                        (kf_start_frame, frame),
-                        inst.layer_id,
-                        &inst.parent_scope,
-                        ctx.clone(),
-                    ));
+                    out.extend(
+                        inst.binding
+                            .expand(
+                                (kf_start_frame, frame),
+                                inst.layer_id,
+                                &inst.parent_scope,
+                                ctx.clone(),
+                            )
+                            .into_iter()
+                            .map(|s| CelShape::Made(Box::new(s))),
+                    );
                 }
             }
         }
@@ -1196,29 +1208,39 @@ pub(crate) fn compute_resolved_cel_signature(
 
 impl Layer {
     /// このレイヤーの指定フレーム `frame` における図形列を、クラシックトゥイーン補間およびシンボル内タイムライン評価込みで返す
+    /// （図形はみな写した物で、レイヤーの番号は `out_layer_id`：`evaluate_cel_shapes_at` の図形を写したもの）
     pub(crate) fn evaluate_shapes_at(
         &self,
         frame: usize,
         out_layer_id: u64,
         ctx: SymbolEvalCtx<'_>,
     ) -> Vec<FillShape> {
+        self.evaluate_cel_shapes_at(frame, ctx)
+            .into_iter()
+            .map(|s| match s {
+                CelShape::Map(s) => (*s).clone(),
+                CelShape::Made(s) => *s,
+            })
+            .map(|s| s.with_layer_id(out_layer_id))
+            .collect()
+    }
+
+    /// このレイヤーの指定フレーム `frame` における図形列（地図の図形は表の図形そのもの、インスタンスの図形は作った物：
+    /// `CelShape`。トゥイーンの途中はインスタンスを展開した図形）。画面の土台が、変わらない地図の図形の画面の写しを使い
+    /// 回すため（`SceneBaseCache::rebuild`）
+    pub(crate) fn evaluate_cel_shapes_at(&self, frame: usize, ctx: SymbolEvalCtx<'_>) -> Vec<CelShape> {
         let Some(kf_idx) = self.keyframe_index_at(frame) else {
             return Vec::new();
         };
         let kf = &self.keyframes[kf_idx];
         if let Some(interp_b) = self.interpolated_tween_binding_at(frame) {
-            return interp_b.expand(
-                (self.start_of(kf_idx), frame),
-                out_layer_id,
-                &[],
-                ctx,
-            );
+            return interp_b
+                .expand((self.start_of(kf_idx), frame), 0, &[], ctx)
+                .into_iter()
+                .map(|s| CelShape::Made(Box::new(s)))
+                .collect();
         }
-
         resolve_cel_with_library(&kf.cel, self.start_of(kf_idx), frame, ctx)
-            .into_iter()
-            .map(|s| s.with_layer_id(out_layer_id))
-            .collect()
     }
 }
 

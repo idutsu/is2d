@@ -13082,7 +13082,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
             },
         ],
     );
-    let red_shape = app.scene().iter().last().unwrap().clone();
+    let red_shape = app.scene().iter().next_back().unwrap().clone();
     app.session.selection.clear();
     app.session.selection.insert_shape(&red_shape);
     run(&mut app, &[Action::ConvertToSymbol]);
@@ -25193,6 +25193,34 @@ fn dragging_after_mixed_selections_matches_the_drop() {
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
 }
 
+/// 1か所描き足しても、画面の土台は、変わらない図形の画面の写しを前と同じ物で使い回し、新しい図形だけを作る（地図の
+/// 書き戻しは、変わらない図形を前の表と分け合う。前は、そのレイヤーの今のコマの図形を全部写して置き直したので、図形の
+/// 数に比例して重くなった：レビュー de92ceb の N-6001。設計：claude/画面の図形の一覧を触った所だけで作る設計_f8b299c.md）
+#[test]
+fn drawing_reuses_the_screen_copies_of_unchanged_shapes() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 2 };
+    let mut app = Is2dApp::default();
+    let mut shapes = Vec::new();
+    for i in 0..20 {
+        for j in 0..20 {
+            let (x, y) = (100.0 + i as f64 * 8.0, 100.0 + j as f64 * 8.0);
+            shapes.push(map_overlay::rect_shape(x, y, x + 5.0, y + 5.0, Color32::RED));
+        }
+    }
+    put_cel_shapes(&mut app, 0, 0, shapes);
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let before: Vec<std::sync::Arc<FillShape>> = app.session.base_cache.shapes().to_vec();
+    // 離れた所に短い線を1本
+    let pts: Vec<Point> = (0..=10).map(|t| Point::new(600.0 + t as f64 * 5.0, 600.0)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: pts, stroke: ink }));
+    let after = app.session.base_cache.shapes();
+    let reused = after.iter().filter(|a| before.iter().any(|b| std::sync::Arc::ptr_eq(a, b))).count();
+    assert_eq!(before.len(), 400);
+    assert_eq!(reused, 400, "変わらない四角の画面の写しを作り直した");
+    assert!(after.len() > before.len(), "描き足した線が画面に出ていない");
+}
+
 /// ペンをほぼ止めて、前の点からほとんど動かない点（0.0001 画素以下のずれ）が続けて来ても、ブラシの形が描いた所から
 /// はみ出さない（中心線の入口 `CenterlineBuilder::push` は、前の点の丸めの範囲（縦横 ±h の箱）に入る点を、新しい節に
 /// しない。前は、ビットまで同じ点だけを捨てたので、ほぼ 0 の節の間隔が中心線に入り、解き方が悪条件になって、描いた所から
@@ -25297,7 +25325,8 @@ fn overlay_order_follows_the_map_drawing_order() {
         s
     };
     // 土台：その階層の生の図形の地図（塗り 1・2、線 3）
-    let base = vec![shape(1, false), shape(2, false), shape(3, true)];
+    let base: Vec<std::sync::Arc<FillShape>> =
+        [shape(1, false), shape(2, false), shape(3, true)].into_iter().map(std::sync::Arc::new).collect();
     let scope: Vec<u64> = Vec::new();
     let mut overlay = Overlay::default();
     // わざと線を先に足す：地図の中のもの（線 11・塗り 12）、片の組 1（線 21・塗り 22）、片の組 0（線 31・塗り 32）

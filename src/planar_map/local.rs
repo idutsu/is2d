@@ -286,7 +286,10 @@ impl<'a> LocalMap<'a> {
             .map(|&e| quad_key(&self.base_edge(e).quad()))
             .collect();
         let mut fresh: IntSet<usize> = Default::default();
-        // 確かめる所：増えた辺の判定の形の外接矩形（1目広げる）にかかる升目
+        // 確かめる所：増えた辺の判定の形の区間が通るマス（1目太らせる）にかかる升目（近さを探すほかの所と同じ決まり：
+        // `seg_cells`。触れる区間どうしは必ず同じマスを持ち、同じ格子の点に丸まる頂点も同じマスにあるので、答えは外接矩形で
+        // 集めたときと同じ。前は外接矩形にかかる升目を集めたので、長い斜めの線を引くと、線の通らない所の絵の量に比例して
+        // 重くなった：レビュー de92ceb の N-1004）
         let mut tiles: Vec<(i64, i64)> = Vec::new();
         for e in self.added_edges() {
             let q = self.quad(e);
@@ -301,7 +304,11 @@ impl<'a> LocalMap<'a> {
             if !base_keys.contains(&quad_key(&q)) {
                 fresh.insert(e);
             }
-            tiles.extend(GridRect::of(pe).grown(1).index_tiles());
+            tiles.extend(
+                pe.windows(2)
+                    .flat_map(|w| seg_cells((w[0], w[1]), 1))
+                    .map(grid::index_tile),
+            );
         }
         tiles.sort_unstable();
         tiles.dedup();
