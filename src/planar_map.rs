@@ -1571,13 +1571,18 @@ impl LayerBase {
 
     /// 1本の道で行った編集（`apply_diff`）の新しいしまう形 `stored`（階層 `group_path`、面の図形の表 `faces`）の写し。
     /// 地図全体の一覧（`map`）・判定の形・輪郭の一覧は作らず、要る所が初めて使うときに作る。升目の索引は、前の写し `prev`
-    /// の索引から、変わった塊の分だけ作る（設計 段2b の 7. の 2b-7c）
+    /// の索引から、変わった塊の分だけ作る（設計 段2b の 7. の 2b-7c）。同じしまう形の写しが生きていれば、それを返す
+    /// （`of_stored` と同じ。同じしまう形からは同じ写し：複製のドラッグ中に確定の答えから作った写し（`written_view`）を、
+    /// 離したときの書き戻しがそのまま使い、線の図形の表を作り直さない）
     pub(crate) fn of_local(
         stored: StoredMap,
         group_path: &[u64],
         faces: FaceTable,
         prev: &LayerBase,
     ) -> Arc<Self> {
+        if let Some(base) = stored.dense_slot().lock().upgrade() {
+            return base;
+        }
         let base = Self {
             dense: OnceLock::new(),
             stored,

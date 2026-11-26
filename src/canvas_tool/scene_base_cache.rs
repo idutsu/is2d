@@ -16,6 +16,18 @@ use crate::timeline::{Layer, Timeline};
 use crate::vector_engine::{tinted_screen_mesh, CelTint, FillShape};
 use crate::vector_engine::{LayerId, ShapeId};
 
+/// 使い回してよい画面の写し1つ：（レイヤー, 元の地図の図形, 画面の写し）（`SceneBaseCache::offer`）
+pub(crate) type PlacedCopy = (LayerId, Arc<FillShape>, Arc<FillShape>);
+
+/// 次に作り直すときに使い回してよい画面の写し（`SceneBaseCache::offer`）
+struct Offered {
+    /// 画面への変換のビット
+    world: [u64; 6],
+    placed: Vec<PlacedCopy>,
+    /// その地図の図形を持つ地図の写し（書き戻しが同じ写しを使い：`LayerBase::of_local`、作り直すまで生かす）
+    _bases: Vec<Arc<LayerBase>>,
+}
+
 struct CachedLayer {
     layer_id: LayerId,
     visible: bool,
@@ -43,6 +55,8 @@ pub(crate) struct SceneBaseCache {
     /// 今のコマの全レイヤーの図形（画面の写し。レイヤーの順。変わらない図形は、作り直しても同じ物を使い回す）
     flat_shapes: Vec<Arc<FillShape>>,
     layer_order_ids: Vec<LayerId>,
+    /// 次に作り直すときに使い回してよい、画面の写し（`offer`）
+    offered: Option<Offered>,
 }
 
 fn layer_eval_frame(
@@ -159,6 +173,22 @@ impl SceneBaseCache {
         }
     }
 
+    /// 次に作り直すとき（`rebuild`）に使い回してよい画面の写しを渡す：画面への変換 `world` で置いた、（レイヤー, 元の地図の
+    /// 図形, 画面の写し）の `placed` と、その地図の図形を持つ地図の写し `bases`（書き戻しが同じ写しを使うまで生かす）。
+    /// 複製のドラッグ中に、離したときと同じ計算で作った確定した絵（`Session::take_ahead_commit`）。1回の作り直しで捨てる
+    pub(crate) fn offer(
+        &mut self,
+        world: Affine,
+        bases: Vec<Arc<LayerBase>>,
+        placed: Vec<PlacedCopy>,
+    ) {
+        self.offered = Some(Offered {
+            world: world.as_coeffs().map(f64::to_bits),
+            placed,
+            _bases: bases,
+        });
+    }
+
     /// レイヤー `layer_id` を、次の `rebuild` で作り直す（セル画を書き換えたあと）
     pub(crate) fn invalidate_layer(&mut self, layer_id: LayerId) {
         if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
@@ -272,6 +302,15 @@ impl SceneBaseCache {
                     donors = old_shapes;
                 }
             }
+            if let Some(offered) = &self.offered {
+                if offered.world == xform_bits {
+                    for (lid, src, f) in &offered.placed {
+                        if *lid == layer.id {
+                            reused.insert(Arc::as_ptr(src) as usize, f.clone());
+                        }
+                    }
+                }
+            }
             let mut evaluated: Vec<Arc<FillShape>> = Vec::with_capacity(cel_shapes.len());
             let mut sources: Vec<Option<Arc<FillShape>>> = Vec::with_capacity(cel_shapes.len());
             let mut made: Vec<usize> = Vec::new();
@@ -328,6 +367,7 @@ impl SceneBaseCache {
         self.layers = new_layers;
         self.flat_shapes = new_flat;
         self.layer_order_ids = new_order_ids;
+        self.offered = None;
         true
     }
 }

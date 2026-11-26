@@ -920,8 +920,9 @@ pub(crate) enum Placement {
 pub(crate) struct Overlay {
     /// 画面から隠す元の図形
     pub(crate) hide: HashSet<ShapeId>,
-    /// 追加で見せる図形
-    pub(crate) add: Vec<(Placement, FillShape)>,
+    /// 追加で見せる図形（分け合える箱。複製のドラッグ中の確定した絵は、離したあとの画面の土台が同じ箱を使い回す：
+    /// `SceneBaseCache::offer`）
+    pub(crate) add: Vec<(Placement, Arc<FillShape>)>,
 }
 
 impl Overlay {
@@ -1163,7 +1164,7 @@ impl<'a> Scene<'a> {
         }
         match self.order.get(idx)? {
             SceneEntry::Base(i) => self.base.get(*i).map(|s| &**s),
-            SceneEntry::Overlay(j) => self.overlay.add.get(*j).map(|(_, s)| s),
+            SceneEntry::Overlay(j) => self.overlay.add.get(*j).map(|(_, s)| &**s),
         }
     }
 
@@ -1446,6 +1447,11 @@ struct DropAhead {
     commit: Option<CommitPlan>,
     /// 写す中身（複製：`clipboard_ops::selected_content`）
     content: Option<crate::clipboard_ops::Content>,
+    /// 複製のドラッグ中の確定した絵：確定の答えの地図の写し（`LayerBase::written_view`）と、その地図の図形の画面の写し
+    /// （レイヤー, 元の地図の図形, 画面の写し）。離したとき、書き戻しは同じ写しを使い（`LayerBase::of_local`）、画面の
+    /// 土台は同じ画面の写しを使い回す（`SceneBaseCache::offer`）
+    committed: Vec<Arc<LayerBase>>,
+    placed: Vec<scene_base_cache::PlacedCopy>,
 }
 
 impl Session {
@@ -1558,12 +1564,16 @@ impl Session {
         if let Some(fl) = &self.floating {
             let scope = self.editing_group_path.clone();
             self.overlay.hide = fl.hidden().clone();
-            self.overlay
-                .add
-                .extend(fl.placed_remainder().iter().cloned());
+            self.overlay.add.extend(
+                fl.placed_remainder()
+                    .iter()
+                    .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
+            );
             self.overlay_movable_start = self.overlay.add.len();
-            let pieces: Vec<(Placement, FillShape)> =
-                fl.placed_pieces(&scope).map(|(at, p)| (at, p.clone())).collect();
+            let pieces: Vec<(Placement, Arc<FillShape>)> = fl
+                .placed_pieces(&scope)
+                .map(|(at, p)| (at, Arc::new(p.clone())))
+                .collect();
             self.overlay.add.extend(pieces);
             self.invalidate_scene_order();
         } else if had_overlay {
@@ -1593,7 +1603,7 @@ impl Session {
         let placement = Placement::RawOf(layer_id, group_path.to_vec());
         self.overlay
             .add
-            .extend(added.into_iter().map(|s| (placement.clone(), s)));
+            .extend(added.into_iter().map(|s| (placement.clone(), Arc::new(s))));
         self.invalidate_scene_order();
     }
 
@@ -1640,6 +1650,8 @@ impl Session {
             lifted: None,
             commit: None,
             content: None,
+            committed: Vec::new(),
+            placed: Vec::new(),
         }
     }
 
@@ -1662,13 +1674,22 @@ impl Session {
             })
     }
 
-    /// ドラッグを始めるときに作った、浮いた片 `fl` の確定の計画（使い回してよいときだけ。取り出す）
+    /// ドラッグを始めるときに作った、浮いた片 `fl` の確定の計画（使い回してよいときだけ。取り出す）。確定の答えの地図の
+    /// 写しと、その図形の画面の写しは、画面の土台に渡す（書き戻しと、次の画面の土台の作り直しが使い回す）
     pub(crate) fn take_ahead_commit(&mut self, fl: &Floating) -> Option<CommitPlan> {
         let ahead = self.drop_ahead.as_ref()?;
         if !self.ahead_holds(ahead, Some(fl)) {
             return None;
         }
-        self.drop_ahead.as_mut()?.commit.take()
+        let ahead = self.drop_ahead.as_mut()?;
+        let plan = ahead.commit.take()?;
+        let world = self.edit_path.world_xform();
+        self.base_cache.offer(
+            world,
+            std::mem::take(&mut ahead.committed),
+            std::mem::take(&mut ahead.placed),
+        );
+        Some(plan)
     }
 
     /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
@@ -1709,7 +1730,7 @@ impl Session {
         // （設計審査 de92ceb の D-1 の (c)・レビュー de92ceb の N-3001）
         let scope = self.editing_group_path.clone();
         let world = self.edit_path.world_xform();
-        let moving_raw: Vec<(Placement, FillShape)> = if alt_duplicate {
+        let moving_raw: Vec<(Placement, Arc<FillShape>)> = if alt_duplicate {
             // 複製は、離すとき、今の浮いた片を確定してから写しを置く（`duplicate_selected_in_working_copy`）ので、止まった絵は
             // 確定した絵（確定の計算 `FloatLayer::commit_edit`。動かしていない切り口は確定で捨てて元に戻るので、セル画のまま）、
             // 動かす生の絵は、離したときに置く写しの絵（`copy`：`clipboard_ops::begin_move_selection_drag`。レイヤーごとに1つの
@@ -1726,14 +1747,21 @@ impl Session {
                             self.overlay.hide.extend(hidden);
                             let shown: HashSet<ShapeId> = shown.into_iter().collect();
                             let at = Placement::RawOf(l.layer_id, scope.clone());
-                            for f in committed.drawn_shapes(&scope) {
-                                if !shown.contains(&f.shape_id) {
+                            let mut placed = Vec::new();
+                            for src in committed.drawn_shapes(&scope) {
+                                if !shown.contains(&src.shape_id) {
                                     continue;
                                 }
-                                let mut f = (*f).clone();
+                                let mut f = (*src).clone();
                                 f.layer_id = l.layer_id;
                                 f.place(world);
-                                self.overlay.add.push((at.clone(), f));
+                                let f = Arc::new(f);
+                                self.overlay.add.push((at.clone(), f.clone()));
+                                placed.push((l.layer_id, src, f));
+                            }
+                            if let Some(ahead) = &mut self.drop_ahead {
+                                ahead.committed.push(committed);
+                                ahead.placed.extend(placed);
                             }
                             if let Some(p) = &mut plan {
                                 p.push((l.layer_id, w, base));
@@ -1748,15 +1776,21 @@ impl Session {
                 ahead.commit = plan;
             }
             copy.into_iter()
-                .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone(), 0), f))
+                .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone(), 0), Arc::new(f)))
                 .collect()
         } else {
             match self.lift_ahead() {
                 Ok(Some(mut fl)) => {
                     fl.refresh(world, &scope, self.base_cache.layer_order_ids());
                     self.overlay.hide = fl.hidden().clone();
-                    self.overlay.add.extend(fl.placed_remainder().iter().cloned());
-                    fl.placed_pieces(&scope).map(|(at, p)| (at, p.clone())).collect()
+                    self.overlay.add.extend(
+                        fl.placed_remainder()
+                            .iter()
+                            .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
+                    );
+                    fl.placed_pieces(&scope)
+                        .map(|(at, p)| (at, Arc::new(p.clone())))
+                        .collect()
                 }
                 Ok(None) => Vec::new(),
                 // 持ち上げられなければ、離したときに断るので、何も動かさない
@@ -1771,7 +1805,7 @@ impl Session {
         let moving = moving_raw.into_iter();
         // 選んだグループ・インスタンスの図形（生の図形でないもの）は、その図形を動かす（離したあとは、グループの地図・
         // インスタンスの置き方の変換を動かす。複製は、写しを今の階層のいちばん上に置く）
-        let nested: Vec<(Placement, FillShape)> = self
+        let nested: Vec<(Placement, Arc<FillShape>)> = self
             .base_cache
             .shapes()
             .iter()
@@ -1782,7 +1816,7 @@ impl Session {
                 } else {
                     Placement::ReplaceAt(s.shape_id)
                 };
-                (at, (**s).clone())
+                (at, s.clone())
             })
             .collect();
         for (at, f) in moving.chain(nested) {
@@ -1793,7 +1827,7 @@ impl Session {
             }
             if for_transform {
                 let _ = f.fill_mesh();
-                orig_shapes.push(f.clone());
+                orig_shapes.push((*f).clone());
             }
             self.overlay.add.push((at, f));
         }
@@ -1809,6 +1843,7 @@ impl Session {
             self.overlay.add[start..].iter_mut().zip(orig_shapes.iter())
         {
             // 生の絵とグループの線は、拡大しても太さが変わらない（確定と同じ形。シンボルの中の線は図形ごと写して太くなる）
+            let overlay_shape = Arc::make_mut(overlay_shape);
             if orig_shape.line.is_some() && orig_shape.symbol_instance.is_none() {
                 overlay_shape.clone_from(orig_shape);
                 overlay_shape.transform_keeping_line_width(affine, world);
@@ -1822,7 +1857,7 @@ impl Session {
     pub(crate) fn translate_move_overlay(&mut self, delta: KVec2) {
         let start = self.overlay_movable_start.min(self.overlay.add.len());
         for (_, shape) in &mut self.overlay.add[start..] {
-            shape.translate(delta);
+            Arc::make_mut(shape).translate(delta);
         }
         if let Some(piv) = &mut self.transform_pivot {
             *piv += delta;

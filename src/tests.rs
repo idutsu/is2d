@@ -4242,7 +4242,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert!(empty_marker.geometry_bounding_box().is_none());
     sort_app.session.overlay.add.push((
         crate::canvas_tool::Placement::TopOfLayer(lid_bottom, Vec::new()),
-        empty_marker,
+        std::sync::Arc::new(empty_marker),
     ));
     sort_app.refresh_scene_base();
     let maps = crate::map_hover::scope_maps(sort_app.scene(), &sort_app.session);
@@ -25193,6 +25193,36 @@ fn dragging_after_mixed_selections_matches_the_drop() {
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
 }
 
+/// 動かした浮いた片があるときの複製のドラッグで、ドラッグ中に見せた確定した絵の画面の写しを、離したあとの画面の土台が
+/// 同じ物で使い回す（確定の答えの地図の写しも、離したときの書き戻しが同じものを使う：`LayerBase::of_local`。設計：
+/// claude/画面の図形の一覧を触った所だけで作る設計_f8b299c.md の 2.3）
+#[test]
+fn alt_duplicate_drop_reuses_the_committed_picture_from_the_drag() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(30.0, 40.0) }));
+    let from = Point::new(150.0, 200.0);
+    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, true);
+    let committed: Vec<std::sync::Arc<FillShape>> = app
+        .session
+        .overlay
+        .add
+        .iter()
+        .filter(|(at, _)| matches!(at, crate::canvas_tool::Placement::RawOf(..)))
+        .map(|(_, s)| s.clone())
+        .collect();
+    assert!(!committed.is_empty(), "ドラッグ中に確定した絵を出していない");
+    app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
+    crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(200.0, 0.0));
+    crate::select_ops::finish_selection_drag(&mut app, None);
+    let base = app.session.base_cache.shapes();
+    let reused = committed.iter().filter(|c| base.iter().any(|b| std::sync::Arc::ptr_eq(b, c))).count();
+    assert_eq!(reused, committed.len(), "離したあとの画面の土台が、ドラッグ中の確定した絵を作り直した");
+}
+
 /// 1か所描き足しても、画面の土台は、変わらない図形の画面の写しを前と同じ物で使い回し、新しい図形だけを作る（地図の
 /// 書き戻しは、変わらない図形を前の表と分け合う。前は、そのレイヤーの今のコマの図形を全部写して置き直したので、図形の
 /// 数に比例して重くなった：レビュー de92ceb の N-6001。設計：claude/画面の図形の一覧を触った所だけで作る設計_f8b299c.md）
@@ -25338,7 +25368,7 @@ fn overlay_order_follows_the_map_drawing_order() {
         (Placement::AboveRaw(1, scope.clone(), 0), 31, true),
         (Placement::AboveRaw(1, scope.clone(), 0), 32, false),
     ] {
-        overlay.add.push((at, shape(id, line)));
+        overlay.add.push((at, std::sync::Arc::new(shape(id, line))));
     }
     let ids: Vec<u64> = build_scene_order_by_layer_ids(&base, &overlay, &[1])
         .into_iter()
