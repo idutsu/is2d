@@ -623,14 +623,18 @@ pub(crate) fn prepare_group_selected_shapes(
     let scope = tab.session.editing_group_path.clone();
     let layer_ids = editable_layer_ids(tab);
     write_cels(tab, &layer_ids, |_, cel, held| {
-        cel.group(
+        Ok(cel.group(
             &scope,
             &selection.shapes,
             &selection.instances,
             new_gid,
             held,
-        )
+        )?)
     });
+    // 書けなければ断る（それまでに書いたものと取り出した浮いた片は、断った操作を `apply` が操作の前に戻す）
+    if tab.session.refusal.is_some() {
+        return false;
+    }
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
     // なっているので、この階層に図形の並びで書いたものは無い）
     crate::canvas_tool::write_maps(tab, &group_path, piece_plan);
@@ -760,14 +764,18 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             .filter(|g| g.0 == lid)
             .map(|g| g.1.clone())
             .collect();
-        cel.ungroup(
+        Ok(cel.ungroup(
             &scope,
             &selection.shapes,
             &selection.instances,
             &lifted,
             held,
-        )
+        )?)
     });
+    // 書けなければ断る（書いたものは、断った操作を `apply` が操作の前に戻す）
+    if tab.session.refusal.is_some() {
+        return false;
+    }
     let any_raw = !group_maps.is_empty() || placements.iter().any(Placement::has_pieces);
     tab.session.add_floating_maps(group_maps);
     // インスタンスは、そのコマの中身と入れ替える（置いたものを選ぶ。分解したインスタンスは選択から外れる）
@@ -863,10 +871,10 @@ pub(crate) fn prepare_arrange_selected(
     before_mutate(tab);
     let target_lids: Vec<LayerId> = layer_orders.iter().map(|(lid, _)| *lid).collect();
     write_cels(tab, &target_lids, |lid, cel, _| {
-        layer_orders
+        Ok(layer_orders
             .iter()
             .find(|(l, _)| *l == lid)
-            .is_some_and(|(_, order)| cel.rearrange(scope, order))
+            .is_some_and(|(_, order)| cel.rearrange(scope, order)))
     });
     true
 }
@@ -905,8 +913,13 @@ pub(crate) fn prepare_delete_selected_shapes(
     let selection = std::mem::take(&mut tab.session.selection);
     let scope = tab.session.editing_group_path.clone();
     write_cels(tab, &layer_ids, |_, cel, held| {
-        cel.remove(&scope, &selection.shapes, &selection.instances, held)
+        Ok(cel.remove(&scope, &selection.shapes, &selection.instances, held)?)
     });
+    // 書けなければ断る（前は書いた結果を見ずに `true` を返したので、断られたレイヤーの図形だけが黙って残った：設計審査
+    // de92ceb の D-5。書いたものと捨てた浮いた片は、断った操作を `apply` が操作の前に戻す）
+    if tab.session.refusal.is_some() {
+        return false;
+    }
     tab.session.transform_pivot = None;
     true
 }
@@ -928,6 +941,6 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     }
     before_mutate(tab);
     let scope = tab.session.editing_group_path.clone();
-    write_cels(tab, &layer_ids, |_, cel, _| cel.clear(&scope));
+    write_cels(tab, &layer_ids, |_, cel, _| Ok(cel.clear(&scope)));
     true
 }

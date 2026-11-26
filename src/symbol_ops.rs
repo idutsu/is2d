@@ -110,8 +110,12 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     .collect();
     finish_cel_writes(tab, &written);
     write_cels(tab, &[target_lid], |_, cel, held| {
-        cel.remove(&scope, &selection.shapes, &selection.instances, held)
+        Ok(cel.remove(&scope, &selection.shapes, &selection.instances, held)?)
     });
+    // 書けなければ断る（それまでに書いたもの・登録したシンボルは、断った操作を `apply` が操作の前に戻す）
+    if tab.session.refusal.is_some() {
+        return None;
+    }
     if let Some(plan) = rest_plan {
         crate::canvas_tool::write_commit(tab, plan);
     }

@@ -14,6 +14,16 @@ pub(crate) enum Refusal {
     Unwritable,
 }
 
+/// 1本の道が断った理由の、知らせ（読み替えはこれ1つ）
+impl From<crate::planar_map::LocalRefusal> for Refusal {
+    fn from(r: crate::planar_map::LocalRefusal) -> Self {
+        match r {
+            crate::planar_map::LocalRefusal::OffGrid => Refusal::OffGrid,
+            crate::planar_map::LocalRefusal::Unwritable => Refusal::Unwritable,
+        }
+    }
+}
+
 impl Refusal {
     /// 画面の下に出す知らせ
     pub(crate) fn message(self) -> &'static str {
@@ -77,49 +87,58 @@ pub(crate) fn write_cel(
 
 /// 今のコマの、レイヤー `layer_ids` のセル画をそれぞれ `f(レイヤー, セル画, 写しの入れ物)` で書き換え（`write_cel`）、
 /// 書いたレイヤーで後始末をする（`finish_cel_writes`）。`f` が入れ物に入れた新しい地図の計算に使う写しは、画面の土台が
-/// 持つ（作り直すときに引き継ぐ。後始末の前に渡す）。`false`：どのレイヤーも書かなかった
+/// 持つ（作り直すときに引き継ぐ。後始末の前に渡す）。`f` の `Ok(false)`：そのレイヤーは変わらない。`f` が断ったら
+/// （`Err`）、そこで止めて知らせを記し（`Session::refusal`）、`false` を返す（それまでに書いたレイヤーは、操作が断った
+/// ので `apply` が操作の前に戻す：`restore_state_before_action`）。`false`：どのレイヤーも書かなかったか、断った
 pub(crate) fn write_cels(
     tab: &mut Tab,
     layer_ids: &[LayerId],
-    f: impl Fn(LayerId, &mut crate::timeline::Cel, &mut Vec<Arc<crate::planar_map::LayerBase>>) -> bool,
+    f: impl Fn(
+        LayerId,
+        &mut crate::timeline::Cel,
+        &mut Vec<Arc<crate::planar_map::LayerBase>>,
+    ) -> Result<bool, Refusal>,
 ) -> bool {
     let mut written = Vec::new();
+    let mut refusal = None;
     for &lid in layer_ids {
         let mut held = Vec::new();
-        if write_cel(tab, lid, |cel| f(lid, cel, &mut held)) {
+        if write_cel(tab, lid, |cel| match f(lid, cel, &mut held) {
+            Ok(changed) => changed,
+            Err(r) => {
+                refusal = Some(r);
+                false
+            }
+        }) {
             written.push(lid);
         }
         for base in held {
             tab.session.base_cache.hold(lid, base);
         }
+        if refusal.is_some() {
+            break;
+        }
     }
     finish_cel_writes(tab, &written);
+    if refusal.is_some() {
+        tab.session.refusal = refusal;
+        return false;
+    }
     !written.is_empty()
 }
 
 /// 今のコマの、レイヤー `layer_ids` のセル画の、番号が `pick` に合うインスタンスの結び付けを `f` で書き換え、後始末を
-/// する（`Cel::update_instances`・`finish_cel_writes`）。全部か無しか：数が有限でない結び付けになるレイヤーが1つでも
-/// あれば、どれも書かずに断る（`Refusal::OffGrid`。判定は書く入口と同じ `Cel::update_instances`）。`false`：どのレイヤーも
-/// 書かなかった
+/// する（`Cel::update_instances`・`write_cels`）。数が有限でない結び付けになるレイヤーがあれば断る（`Refusal::OffGrid`。
+/// 全部か無しかは、断った操作を `apply` が操作の前に戻すことで守る：`restore_state_before_action`。前は先に全レイヤーを
+/// 写して試してから書いたので、同じ判定を2回していた）。`false`：どのレイヤーも書かなかったか、断った
 pub(crate) fn update_instances(
     tab: &mut Tab,
     layer_ids: &[LayerId],
     pick: impl Fn(u64) -> bool,
     f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
 ) -> bool {
-    let tl = tab.active_timeline();
-    let accepted = tl
-        .layers
-        .iter()
-        .filter(|l| layer_ids.contains(&l.id))
-        .filter_map(|l| l.cel_at(tl.current_frame))
-        .all(|cel| cel.clone().update_instances(&pick, &f).is_ok());
-    if !accepted {
-        tab.session.refusal = Some(Refusal::OffGrid);
-        return false;
-    }
     write_cels(tab, layer_ids, |_, cel, _| {
-        cel.update_instances(&pick, &f) == Ok(true)
+        cel.update_instances(&pick, &f).map_err(|_| Refusal::OffGrid)
     })
 }
 

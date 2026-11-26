@@ -800,15 +800,16 @@ impl Cel {
     }
 
     /// 階層 `scope`（とその中）の、番号が `faces` の面を地図から外し（外した所は何も無い所になる）、番号が `instances` の
-    /// インスタンスを外す（削除・シンボル化）。面を外した地図の新しい写しは `held` に入れる（画面の土台が持つ）。`false`：
-    /// 外すものが無い
+    /// インスタンスを外す（削除・シンボル化）。面を外した地図の新しい写しは `held` に入れる（画面の土台が持つ）。`Ok(false)`：
+    /// 外すものが無い。`Err`：書けない（何も変えない。前は「外すものが無い」と同じ `false` で返したので、呼ぶ側が断ったことを
+    /// 知らせられなかった：設計審査 de92ceb の D-5）
     pub(crate) fn remove(
         &mut self,
         scope: &[u64],
         faces: &HashSet<ShapeId>,
         instances: &HashSet<u64>,
         held: &mut Vec<Arc<LayerBase>>,
-    ) -> bool {
+    ) -> Result<bool, crate::planar_map::LocalRefusal> {
         let mut changed = false;
         let mut items = Vec::new();
         for item in Self::items_of(&self.maps, &self.instances) {
@@ -818,10 +819,7 @@ impl Cel {
                 {
                     changed = true;
                     // 書けなければ何も変えずに断る（全部か無しか）
-                    let Ok(kept) = m.restricted(&path, FaceKeep::Without(faces)) else {
-                        return false;
-                    };
-                    if let Some((kept, base)) = kept {
+                    if let Some((kept, base)) = m.restricted(&path, FaceKeep::Without(faces))? {
                         held.extend(base);
                         items.push(Item::Raw(path, kept));
                     }
@@ -838,13 +836,13 @@ impl Cel {
         if changed {
             self.arrange(items);
         }
-        changed
+        Ok(changed)
     }
 
     /// グループ化：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` より深い階層の地図の）とインスタンス（番号
     /// `instances`）の階層の番号に、新しいグループ `gid` を入れ（`scope` のすぐ下）、`scope` の中身のいちばん上へ移す。
     /// 階層 `scope` そのものの生の図形は、呼ぶ側が浮いた片の地図でグループの階層に書く。面を外した地図の新しい写しは
-    /// `held` に入れる。`false`：移すものが無い
+    /// `held` に入れる。`Ok(false)`：移すものが無い。`Err`：書けない（何も変えない）
     pub(crate) fn group(
         &mut self,
         scope: &[u64],
@@ -852,7 +850,7 @@ impl Cel {
         instances: &HashSet<u64>,
         gid: u64,
         held: &mut Vec<Arc<LayerBase>>,
-    ) -> bool {
+    ) -> Result<bool, crate::planar_map::LocalRefusal> {
         let depth = scope.len();
         let into = |p: &[u64]| {
             let mut q = p.to_vec();
@@ -870,12 +868,8 @@ impl Cel {
                         && m.base().has_any_face(faces, &path) =>
                 {
                     first_at.get_or_insert(rest.len());
-                    let (Ok(kept), Ok(picked)) = (
-                        m.restricted(&path, FaceKeep::Without(faces)),
-                        m.restricted(&into(&path), FaceKeep::Only(faces)),
-                    ) else {
-                        return false;
-                    };
+                    let kept = m.restricted(&path, FaceKeep::Without(faces))?;
+                    let picked = m.restricted(&into(&path), FaceKeep::Only(faces))?;
                     if let Some((kept, base)) = kept {
                         held.extend(base);
                         rest.push(Item::Raw(path.clone(), kept));
@@ -896,7 +890,7 @@ impl Cel {
             }
         }
         let Some(first_at) = first_at else {
-            return false;
+            return Ok(false);
         };
         // 階層 `scope` の中身（残ったもの）のすぐ後ろ
         let at = rest
@@ -905,13 +899,13 @@ impl Cel {
             .map_or(first_at, |i| i + 1);
         rest.splice(at..at, moved);
         self.arrange(rest);
-        true
+        Ok(true)
     }
 
     /// グループの解除：階層 `scope` の中の、選んだ面（番号 `faces`。`scope` の孫より深い階層の地図の）とインスタンス
     /// （番号 `instances`。`scope` の子のグループの中のもの）の階層の番号から、`scope` の子の番号を外す（1つ上の階層へ）。
     /// 階層 `lifted`（解くグループの生の図形の階層。呼ぶ側が浮いた片にした）の地図は外す。面を外した地図の新しい写しは
-    /// `held` に入れる。`false`：変わるものが無い
+    /// `held` に入れる。`Ok(false)`：変わるものが無い。`Err`：書けない（何も変えない）
     pub(crate) fn ungroup(
         &mut self,
         scope: &[u64],
@@ -919,7 +913,7 @@ impl Cel {
         instances: &HashSet<u64>,
         lifted: &[Vec<u64>],
         held: &mut Vec<Arc<LayerBase>>,
-    ) -> bool {
+    ) -> Result<bool, crate::planar_map::LocalRefusal> {
         let depth = scope.len();
         let up = |p: &[u64]| {
             let mut q = p.to_vec();
@@ -937,12 +931,8 @@ impl Cel {
                         && m.base().has_any_face(faces, &path) =>
                 {
                     changed = true;
-                    let (Ok(kept), Ok(picked)) = (
-                        m.restricted(&path, FaceKeep::Without(faces)),
-                        m.restricted(&up(&path), FaceKeep::Only(faces)),
-                    ) else {
-                        return false;
-                    };
+                    let kept = m.restricted(&path, FaceKeep::Without(faces))?;
+                    let picked = m.restricted(&up(&path), FaceKeep::Only(faces))?;
                     if let Some((kept, base)) = kept {
                         held.extend(base);
                         items.push(Item::Raw(path.clone(), kept));
@@ -966,7 +956,7 @@ impl Cel {
         if changed {
             self.arrange(items);
         }
-        changed
+        Ok(changed)
     }
 
     /// 中身 `it` が、階層 `scope` のどの子（グループ・インスタンスの番号）に入るか（`scope` そのものの生の図形と、`scope` の

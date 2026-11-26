@@ -5,11 +5,11 @@ use kurbo::{Affine, ParamCurve, Point, QuadBez, Vec2 as KVec2};
 
 use crate::canvas_tool::{
     active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
-    editable_layer_ids, finish_cel_writes, focus_active_layer_by_id,
+    editable_layer_ids, focus_active_layer_by_id,
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
     update_instances, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
-    Refusal, SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
@@ -563,15 +563,19 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         }
     };
     let (tab, _, clipboard, toast) = host.parts_mut();
-    tab.history.before = None;
-    // 地図にできない形を作る編集は、文書を変える前に断ってある（どの入口も同じ決まり）。ここで知らせる
+    // 断った操作は、何も変えない（全部か無しか）：途中まで書いていても、操作の前に戻す（`restore_state_before_action`。
+    // 地図にできない形を作る編集は、ふつう文書を変える前に断ってあり、そのときは戻しても同じ）。前は、断る所が先に書いた
+    // ものを各操作が自分で戻す約束だったので、グループの変形・削除で、断られた所だけが黙って残った（レビュー de92ceb の
+    // N-4001・設計審査 de92ceb の D-5）
     if let Some(refusal) = tab.session.refusal.take() {
+        if !res {
+            restore_state_before_action(tab);
+        }
         show_notice(toast, NoticeKind::Warning, refusal.message());
     }
+    tab.history.before = None;
     if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
-        if let Some((prev, _)) = tab.history.pending.take() {
-            tab.restore_state_snapshot(prev);
-        }
+        restore_state_before_action(tab);
         tab.ensure_valid_library_selection();
         show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
         res = false;
@@ -591,22 +595,29 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     res
 }
 
-/// 操作の途中で止まった（panic：計算の前提が破れた）ときの最後の砦（設計審査 de92ceb の D-2）：文書・選択・浮いた片を、
-/// 操作を始める前の状態に戻し（控えにしまう前なら `UndoHistory::before`、しまったあとなら控えの候補 `pending`。どちらも
-/// `apply` が操作の前に1回だけ写したもの）、途中まで作り直したかもしれない画面の土台を捨てて作り直し、知らせる。別の
-/// やり方へ逃げるのではなく、その操作を無かったことにするだけ（取り消しと同じ戻し方 `restore_state_snapshot`）。文書は
-/// 共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は操作の前のまま。前は止まるとアプリが落ち、全部の
-/// タブの保存していない作業が消えた
-fn restore_after_panic(host: &mut impl ActionHost) {
-    let (tab, _, _, toast) = host.parts_mut();
+/// 操作を無かったことにする（戻し方はこれ1つ：断った操作・入れ子の深すぎるシンボル・途中で止まった操作）：文書・選択・
+/// 浮いた片を、操作を始める前の状態にする（控えにしまう前なら `UndoHistory::before`、しまったあとなら控えの候補
+/// `pending`。どちらも `apply` が操作の前に1回だけ写したもの。取り消しと同じ戻し方 `restore_state_snapshot`）。控えは
+/// 積まない。戻す途中で記された知らせ（戻した浮いた片の確定など）は捨てる（次の操作の知らせにしない）
+fn restore_state_before_action(tab: &mut Tab) {
     let before = tab.history.before.take().or_else(|| tab.history.pending.take().map(|(e, _)| e));
     tab.history.pending = None;
-    tab.session.refusal = None;
-    tab.session.base_cache = Default::default();
     if let Some(before) = before {
         tab.restore_state_snapshot(before);
     }
     tab.refresh_scene_base();
+    tab.session.refusal = None;
+}
+
+/// 操作の途中で止まった（panic：計算の前提が破れた）ときの最後の砦（設計審査 de92ceb の D-2）：途中まで作り直したかも
+/// しれない画面の土台を捨て、操作の前の状態に戻し（`restore_state_before_action`）、知らせる。別のやり方へ逃げるのでは
+/// なく、その操作を無かったことにするだけ。文書は
+/// 共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は操作の前のまま。前は止まるとアプリが落ち、全部の
+/// タブの保存していない作業が消えた
+fn restore_after_panic(host: &mut impl ActionHost) {
+    let (tab, _, _, toast) = host.parts_mut();
+    tab.session.base_cache = Default::default();
+    restore_state_before_action(tab);
     show_notice(
         toast,
         NoticeKind::Error,
@@ -1026,49 +1037,46 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
         .iter()
         .map(|s| s.to_doc(world).into_owned())
         .collect();
-    write_local(tab, target_lid, |base, scope| {
+    let at = editing_target(tab, target_lid);
+    write_local(tab, &at, |base, scope| {
         base.edit_local(&base.paint_change(&strokes, rule), scope)
     })
 }
 
-/// 地図の編集を、レイヤー `layer_id` の編集中の階層に、触った所だけで書く（1本の道：`LayerBase::edit_local`・
-/// `Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b の 8.）。`f` は、計算に使う写しと
-/// 階層から、道具が作った重ね合わせに渡すもので編集した答えを返す。格子に置けないときは書かずに `Refusal::OffGrid`、正しい
-/// 地図にならなければ書かずに `Refusal::Unwritable` を知らせる
-fn write_local(
+/// 地図の編集を、書く所 `targets`（レイヤー, 階層）のそれぞれに、触った所だけで書く（1本の道：`LayerBase::edit_local`・
+/// `Cel::edit_local`。設計：claude/触った所だけを計算する地図の設計_22fbbbe.md の段2b の 8.）。地図を書く入口はこれ1つ
+/// （道具は今のレイヤーの編集中の階層1つ、グループの変形は選んだグループの階層みな）。`f` は、計算に使う写しと階層から、
+/// 道具が作った重ね合わせに渡すもので編集した答えを返す。書く所を順に書き（同じレイヤーの階層は、そのセル画に順に。階層
+/// ごとの地図は別なので、順に書いても答えは同じ）、後始末は1回（`write_cels`）。格子に置けないときは `Refusal::OffGrid`、
+/// 正しい地図にならなければ `Refusal::Unwritable` を知らせて、そこで止めて `false`（それまでに書いた所は、断った操作を
+/// `apply` が操作の前に戻す：全部か無しか。前はグループの変形だけがこの入口の中身を写した別の道で書き、断った理由を捨て、
+/// 断られたグループだけが黙って動かずに残った：レビュー de92ceb の N-4001。設計：claude/地図を書く入口を1つにする設計_904de4a.md）
+pub(crate) fn write_local(
     tab: &mut Tab,
-    layer_id: LayerId,
-    f: impl FnOnce(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
+    targets: &[(LayerId, Vec<u64>)],
+    f: impl Fn(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
 ) -> bool {
-    use crate::planar_map::LocalRefusal;
-    let scope = tab.session.editing_group_path.clone();
-    let mut refusal = None;
-    let mut held = None;
-    let written = crate::canvas_tool::write_cel(tab, layer_id, |cel| {
-        match cel.edit_local(&scope, |base| f(base, &scope)) {
-            Ok(Some(w)) => {
-                held = w.0;
-                true
-            }
-            Ok(None) => false,
-            Err(r) => {
-                refusal = Some(match r {
-                    LocalRefusal::OffGrid => Refusal::OffGrid,
-                    LocalRefusal::Unwritable => Refusal::Unwritable,
-                });
-                false
+    let mut layer_ids: Vec<LayerId> = Vec::new();
+    for (lid, _) in targets {
+        if !layer_ids.contains(lid) {
+            layer_ids.push(*lid);
+        }
+    }
+    crate::canvas_tool::write_cels(tab, &layer_ids, |lid, cel, held| {
+        let mut changed = false;
+        for (_, scope) in targets.iter().filter(|t| t.0 == lid) {
+            if let Some(w) = cel.edit_local(scope, |base| f(base, scope))? {
+                held.extend(w.0);
+                changed = true;
             }
         }
-    });
-    if let Some(base) = held {
-        tab.session.base_cache.hold(layer_id, base);
-    }
-    let lids: Vec<LayerId> = written.then_some(layer_id).into_iter().collect();
-    crate::canvas_tool::finish_cel_writes(tab, &lids);
-    if refusal.is_some() {
-        tab.session.refusal = refusal;
-    }
-    written
+        Ok(changed)
+    })
+}
+
+/// 今のレイヤー `layer_id` の、編集中の階層（道具が書く所。`write_local` に渡す1つの書く所）
+fn editing_target(tab: &Tab, layer_id: LayerId) -> [(LayerId, Vec<u64>); 1] {
+    [(layer_id, tab.session.editing_group_path.clone())]
 }
 
 /// 点で見えている、いちばん上のもの（`topmost_visible_at`）
@@ -1197,7 +1205,8 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
-    write_local(tab, target_lid, |base, scope| {
+    let at = editing_target(tab, target_lid);
+    write_local(tab, &at, |base, scope| {
         base.fill_local(doc_pt, fill_color, scope)
     })
 }
@@ -1221,7 +1230,8 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
         .collect();
     // 引いた線は、新しい線のラベルを持つ（`line_label`）
     let label = crate::vector_engine::next_shape_id();
-    write_local(tab, target_lid, |base, scope| {
+    let at = editing_target(tab, target_lid);
+    write_local(tab, &at, |base, scope| {
         base.edit_local(&base.line_change(&segs, label), scope)
     })
 }
@@ -1246,7 +1256,8 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
     // 辺に合う距離は、選択ツールと同じ画面の px（文書の座標の長さにする）
     let px = 1.0 / (tab.view.zoom() as f64 * crate::vector_engine::max_scale(to_stage));
     let reach = crate::planar_map::EdgeGrab::SCREEN_PX.scaled(px);
-    write_local(tab, target_lid, |base, scope| {
+    let at = editing_target(tab, target_lid);
+    write_local(tab, &at, |base, scope| {
         base.stroke_local(doc_pt, stroke, reach, scope)
     })
 }
@@ -1321,27 +1332,11 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
         // 選んだグループの中の生の図形は、階層ごとに、セル画の地図に文書の座標の変換をかけて、その座標の格子で正しい地図に
         // し、その地図にする差分を1本の道に渡す（`LayerBase::transformed_local`。図形はその地図の面で、面と線の番号は引き継ぐ。
         // 線の番号は辺にしまってあるので、動かしても変わらず、選択はそのまま）
-        let mut written: Vec<LayerId> = Vec::new();
-        for (layer_id, group_path) in &scopes {
-            let mut held = None;
-            let ok = crate::canvas_tool::write_cel(tab, *layer_id, |cel| {
-                match cel.edit_local(group_path, |base| base.transformed_local(doc, group_path)) {
-                    Ok(Some(w)) => {
-                        held = w.0;
-                        true
-                    }
-                    Ok(None) | Err(_) => false,
-                }
-            });
-            if let Some(base) = held {
-                tab.session.base_cache.hold(*layer_id, base);
-            }
-            if ok && !written.contains(layer_id) {
-                written.push(*layer_id);
-            }
+        // （地図を書く入口 `write_local` の1つ。断ったら、そこで止めて断る：それまでに動かしたものは `apply` が戻す）
+        any_transformed |= write_local(tab, &scopes, |base, scope| base.transformed_local(doc, scope));
+        if tab.session.refusal.is_some() {
+            return false;
         }
-        any_transformed |= !written.is_empty();
-        finish_cel_writes(tab, &written);
         // インスタンスは、結び付けの変換に文書の座標の変換を重ねる（生の図形は、片か、グループの階層の地図で動かした）
         any_transformed |= update_instances(
             tab,
@@ -1349,6 +1344,9 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
             |gid| selection.instances.contains(&gid),
             |b| b.xform = doc * b.xform,
         );
+        if tab.session.refusal.is_some() {
+            return false;
+        }
     }
     any_transformed
 }
@@ -1434,7 +1432,7 @@ fn apply_map_reshape(
 fn apply_map_edit(
     tab: &mut Tab,
     layer_id: LayerId,
-    edit: impl FnOnce(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
+    edit: impl Fn(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
 ) -> bool {
     if !editable_layer_ids(tab).contains(&layer_id) {
         return false;
@@ -1445,7 +1443,8 @@ fn apply_map_edit(
     }
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、write_local が false を返し、apply が Undo の控えを捨てる
     push_undo(tab, None);
-    let changed = write_local(tab, layer_id, edit);
+    let at = editing_target(tab, layer_id);
+    let changed = write_local(tab, &at, edit);
     if changed {
         focus_active_layer_by_id(tab, layer_id);
     }

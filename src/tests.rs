@@ -12315,12 +12315,12 @@ fn test_stage7c_scene_base_cache_and_write_cels() {
         &mut app.tabs[app.active],
         &[layer_bottom_id],
         |_, cel, held| {
-            cel.remove(
+            Ok(cel.remove(
                 &[],
                 &std::collections::HashSet::from([bottom_shape_id]),
                 &std::collections::HashSet::new(),
                 held,
-            )
+            )?)
         },
     );
     assert!(changed);
@@ -21437,6 +21437,50 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選んだまま、ほかのインスタンスに映らない：{}", sibling_bottom(&mut app));
     assert!(apply(&mut app, Action::Deselect));
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
+}
+
+/// グループの変形は、地図を書く入口（`write_local`）の1つを通る：選んだグループが2つのレイヤーにあっても、どちらも動く。
+/// 書く所のどれかが断ったら、そこで止めて知らせる（前はグループの変形だけが入口の中身を写した道で書き、断った理由を捨て、
+/// 断られたグループだけが黙って動かずに残った：レビュー de92ceb の N-4001。止めたあとの戻しは `apply` の
+/// `restore_state_before_action`）
+#[test]
+fn group_transforms_go_through_the_one_map_entry() {
+    use crate::doc_actions::{apply, write_local, Action};
+    use crate::planar_map::{LocalEdit, LocalRefusal};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::AddLayer));
+    let other = app.doc.root.active_layer;
+    put_cel_shapes(&mut app, other, 0, vec![map_overlay::rect_shape(300.0, 100.0, 400.0, 200.0, Color32::BLUE)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    // 2つのレイヤーの絵を、それぞれグループにして、両方を選ぶ
+    for (i, pt) in [Point::new(150.0, 150.0), Point::new(350.0, 150.0)].into_iter().enumerate() {
+        crate::select_ops::apply_click_selection(&mut app, pt, false, true);
+        assert!(apply(&mut app, Action::Group), "グループ {i}");
+    }
+    assert!(apply(&mut app, Action::SelectAll));
+    let scopes = app.session.selected_group_scopes();
+    assert_eq!(scopes.len(), 2, "2つのレイヤーのグループの階層");
+    let at = |app: &Is2dApp, x: f64| app.scene().iter().any(|s| s.contains_point(Point::new(x, 150.0)));
+    // 動かすと、両方のレイヤーのグループが動く
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 300.0) }));
+    assert!(!at(&app, 150.0) && !at(&app, 350.0), "どちらかのグループが動かずに残った");
+    assert!(apply(&mut app, Action::Undo));
+    assert!(at(&app, 150.0) && at(&app, 350.0));
+    // 書く所の1つめが断ったら、そこで止めて知らせる（2つめは書かない）
+    let maps_before: Vec<_> = app.doc.root.layers.iter().map(|l| l.keyframes[0].cel.maps.clone()).collect();
+    let first = scopes[0].1.clone();
+    let tab = &mut app.tabs[app.active];
+    let wrote = write_local(tab, &scopes, |base, scope| {
+        if scope == first.as_slice() {
+            LocalEdit::Refused(LocalRefusal::Unwritable)
+        } else {
+            base.transformed_local(kurbo::Affine::translate((0.0, 300.0)), scope)
+        }
+    });
+    assert!(!wrote);
+    assert_eq!(app.session.refusal, Some(crate::canvas_tool::Refusal::Unwritable), "断ったことを知らせない");
+    assert!(app.doc.root.layers.iter().zip(&maps_before).all(|(l, m)| std::sync::Arc::ptr_eq(&l.keyframes[0].cel.maps, m)), "断ったあとも書き続けた");
 }
 
 /// 足していくだけの列（`GrowingList`）は、ふつうの並びと同じ順・同じ中身で、番号で引ける（塊の境目をまたいでも）
