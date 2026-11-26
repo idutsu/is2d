@@ -21439,6 +21439,85 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
 }
 
+/// 線の番号は辺にしまってあり、線を動かしても変わらない（設計 claude/線の番号を辺にしまう設計_81b715e.md）：動かして確定・
+/// グループにして動かす・取り消し・やり直し・線を引っぱる、のどれのあとも同じ番号。前は番号を線の形から作ったので、動かす
+/// たびに変わり、選び直す所で線が選択から漏れた
+#[test]
+fn line_ids_stay_the_same_when_lines_move() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::from_rgb(20, 40, 90), width: 6 };
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let wave: Vec<Point> = (0..=60).map(|i| Point::new(100.0 + 5.0 * i as f64, 200.0 + 20.0 * (i as f64 * 0.2).sin())).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: wave, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let line_ids = |app: &Is2dApp| -> Vec<u64> {
+        let mut v: Vec<u64> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| s.shape_id).collect();
+        v.sort_unstable();
+        v
+    };
+    let first = line_ids(&app);
+    assert!(first.len() > 1, "線が何本かの辺になっている");
+    // 動かして確定する
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(20.0, 60.0), alt_duplicate: false }));
+    assert_eq!(line_ids(&app), first, "動かしている間に番号が変わった");
+    assert!(apply(&mut app, Action::Deselect));
+    assert_eq!(line_ids(&app), first, "動かして確定したら番号が変わった");
+    // グループにして動かす
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Group));
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(-30.0, 10.0) }));
+    assert_eq!(line_ids(&app), first, "グループにして動かしたら番号が変わった");
+    // 取り消し・やり直し
+    assert!(apply(&mut app, Action::Undo));
+    assert_eq!(line_ids(&app), first, "取り消したら番号が変わった");
+    assert!(apply(&mut app, Action::Redo));
+    assert_eq!(line_ids(&app), first, "やり直したら番号が変わった");
+    // グループを解いて、線の1区間を引っぱる（アンカーを表示して、その区間だけ）
+    assert!(apply(&mut app, Action::Ungroup));
+    assert!(apply(&mut app, Action::Deselect));
+    app.tab_mut().view.show_wireframe = true;
+    let seg = app.scene().iter().find(|s| s.line.is_some()).and_then(|s| s.center_curve()).expect("線");
+    let from = seg.eval(0.5);
+    tool_select::start_reshape_drag(&mut app, from, false, false);
+    tool_select::update_reshape_drag(&mut app, from + KVec2::new(0.0, -12.0));
+    tool_select::finish_reshape_drag(&mut app, None);
+    let after = line_ids(&app);
+    assert_eq!(after.len(), first.len());
+    assert_eq!(after, line_ids(&app));
+    let moved_ids: Vec<u64> = after.iter().filter(|id| !first.contains(id)).copied().collect();
+    assert!(moved_ids.is_empty(), "引っぱった線の番号が変わった：{} 本", moved_ids.len());
+}
+
+/// ほかの線と交わって切られた線の区間は、新しい番号になり（塗りの面が切られたときと同じ）、同じ地図の中で番号は重ならない
+#[test]
+fn crossing_lines_get_new_ids_and_ids_stay_unique() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let line = |a: Point, b: Point| -> Vec<Point> { (0..=30).map(|i| a.lerp(b, i as f64 / 30.0)).collect() };
+    assert!(apply(&mut app, Action::PencilStroke { points: line(Point::new(100.0, 200.0), Point::new(400.0, 200.0)), stroke: ink }));
+    let ids = |app: &Is2dApp| -> Vec<u64> { app.scene().iter().filter(|s| s.line.is_some()).map(|s| s.shape_id).collect() };
+    let horizontal = ids(&app);
+    // 縦の線を、横の線を横切るように引く
+    assert!(apply(&mut app, Action::PencilStroke { points: line(Point::new(250.0, 100.0), Point::new(250.0, 300.0)), stroke: ink }));
+    let mut all = ids(&app);
+    let n = all.len();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), n, "線の番号が重なった");
+    // 横の線のうち、交わった所で切られた区間は新しい番号（切られなかった区間は同じ番号）
+    let crossed = app
+        .scene()
+        .iter()
+        .filter(|s| s.line.is_some())
+        .find(|s| s.center_curve().is_some_and(|q| q.p0.x.min(q.p2.x) <= 250.0 && q.p0.x.max(q.p2.x) >= 250.0 && (q.p0.y - 200.0).abs() < 1.0));
+    let c = crossed.expect("横の線の、交わった所の区間がある");
+    assert!(!horizontal.contains(&c.shape_id), "切られた区間が元の番号のまま");
+}
+
 /// 線の漏れの洗い出し：線と塗りとグループの混ざった絵で、選び方と、新しい中身ができる操作（グループ化・解除・重ね順・
 /// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転・取り消し・やり直し）をでたらめな順に重ね、そのたびに確かめる：
 /// - グループのまとまり：グループの図形は、塗りも線も、みな選ばれているか、みな選ばれていないか
@@ -25265,6 +25344,7 @@ fn test_merge_degree2_does_not_fold_nearly_straight_pair() {
         left_src: None,
         right_src: None,
         stroke: None,
+        line_id: None,
     };
     let mut map = PlanarMap {
         nodes: vec![a, v, b],
@@ -26810,6 +26890,7 @@ mod map_overlay {
             left_src: None,
             right_src: None,
             stroke: None,
+            line_id: None,
         };
         let mut m = PlanarMap {
             nodes: vec![a, v, b, c],
@@ -26863,6 +26944,7 @@ mod map_overlay {
                 left_src: None,
                 right_src: None,
                 stroke: None,
+                line_id: None,
             };
             PlanarMap {
                 nodes: vec![q1.p0, q1.p2, q2.p2, c],
@@ -27010,6 +27092,7 @@ mod map_overlay {
                 left_src: None,
                 right_src: None,
                 stroke: None,
+                line_id: None,
             });
             m.edges.push(crate::planar_map::MapEdge {
                 a,
@@ -27020,6 +27103,7 @@ mod map_overlay {
                 left_src: None,
                 right_src: None,
                 stroke: None,
+                line_id: None,
             });
             m
         };
@@ -32014,6 +32098,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
                 left_src: None,
                 right_src: None,
                 stroke: None,
+                line_id: None,
             })
             .collect();
         PlanarMap { nodes, edges }
@@ -32064,6 +32149,7 @@ fn valid_maps_are_on_the_grid_with_two_colors_per_edge() {
         left_src: None,
         right_src: None,
         stroke: None,
+        line_id: None,
     });
     assert!(!ghost.is_valid());
     // 端の近くの正方形の辺を引っぱり、曲線は格子の内でも制御点が外へ出る確定は断る
@@ -34861,6 +34947,69 @@ fn double_click_needs_both_clicks_at_the_same_place() {
 /// 版 7 の保存用の型（版 8 で、キーフレームの音と音のライブラリを足す前のもの）。計測用の作品を今の版に直すためだけに
 /// 使う（アプリは前の版を開かない）。中身は今の型と同じで、音の項目だけが無い
 /// 版 8 の保存の形（塊の表に線の並びが無い）。版 9 との違いは塊の表だけなので、塊の表だけを版 8 の形で読み、線の無い塊の表にする
+mod format_v9 {
+    use crate::project_io::ProjectDocument;
+    use crate::stored_map::{SavedStroke, SavedTile};
+    use crate::tests::SavedTiles;
+    use serde::Deserialize;
+
+    #[derive(Default, Deserialize)]
+    pub(super) struct Tiles {
+        colors: Vec<[u8; 4]>,
+        tiles: Vec<SavedTile>,
+        strokes: Vec<Stroke>,
+    }
+
+    /// 版 9 の線（番号が無い）
+    #[derive(Deserialize)]
+    struct Stroke {
+        tile: u32,
+        edge: u32,
+        color: u32,
+        width: u8,
+    }
+
+    /// 版 9 の文書を、今の版の保存用の型にする（線に、文書の中で重ならない新しい印を振る：側の図形の印のいちばん大きいものの
+    /// 次から）
+    pub(super) fn current(v9: ProjectDocument<Tiles>) -> ProjectDocument<SavedTiles> {
+        let last = v9
+            .map_tiles
+            .tiles
+            .iter()
+            .flat_map(|t| t.edges.iter().map(|e| e.left_src.max(e.right_src)))
+            .max()
+            .unwrap_or(0);
+        let strokes = v9
+            .map_tiles
+            .strokes
+            .iter()
+            .enumerate()
+            .map(|(k, s)| SavedStroke {
+                tile: s.tile,
+                edge: s.edge,
+                color: s.color,
+                width: s.width,
+                id: last + k as u64 + 1,
+            })
+            .collect();
+        ProjectDocument {
+            stage_size: v9.stage_size,
+            timeline: v9.timeline,
+            library: v9.library,
+            next_symbol_id: v9.next_symbol_id,
+            next_group_id: v9.next_group_id,
+            recovery_source: v9.recovery_source,
+            map_tiles: SavedTiles {
+                colors: v9.map_tiles.colors,
+                tiles: v9.map_tiles.tiles,
+                strokes,
+            },
+            sounds: v9.sounds,
+            next_sound_id: v9.next_sound_id,
+        }
+    }
+}
+
 mod format_v8 {
     use crate::project_io::ProjectDocument;
     use crate::stored_map::{SavedEdge, SavedTile};
@@ -35119,12 +35268,16 @@ fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
-            "直せるのは、版 5 の JSON と版 6・版 7・版 8 のファイルだけ"
+            "直せるのは、版 5 の JSON と版 6〜版 9 のファイルだけ"
         );
         (
             serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
             5,
         )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 9u32.to_le_bytes() {
+        let v9: project_io::ProjectDocument<format_v9::Tiles> =
+            postcard::from_bytes(&bytes[20..]).expect("版 9 の中身として読めること");
+        return Some((format_v9::current(v9), 9));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 8u32.to_le_bytes() {
         let v8: project_io::ProjectDocument<format_v8::Tiles> =
             postcard::from_bytes(&bytes[20..]).expect("版 8 の中身として読めること");
@@ -35169,6 +35322,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
                     left_src: None,
                     right_src: None,
                     stroke: None,
+                    line_id: None,
                 })
                 .collect(),
         };
@@ -35266,7 +35420,7 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 計測用の作品のファイルを、その場で今の版に直す（ゼロベースレビューの前に `claude/review-bench/A.is2d`・`B.is2d` を
-/// 直すため）。直すのは前の版（版 5 の JSON・版 6・版 7・版 8）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
+/// 直すため）。直すのは前の版（版 5 の JSON・版 6〜版 9）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
 /// として残す。今の版のファイルは、開けることを確かめるだけで変えない（何度流してもよい）
 ///
 /// 実行：`IS2D_CONVERT=作品のパス,作品のパス cargo test --release convert_work_files_to_current_format -- --ignored --nocapture`
@@ -37655,6 +37809,7 @@ fn local_edge_rules_match_full_check() {
                 left_src: None,
                 right_src: None,
                 stroke: None,
+                line_id: None,
             };
             let (ra, rb) = (at(a, &mut result), at(b, &mut result));
             result.edges.push(edge(ra, rb));

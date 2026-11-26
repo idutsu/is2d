@@ -78,6 +78,9 @@ pub(crate) struct MapEdge {
     pub(crate) left_src: Option<ShapeId>,
     pub(crate) right_src: Option<ShapeId>,
     pub(crate) stroke: Option<EdgeStroke>,
+    /// 線の番号（線のある辺だけ：`line_id_of`）。番号を引き継ぐ辺（動かした・そのまま残った辺）は持ったまま運び、新しく
+    /// できた線の辺（引いた・切られた・まとめた辺）は `None` で運んで、しまうときに形から振る（`tile_edge`・`edge_line_id`）
+    pub(crate) line_id: Option<ShapeId>,
 }
 
 /// 辺を残すか（辺を残す決まりはこれ1つ）：左右の色が違うか、線が付いている（設計：claude/線の設計_68a596e.md の 6.2 の (a)）
@@ -270,6 +273,7 @@ impl PlanarMap {
                 left_src: l.1,
                 right_src: r.1,
                 stroke,
+                line_id: stroke.and(e.line_id),
             });
         }
         PlanarMap { nodes, edges }
@@ -363,6 +367,7 @@ impl PlanarMap {
                 left_src: Some(s.src),
                 right_src,
                 stroke: None,
+                line_id: None,
             });
         }
         Self { nodes, edges }
@@ -402,6 +407,21 @@ impl PlanarMap {
         self.check()
     }
 
+    /// 線の番号の決まり：番号は線のある辺だけが持ち、しまうときの番号（`edge_line_id`）が、同じ地図の中で重ならない（線の
+    /// 図形は番号で引くので、重なると選ぶ・外す線を取り違える）
+    fn line_ids_ok(&self) -> bool {
+        if self.edges.iter().any(|e| e.line_id.is_some() && e.stroke.is_none()) {
+            return false;
+        }
+        let mut ids: Vec<ShapeId> = self
+            .edges
+            .iter()
+            .filter_map(|e| line_id_of(&tile_edge(self, e)))
+            .collect();
+        ids.sort_unstable();
+        ids.windows(2).all(|w| w[0] != w[1])
+    }
+
     /// 正しい地図かの判定（`checked`・`valid_faces`）。正しい地図なら、その面
     fn check(&self) -> Option<Vec<MapFace>> {
         self.check_with(|| self.polys(), |polys| self.face_cycles_with(polys))
@@ -419,6 +439,9 @@ impl PlanarMap {
         // 頂点と制御点が格子に置ける（±65,536px の内で有限：`fits_grid`）こと、両側が同じ色の辺が無いことを先に確かめる
         // （格子の外の座標で、判定の形を作らない）
         if !self.fits_grid(Affine::IDENTITY) || self.edges.iter().any(|e| !e.needed()) {
+            return None;
+        }
+        if !self.line_ids_ok() {
             return None;
         }
         let polys = polys();
@@ -963,6 +986,8 @@ impl PlanarMap {
                 a: e1.a,
                 b: e2.b,
                 ctrl: q.p1,
+                // まとめた辺は新しい線（番号はしまうときに振る：`edge_line_id`）
+                line_id: None,
                 ..e1
             };
             alive[j] = false;
@@ -1024,7 +1049,7 @@ fn cycles_shape(
 }
 
 /// 線の番号の印：線の番号はこの桁が立った数（面の番号は 1 から順に振るので、この桁には届かず、ぶつからない）
-const LINE_ID_BIT: ShapeId = 1 << 63;
+pub(crate) const LINE_ID_BIT: ShapeId = 1 << 63;
 
 /// 番号 `id` が線の番号か（`line_id`）
 pub(crate) fn is_line_id(id: ShapeId) -> bool {
@@ -1035,20 +1060,35 @@ pub(crate) fn is_line_id(id: ShapeId) -> bool {
 /// 6.4）の線の図形を、番号（`line_id_of`）の順に並べたもの（面の表と同じ入れ物。変わった所のかかる塊だけを作り直す）
 pub(crate) type LineTable = crate::chunked_list::ChunkedList<FillShape>;
 
-/// 辺 `te` の線の図形の番号（線の無い辺は `None`）：辺の形（決まった向きの両端と制御点のビット）、線、辺の側の番号（面の
-/// 番号と線のラベル：`line_label`。決まった向きにそろえる）から決める（形・線・番号がみな同じ間だけ同じ番号なので、形が
-/// 少しでも変われば別の番号になり、図形を作り直す。番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつから
-/// ない。線の番号の印 `LINE_ID_BIT` を立てる）。辺1本から決まるので、ほかの辺を見ずに引ける
+/// 辺 `te` の線の図形の番号（線の無い辺は `None`）：辺にしまった番号（設計 claude/線の番号を辺にしまう設計_81b715e.md）。
+/// 番号は、線を動かしても変わらない（形から計算しない）。辺1本から決まるので、ほかの辺を見ずに引ける
 pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
+    te.line_id
+}
+
+/// しまう辺の線の番号（番号の決まりはこれ1つ）：線の無い辺は `None`。番号を引き継ぐ辺（`line_id` が `Some`）はその番号。
+/// 新しくできた線の辺（`None`）は、形（決まった向きの両端と制御点のビット）・線・辺の側の番号（面の番号と線のラベル：
+/// `line_label`。決まった向きにそろえる）から振る（決まった計算なので、窓で重ねた答えとお手本の地図全体で重ねた答えが同じ
+/// 番号になる。側の番号を入れるので、同じ形の線がほかのレイヤーに写してあっても、ぶつからない。線の番号の印
+/// `LINE_ID_BIT` を立てる）
+pub(crate) fn edge_line_id(
+    (a, b, ctrl): (Point, Point, Point),
+    (left_src, right_src): (Option<ShapeId>, Option<ShapeId>),
+    stroke: Option<EdgeStroke>,
+    line_id: Option<ShapeId>,
+) -> Option<ShapeId> {
     use std::hash::{Hash, Hasher};
-    let stroke = te.stroke?;
-    let (a, b, srcs) = if point_order(te.a, te.b).is_le() {
-        (te.a, te.b, [te.left_src, te.right_src])
+    let stroke = stroke?;
+    if line_id.is_some() {
+        return line_id;
+    }
+    let (a, b, srcs) = if point_order(a, b).is_le() {
+        (a, b, [left_src, right_src])
     } else {
-        (te.b, te.a, [te.right_src, te.left_src])
+        (b, a, [right_src, left_src])
     };
     let mut h = IntHasher::default();
-    [a.x, a.y, b.x, b.y, te.ctrl.x, te.ctrl.y].map(f64::to_bits).hash(&mut h);
+    [a.x, a.y, b.x, b.y, ctrl.x, ctrl.y].map(f64::to_bits).hash(&mut h);
     stroke.hash(&mut h);
     srcs.hash(&mut h);
     Some(LINE_ID_BIT | (h.finish() >> 1))
@@ -1069,15 +1109,17 @@ pub(crate) fn shape_ids_of(stored: &StoredMap) -> impl Iterator<Item = ShapeId> 
 
 /// 地図 `m` の辺 `ed` を、塊から引いた辺の形にする（線の番号 `line_id_of` を引く・差分を当てる・しまう辺にする）
 pub(crate) fn tile_edge(m: &PlanarMap, ed: &MapEdge) -> crate::stored_map::TileEdge {
+    let (a, b) = (m.nodes[ed.a], m.nodes[ed.b]);
     crate::stored_map::TileEdge {
-        a: m.nodes[ed.a],
-        b: m.nodes[ed.b],
+        a,
+        b,
         ctrl: ed.ctrl,
         left: ed.left,
         right: ed.right,
         left_src: ed.left_src,
         right_src: ed.right_src,
         stroke: ed.stroke,
+        line_id: edge_line_id((a, b, ed.ctrl), (ed.left_src, ed.right_src), ed.stroke, ed.line_id),
     }
 }
 
@@ -2025,6 +2067,7 @@ impl LayerBase {
                 left_src: te.left_src,
                 right_src: te.right_src,
                 stroke: te.stroke,
+                line_id: te.line_id,
             });
         }
         let added: Vec<usize> = (0..m.edges.len()).collect();
@@ -2380,6 +2423,35 @@ impl LayerBase {
                 .same_content(&f.stored)
     }
 
+    /// 線の番号の決まり（地図全体の判定 `line_ids_ok` と同じ決まり）を、触った所だけで確かめる：足す辺の番号が、足す辺どうしで
+    /// 重ならず、消さずに残る辺の番号とも重ならない（残る辺の番号は、線の図形の表 `lines` で引く。手間は足す辺の分）
+    fn added_line_ids_ok(
+        &self,
+        result: &PlanarMap,
+        removed: &[usize],
+        added: &[usize],
+        group_path: &[u64],
+    ) -> bool {
+        let mut ids: Vec<ShapeId> = Vec::new();
+        for &i in added {
+            let ed = &result.edges[i];
+            if ed.line_id.is_some() && ed.stroke.is_none() {
+                return false;
+            }
+            ids.extend(line_id_of(&tile_edge(result, ed)));
+        }
+        if ids.is_empty() {
+            return true;
+        }
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return false;
+        }
+        let gone: HashSet<usize> = removed.iter().copied().collect();
+        ids.iter()
+            .all(|&id| self.line_edge(id, group_path).is_none_or(|e| gone.contains(&e)))
+    }
+
     fn apply_diff_inner(
         &self,
         result: &PlanarMap,
@@ -2392,7 +2464,7 @@ impl LayerBase {
         }
         let ix = self.map_index();
         let local = LocalMap::new(ix, result, removed, added);
-        if !local.added_edges_ok() {
+        if !local.added_edges_ok() || !self.added_line_ids_ok(result, removed, added, group_path) {
             return LocalEdit::Refused(LocalRefusal::Unwritable);
         }
         let mut memo = CycleMemo::default();
@@ -2592,6 +2664,7 @@ impl LayerBase {
                 left_src: l.1,
                 right_src: r.1,
                 stroke,
+                line_id: stroke.and(te.line_id),
             });
         }
         m
@@ -2653,6 +2726,7 @@ impl LayerBase {
                             left_src: l.1,
                             right_src: r.1,
                             stroke,
+                            line_id: stroke.and(te.line_id),
                             ..te
                         })
                     })
@@ -3306,14 +3380,17 @@ impl PlanarMap {
         let q = m.quad(e);
         m.nodes.push(q.eval(t));
         let v = m.nodes.len() - 1;
+        // 分けた2本は新しい線（番号はしまうときに振る：`edge_line_id`）
         m.edges[e] = MapEdge {
             b: v,
             ctrl: q.subsegment(0.0..t).p1,
+            line_id: None,
             ..ed
         };
         m.edges.push(MapEdge {
             a: v,
             ctrl: q.subsegment(t..1.0).p1,
+            line_id: None,
             ..ed
         });
         // 判定の形で、つながりが変わらないこと（分けた2本の折れ線は、元の折れ線と少し違う）
@@ -3358,6 +3435,8 @@ impl PlanarMap {
             a: e1.a,
             b: e2.b,
             ctrl: pa.midpoint(pb),
+            // つないだ1本は新しい線（番号はしまうときに振る：`edge_line_id`）
+            line_id: None,
             ..e1
         };
         // 2本を直線に置き換えても、判定の形でつながりが変わらないこと（設計 2-4 の3つの決まり。囲まれた所に何も無く、
@@ -3816,6 +3895,9 @@ impl CheckedMap {
                 if ed.right.is_none() {
                     renew(&mut ed.right_src);
                 }
+                // 線の番号も、みな新しい番号にする（塗りの番号と同じく、新しく取る。形から振ると、線のラベルの無い線を同じ
+                // 位置のまま写した片（位置は片の変換で持つ）が、元の線と同じ番号になる）
+                ed.line_id = ed.stroke.map(|_| LINE_ID_BIT | crate::vector_engine::next_shape_id());
             }
         }
         c

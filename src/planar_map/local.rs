@@ -137,6 +137,7 @@ impl<'a> LocalMap<'a> {
                     left_src: te.left_src,
                     right_src: te.right_src,
                     stroke: te.stroke,
+                    line_id: te.line_id,
                 }
             }
         }
@@ -1173,6 +1174,7 @@ impl LocalMap<'_> {
                 left_src: l,
                 right_src: r,
                 stroke: ed.stroke,
+                line_id: super::edge_line_id((q.p0, q.p2, q.p1), (l, r), ed.stroke, ed.line_id),
             });
         }
         (changed_base, add)

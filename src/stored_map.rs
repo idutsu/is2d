@@ -41,6 +41,8 @@ struct StoredEdge {
     left_src: Option<NonZeroU64>,
     right_src: Option<NonZeroU64>,
     stroke: Option<EdgeStroke>,
+    /// 線の番号（線のある辺だけ：`planar_map::line_id_of`）
+    line_id: Option<NonZeroU64>,
 }
 
 impl StoredEdge {
@@ -57,6 +59,7 @@ impl StoredEdge {
                 left_src: src(te.left_src),
                 right_src: src(te.right_src),
                 stroke: te.stroke,
+                line_id: src(te.line_id),
             }
         } else {
             Self {
@@ -68,6 +71,7 @@ impl StoredEdge {
                 left_src: src(te.right_src),
                 right_src: src(te.left_src),
                 stroke: te.stroke,
+                line_id: src(te.line_id),
             }
         }
     }
@@ -83,6 +87,7 @@ impl StoredEdge {
             left_src: self.left_src.map(NonZeroU64::get),
             right_src: self.right_src.map(NonZeroU64::get),
             stroke: self.stroke,
+            line_id: self.line_id.map(NonZeroU64::get),
         }
     }
 
@@ -97,6 +102,7 @@ impl StoredEdge {
             left_src: self.left_src.map(NonZeroU64::get),
             right_src: self.right_src.map(NonZeroU64::get),
             stroke: self.stroke,
+            line_id: self.line_id.map(NonZeroU64::get),
         }
     }
 
@@ -148,6 +154,7 @@ impl std::hash::Hash for StoredEdge {
         self.left_src.hash(h);
         self.right_src.hash(h);
         self.stroke.hash(h);
+        self.line_id.hash(h);
     }
 }
 
@@ -162,6 +169,8 @@ pub(crate) struct TileEdge {
     pub(crate) left_src: Option<ShapeId>,
     pub(crate) right_src: Option<ShapeId>,
     pub(crate) stroke: Option<EdgeStroke>,
+    /// 線の番号（線のある辺だけ。しまった番号：`planar_map::line_id_of`）
+    pub(crate) line_id: Option<ShapeId>,
 }
 
 impl TileEdge {
@@ -512,6 +521,7 @@ impl StoredMap {
             left_src: None,
             right_src: None,
             stroke: None,
+            line_id: None,
         };
         let k = self
             .0
@@ -1003,6 +1013,8 @@ pub(crate) struct SavedStroke {
     pub(crate) edge: u32,
     pub(crate) color: u32,
     pub(crate) width: u8,
+    /// 線の番号の印（版 10 から。側の図形の印と同じ、文書の中の 1 からの通し番号。読むときに新しい線の番号に替える）
+    pub(crate) id: u64,
 }
 
 /// しまう辺の保存の形：両端（塊の点の番号）、制御点の座標、左右の色（文書の色の表の 1 からの番号。0 は何も無い）、左右の
@@ -1063,12 +1075,15 @@ impl WriteTiles {
                         let next = self.labels.len() as u64 + 1;
                         self.labels.entry(id.get()).or_insert(next);
                     }
-                    if let Some(st) = e.stroke {
+                    if let (Some(st), Some(line_id)) = (e.stroke, e.line_id) {
+                        let next = self.labels.len() as u64 + 1;
+                        let id = *self.labels.entry(line_id.get()).or_insert(next);
                         self.strokes.push(SavedStroke {
                             tile: i,
                             edge: ei as u32,
                             color: self.color_no[&st.color.to_array()],
                             width: st.width,
+                            id,
                         });
                     }
                 }
@@ -1175,6 +1190,7 @@ impl ReadTiles {
                 left_src: NonZeroU64::new(e.left_src),
                 right_src: NonZeroU64::new(e.right_src),
                 stroke: None,
+                line_id: None,
             })
         };
         // 塊の辺の並びは、ちょうどの大きさで1回だけ取る
@@ -1206,8 +1222,14 @@ impl ReadTiles {
                 .tiles
                 .get_mut(s.tile as usize)
                 .and_then(|t| t.get_mut(s.edge as usize));
-            match (edge, stroke) {
-                (Some(e), Some(stroke)) if e.stroke.is_none() => e.stroke = Some(stroke),
+            // 線の番号の印も、側の図形の印と同じく数える（新しい番号に替えるのは `TileReader::new`）
+            self.sides += 1;
+            self.labels = self.labels.max(s.id);
+            match (edge, stroke, NonZeroU64::new(s.id)) {
+                (Some(e), Some(stroke), Some(id)) if e.stroke.is_none() => {
+                    e.stroke = Some(stroke);
+                    e.line_id = Some(id);
+                }
                 _ => {
                     self.broken = true;
                     return;
@@ -1298,6 +1320,8 @@ impl TileReader {
                 for e in edges.iter_mut() {
                     e.left_src = label(e.left_src);
                     e.right_src = label(e.right_src);
+                    e.line_id = label(e.line_id)
+                        .and_then(|id| NonZeroU64::new(id.get() | crate::planar_map::LINE_ID_BIT));
                 }
                 TileData::new(edges)
             })

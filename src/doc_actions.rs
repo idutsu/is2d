@@ -1289,20 +1289,10 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
     }
     if !target_lids.is_empty() {
         // 選んだグループの中の生の図形は、階層ごとに、セル画の地図に文書の座標の変換をかけて、その座標の格子で正しい地図に
-        // し、その地図にする差分を1本の道に渡す（`LayerBase::transformed_local`。図形はその地図の面で、番号は引き継ぐ）。
-        // 線の番号は線の形から決まる（`line_id_of`）ので、動かすと変わる。グループは中身がみな選ばれているので、動かした
-        // 階層の線は、前の番号を選択から外し、新しい番号を選ぶ
-        let scope_lines = |tab: &Tab, layer_id: LayerId, group_path: &[u64]| -> Vec<crate::vector_engine::ShapeId> {
-            tab.session.base_cache.cel(layer_id).map_or_else(Vec::new, |cel| {
-                cel.scope_base(group_path).lines(group_path).iter().map(|s| s.shape_id).collect()
-            })
-        };
+        // し、その地図にする差分を1本の道に渡す（`LayerBase::transformed_local`。図形はその地図の面で、面と線の番号は引き継ぐ。
+        // 線の番号は辺にしまってあるので、動かしても変わらず、選択はそのまま）
         let mut written: Vec<LayerId> = Vec::new();
-        let mut moved_scopes: Vec<(LayerId, &Vec<u64>)> = Vec::new();
         for (layer_id, group_path) in &scopes {
-            for id in scope_lines(tab, *layer_id, group_path) {
-                tab.session.selection.shapes.remove(&id);
-            }
             let mut held = None;
             let ok = crate::canvas_tool::write_cel(tab, *layer_id, |cel| {
                 match cel.edit_local(group_path, |base| base.transformed_local(doc, group_path)) {
@@ -1319,14 +1309,9 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
             if ok && !written.contains(layer_id) {
                 written.push(*layer_id);
             }
-            moved_scopes.push((*layer_id, group_path));
         }
         any_transformed |= !written.is_empty();
         finish_cel_writes(tab, &written);
-        for (layer_id, group_path) in moved_scopes {
-            let ids = scope_lines(tab, layer_id, group_path);
-            tab.session.selection.shapes.extend(ids);
-        }
         // インスタンスは、結び付けの変換に文書の座標の変換を重ねる（生の図形は、片か、グループの階層の地図で動かした）
         any_transformed |= update_instances(
             tab,

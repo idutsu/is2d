@@ -1993,6 +1993,14 @@ impl PlanarMap {
                     );
                     inner_cols.insert(e, (l.0, r.0));
                     if edge_needed(l.0, r.0, stroke) {
+                        // 線の番号：上に置いた重ねる地図の辺の線ならその番号、前からある辺の線のままならその番号
+                        let line_id = if stroke.is_some() && stroke == fd.stroke {
+                            fd.line_id
+                        } else if stroke.is_some() && stroke == ed.stroke {
+                            ed.line_id
+                        } else {
+                            None
+                        };
                         interior_kept.push(MapEdge {
                             a: node_at(ed.a),
                             b: node_at(ed.b),
@@ -2001,6 +2009,7 @@ impl PlanarMap {
                             left_src: l.1,
                             right_src: r.1,
                             stroke,
+                            line_id,
                             ..ed
                         });
                     } else {
@@ -2243,6 +2252,24 @@ impl PlanarMap {
                         }
                     }
                 }
+                // 線の番号を引き継ぐか（設計 claude/線の番号を辺にしまう設計_81b715e.md の 3.2）：出どころの線の辺を丸ごと覆い、
+                // 線もその辺の線のまま（ほかの線と交わって切られた・線が変わった区間は新しい線）。輪郭の変形で動かした辺は、
+                // 動かした後の曲線が出どころで、番号は動かした辺のもの（動かす前の曲線の区間は線を持たない）
+                let line_src = match srcs[s_src as usize].1 {
+                    OverlaySrc::Old(e) if !moved[e] => Some(e),
+                    OverlaySrc::Old(_) => None,
+                    OverlaySrc::New(i) => match input {
+                        MapInput::Map(_) => Some(n_old + i),
+                        MapInput::Sweep(m) => Some(m[i].0),
+                        _ => None,
+                    },
+                };
+                let covers_whole = t0.min(t1) == 0.0 && t0.max(t1) == 1.0 && n0 != n1;
+                let line_id = line_src
+                    .filter(|_| covers_whole)
+                    .map(|e| self.edges[e])
+                    .filter(|ed| ed.stroke.is_some() && ed.stroke == stroke)
+                    .and_then(|ed| ed.line_id);
                 chains.push(Chain {
                     steps,
                     left: sl,
@@ -2251,6 +2278,7 @@ impl PlanarMap {
                     curve: srcs[s_src as usize].0,
                     whole,
                     whole_poly,
+                    line_id,
                 });
             }
             // 7. 区間をすべて直線の辺にした地図（いつも正しい）から始めて、鎖ごとに曲線へ置き換える
@@ -2279,6 +2307,8 @@ impl PlanarMap {
                                 left_src: c.left.1,
                                 right_src: c.right.1,
                                 stroke: c.stroke,
+                                // 切った区間の続き（曲線に戻すまでの仮の辺）は、新しい線（番号はしまうときに振る）
+                                line_id: None,
                             });
                             edges.len() - 1
                         })
@@ -2420,6 +2450,7 @@ pub(super) fn tile_window(ix: MapIndex<'_>, edges: &[usize]) -> (PlanarMap, Vec<
             left_src: te.left_src,
             right_src: te.right_src,
             stroke: te.stroke,
+            line_id: te.line_id,
         });
         polys.push(Arc::clone(ix.poly(e)));
     }
@@ -3137,6 +3168,9 @@ pub(super) struct Chain {
     whole: Option<Point>,
     /// 丸ごと残った辺が、同じ向き・同じ端のまま（曲線がビットまで同じ）で、計算に使う写しがその判定の形を持つとき：その形
     whole_poly: Option<Poly>,
+    /// 線の番号を引き継ぐとき：その番号（鎖が、出どころの線の辺（前からある辺・重ねる地図の辺・輪郭の変形で動かした辺）を
+    /// 丸ごと覆い、線もその辺の線のまま。曲線に戻した辺が持つ。戻せずに直線の区間のまま残れば、新しい線）
+    line_id: Option<ShapeId>,
 }
 
 /// 置き換え終わった地図と、その判定の形の索引・辺の番号 → 索引の番号（作らなかったら `None`）と、索引でほかの辺を調べた所
@@ -3269,6 +3303,9 @@ impl ChainRestorer {
             left_src: c.left.1,
             right_src: c.right.1,
             stroke: c.stroke,
+            // 切った区間を曲線に戻した辺：出どころの線の辺を丸ごと覆えば、その番号を引き継ぐ（`Chain::line_id`）。ほかは
+            // 新しい線（番号はしまうときに振る）
+            line_id: c.line_id,
         });
         self.alive.push(true);
         if let Some(index) = self.index.as_mut() {
