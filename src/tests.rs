@@ -21439,6 +21439,47 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
 }
 
+/// コマを別のレイヤーへ写しても、線の番号は写した元と重ならない（番号を付け替える `StoredMap::relabeled` が、線の番号も新しく
+/// する）。前は線の番号を付け替えずに写したので、片方のレイヤーで線を選んで消すと、もう片方のレイヤーの同じ番号の線も
+/// 消えた（レビュー de92ceb の N-1001。作品が消える）
+#[test]
+fn copying_frames_to_another_layer_gives_lines_new_ids() {
+    use crate::doc_actions::{apply, Action};
+    use crate::timeline::TimelineCellSelection;
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let mut app = Is2dApp::default();
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let wave: Vec<Point> = (0..=40).map(|i| Point::new(100.0 + 6.0 * i as f64, 200.0 + 15.0 * (i as f64 * 0.3).sin())).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: wave, stroke: ink }));
+    assert!(apply(&mut app, Action::AddLayer));
+    let has_lines = |app: &Is2dApp, i: usize| app.doc.root.layers[i].keyframes.first().is_some_and(|k| !k.cel.maps.is_empty());
+    let src = (0..app.doc.root.layers.len()).find(|&i| has_lines(&app, i)).expect("線のあるレイヤー");
+    let dst = (0..app.doc.root.layers.len()).find(|&i| i != src).expect("もう1つのレイヤー");
+    assert!(apply(&mut app, Action::MoveOrCopyFrames {
+        sel: TimelineCellSelection::single(src, 0),
+        layer_delta: dst as isize - src as isize,
+        frame_delta: 0,
+        copy_mode: true,
+    }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    let lines: Vec<(u64, u64)> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| (s.layer_id, s.shape_id)).collect();
+    let n = lines.len();
+    assert!(n >= 2, "2つのレイヤーに線がある");
+    let mut ids: Vec<u64> = lines.iter().map(|l| l.1).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "写したレイヤーの線が、元の線と同じ番号");
+    // 片方のレイヤーの線を1本選んで消しても、もう片方のレイヤーの線は消えない
+    // 写したコマの中身は選ばれた状態なので、選び直してから1本だけ選ぶ
+    let (layer, id) = lines[0];
+    let other_before = lines.iter().filter(|l| l.0 != layer).count();
+    assert!(apply(&mut app, Action::Deselect));
+    app.session.selection.shapes.insert(id);
+    assert!(apply(&mut app, Action::DeleteSelection));
+    let other_after = app.scene().iter().filter(|s| s.line.is_some() && s.layer_id != layer).count();
+    assert_eq!(other_after, other_before, "もう片方のレイヤーの線まで消えた");
+}
+
 /// 線の番号は辺にしまってあり、線を動かしても変わらない（設計 claude/線の番号を辺にしまう設計_81b715e.md）：動かして確定・
 /// グループにして動かす・取り消し・やり直し・線を引っぱる、のどれのあとも同じ番号。前は番号を線の形から作ったので、動かす
 /// たびに変わり、選び直す所で線が選択から漏れた

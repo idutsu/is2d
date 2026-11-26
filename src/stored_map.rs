@@ -688,9 +688,11 @@ impl StoredMap {
         }))
     }
 
-    /// 側の図形の番号を `renew` で替えた地図（番号の無い側は無いまま）。形と色は変えず、辺の並びも同じなので、正しい地図は
-    /// 正しいまま（確かめ直さない）。番号の無い塊は、この地図と共有する。番号のある塊は、作り直した塊の控え `done`（同じ
-    /// `renew` で替える間だけ使い回す）にあればそれを使う
+    /// 図形の番号（側の図形の番号と、線の番号）を `renew` で替えた地図（番号の無い側・線の無い辺は無いまま。線の番号は、
+    /// 替えた番号に線の番号の印 `LINE_ID_BIT` を立てる）。形と色は変えず、辺の並びも同じなので、正しい地図は正しいまま
+    /// （確かめ直さない）。番号の無い塊は、この地図と共有する。番号のある塊は、作り直した塊の控え `done`（同じ `renew` で
+    /// 替える間だけ使い回す）にあればそれを使う。前は線の番号を替えなかったので、別のレイヤーへ写したコマの線が元の線と
+    /// 同じ番号になり、片方で線を消すと、もう片方の線も消えた（レビュー de92ceb の N-1001）
     pub(crate) fn relabeled(
         &self,
         mut renew: impl FnMut(ShapeId) -> ShapeId,
@@ -704,7 +706,7 @@ impl StoredMap {
             .iter()
             .map(|t| {
                 if t.iter()
-                    .all(|e| e.left_src.is_none() && e.right_src.is_none())
+                    .all(|e| e.left_src.is_none() && e.right_src.is_none() && e.line_id.is_none())
                 {
                     return t.clone();
                 }
@@ -716,6 +718,9 @@ impl StoredMap {
                         .map(|e| StoredEdge {
                             left_src: new_src(e.left_src),
                             right_src: new_src(e.right_src),
+                            line_id: new_src(e.line_id).and_then(|id| {
+                                NonZeroU64::new(id.get() | crate::planar_map::LINE_ID_BIT)
+                            }),
                             ..*e
                         })
                         .collect();
