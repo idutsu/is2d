@@ -1,5 +1,6 @@
 use super::*;
 use crate::canvas_tool::HoverTarget;
+use crate::select_ops::ArrangeMode;
 use kurbo::{Affine, ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
 use vector_engine::{left_normal, normalize_vec};
 
@@ -7249,41 +7250,34 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
 /// 何になっても（来なくても）、位置が同じなら同じ答え。US・JIS の `+` の刻印の位置はどちらも `+`
 #[test]
 fn plus_minus_keys_are_decided_by_key_position() {
-    use super::{plus_minus_pressed, PlusMinus};
-    use eframe::egui::{self, Key};
-    let event = |key: Key, at: Option<Key>, pressed: bool, repeat: bool| egui::Event::Key {
-        key,
-        physical_key: at,
-        pressed,
-        repeat,
-        modifiers: egui::Modifiers::NONE,
+    use crate::panels::{UiAction, ZoomStep};
+    use eframe::egui::Key;
+    // `Cmd` と論理キー `key`・位置 `at` のキーを押したとき、表（`menu::COMMANDS`）で決まるズーム
+    let zoom = |key: Key, at: Option<Key>, shift: bool| {
+        let pressed = menu::Pressed { key, position: at, command: true, shift };
+        menu::command_for_key(pressed, false).and_then(|i| match menu::COMMANDS[i].action {
+            UiAction::Zoom(z) => Some(z),
+            _ => None,
+        })
     };
-    // 論理キー `key`・位置 `at` のキーを1回押したときの答え
-    let once = |key: Key, at: Option<Key>| plus_minus_pressed(&[event(key, at, true, false)]);
-    let (plus, minus) = (Some(PlusMinus::Plus), Some(PlusMinus::Minus));
+    let (plus, minus) = (Some(ZoomStep::In), Some(ZoomStep::Out));
     // US の `=`／`+` のキー（Shift の有無で論理キーが変わっても同じ）
-    assert_eq!(once(Key::Equals, Some(Key::Equals)), plus);
-    assert_eq!(once(Key::Plus, Some(Key::Equals)), plus);
+    assert_eq!(zoom(Key::Equals, Some(Key::Equals), false), plus);
+    assert_eq!(zoom(Key::Plus, Some(Key::Equals), true), plus);
     // JIS の `;`／`+` のキー（論理キーは `;`・`+`）
-    assert_eq!(once(Key::Semicolon, Some(Key::Semicolon)), plus);
-    assert_eq!(once(Key::Plus, Some(Key::Semicolon)), plus);
+    assert_eq!(zoom(Key::Semicolon, Some(Key::Semicolon), false), plus);
+    assert_eq!(zoom(Key::Plus, Some(Key::Semicolon), true), plus);
     // テンキーの `+`（テンキーの `-` は `-` のキーと同じ位置の名前で来る）
-    assert_eq!(once(Key::Plus, Some(Key::Plus)), plus);
+    assert_eq!(zoom(Key::Plus, Some(Key::Plus), false), plus);
     // `-` のキー（日本語入力で論理キーが来ないときは、egui-winit が位置の名前を論理キーにする）
-    assert_eq!(once(Key::Minus, Some(Key::Minus)), minus);
+    assert_eq!(zoom(Key::Minus, Some(Key::Minus), false), minus);
     // 論理キーが `+`・`-` でも、位置が違えば `+`／`-` ではない（配列で刻印が動いても位置で決める）
-    assert_eq!(once(Key::Plus, Some(Key::Num1)), None);
-    assert_eq!(once(Key::Minus, Some(Key::Quote)), None);
-    assert_eq!(once(Key::Minus, None), None);
+    assert_eq!(zoom(Key::Plus, Some(Key::Num1), false), None);
+    assert_eq!(zoom(Key::Minus, Some(Key::Quote), false), None);
+    assert_eq!(zoom(Key::Minus, None, false), None);
     // 押しっぱなしの繰り返しも数える（`Cmd` と合わせたズームを続ける）
-    let held = [event(Key::Minus, Some(Key::Minus), true, true)];
-    assert_eq!(plus_minus_pressed(&held), minus);
-    // 離した合図と文字の合図は見ない
-    let others = [
-        event(Key::Minus, Some(Key::Minus), false, false),
-        egui::Event::Text("ー".into()),
-    ];
-    assert_eq!(plus_minus_pressed(&others), None);
+    let out = menu::command_for_key(menu::Pressed { key: Key::Minus, position: Some(Key::Minus), command: true, shift: false }, false).unwrap();
+    assert!(menu::COMMANDS[out].repeats);
 }
 
 /// 線の行き止まりの端のアンカーを消すと、その区間が無くなり、線が1区間短くなる（残りの区間はそのまま）。1区間だけの線は
@@ -7399,10 +7393,8 @@ fn anchor_edit_modes_toggle_with_a_d_f() {
 /// インクボトル (S)・選択削除に G が無い。説明書の確かめで見つかった）
 #[test]
 fn tooltips_show_the_current_keys() {
-    for tool in Tool::ALL {
-        let tip = crate::panels::tool_tooltip(tool);
-        assert!(tip.contains(&format!("({})", tool.shortcut_key().name())), "{tool:?} の吹き出しのキーが違う：{tip}");
-    }
+    assert!(crate::panels::tool_tooltip(Tool::Pencil).contains("(S)"));
+    assert!(crate::panels::tool_tooltip(Tool::InkBottle).contains("(O)"));
     let delete = crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(crate::doc_actions::Action::DeleteSelection)));
     assert_eq!(delete, "Backspace / Delete / G");
 }
@@ -7410,9 +7402,12 @@ fn tooltips_show_the_current_keys() {
 /// ツールのキー：鉛筆は S、インクボトルは O（利用者が決めた。Y は使わない。オニオンスキンのキーは無い）
 #[test]
 fn pencil_is_s_and_ink_bottle_is_o() {
-    assert_eq!(Tool::Pencil.shortcut_key(), eframe::egui::Key::S);
-    assert_eq!(Tool::InkBottle.shortcut_key(), eframe::egui::Key::O);
-    assert!(Tool::ALL.iter().all(|t| t.shortcut_key() != eframe::egui::Key::Y));
+    let key = |tool: Tool| {
+        crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::SetTool { tool: t }) if *t == tool))
+    };
+    assert_eq!(key(Tool::Pencil), "S");
+    assert_eq!(key(Tool::InkBottle), "O");
+    assert!(Tool::ALL.iter().all(|&t| !key(t).is_empty() && key(t) != "Y"));
 }
 
 /// `Cmd` のショートカット（コピーなど）のすぐ後に、ふつうに `V`（選択ツール）を押して離しても貼り付けない。直す前は、
@@ -18236,8 +18231,12 @@ impl OpRng {
 /// 手で書いた名簿でなく定義と突き合わせて確かめるため（種類を足すと、試しが作れるようにするまでテストが止まる：設計
 /// claude/約束を入口で守る設計_5616fcc.md の 7.）
 fn action_kind_names() -> Vec<String> {
-    let src = include_str!("doc_actions.rs");
-    let start = src.find("pub(crate) enum Action {").expect("Action の定義");
+    enum_variant_names(include_str!("doc_actions.rs"), "pub(crate) enum Action {")
+}
+
+/// ソース `src` の、見出し `header`（`pub(crate) enum 名前 {`）で始まる列挙の種類の名前を、定義の順に全部読む
+fn enum_variant_names(src: &str, header: &str) -> Vec<String> {
+    let start = src.find(header).expect("列挙の定義");
     let mut depth = 0i32;
     let mut names = Vec::new();
     for line in src[start..].lines().skip(1) {
@@ -18256,6 +18255,42 @@ fn action_kind_names() -> Vec<String> {
         depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
     }
     names
+}
+
+/// 種類を並べた一覧（道具 `Tool::ALL`・右のパネル `RightPanelTab::ALL`・メニュー `Menu::ALL`・拡大のつまみ
+/// `ScaleHandle::ALL`）は、定義の種類を全部、定義の順に含む（メニューのアプリの項目 `Menu::App` だけは、わざと外す：
+/// Mac では OS が先頭に置き、ほかでは「ファイル」に入れる）。種類を足して一覧に足し忘れると、道具のボタンやキーから黙って
+/// 消えるので、ここで止める（約束の棚卸し 5616fcc の C の E4）
+#[test]
+fn every_kind_list_holds_all_kinds_in_order() {
+    fn listed<T: std::fmt::Debug>(all: &[T]) -> Vec<String> {
+        all.iter().map(|t| format!("{t:?}")).collect()
+    }
+    let canvas = include_str!("canvas_tool.rs");
+    let cases = [
+        ("Tool", enum_variant_names(canvas, "pub(crate) enum Tool {"), listed(&Tool::ALL)),
+        (
+            "ScaleHandle",
+            enum_variant_names(canvas, "pub(crate) enum ScaleHandle {"),
+            listed(&crate::canvas_tool::ScaleHandle::ALL),
+        ),
+        (
+            "RightPanelTab",
+            enum_variant_names(include_str!("panels.rs"), "pub(crate) enum RightPanelTab {"),
+            listed(&crate::panels::RightPanelTab::ALL),
+        ),
+        (
+            "Menu",
+            enum_variant_names(include_str!("menu.rs"), "pub(crate) enum Menu {")
+                .into_iter()
+                .filter(|m| m != "App")
+                .collect(),
+            listed(&crate::menu::Menu::ALL),
+        ),
+    ];
+    for (label, defined, listed) in cases {
+        assert_eq!(listed, defined, "{label} の一覧が定義の種類と違う");
+    }
 }
 
 /// 種類の名前（`Debug` の頭）
@@ -18426,6 +18461,7 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
         "Undo" => Action::Undo,
         "Redo" => Action::Redo,
         "EndCoalesce" => Action::EndCoalesce { key: None },
+        "EndCoalesceOn" => Action::EndCoalesceOn { end: crate::canvas_tool::CoalesceEnd::KeyPressedAgain },
         other => panic!("でたらめな操作の試しが、種類 {other} を作れない（random_action に足す）"),
     }
 }
@@ -18603,6 +18639,30 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
         }
     }
     let unused: Vec<&String> = names.iter().filter(|n| !used.contains_key(*n)).collect();
+    assert!(unused.is_empty(), "試していない種類：{unused:?}");
+}
+
+/// 全部の操作の種類で、操作のあとの画面の図形が、画面の写し（土台・上乗せ）を作り直した結果（お手本）と同じ
+/// （`run_and_verify_scene_cache_consistency`）。操作は、でたらめな操作の試しと同じ `Action` の全部の種類から作る（種類を
+/// 足すと、作れるようにするまで止まる：設計 claude/約束を入口で守る設計_5616fcc.md の 7.。前は手で並べた 21 種だけだった：
+/// 約束の棚卸し 5616fcc の A の P-16 (f)）
+#[test]
+fn scene_matches_a_full_rebuild_after_every_action_kind() {
+    let names = action_kind_names();
+    let drawing = ["PaintStroke", "PencilStroke", "BucketFill", "SelectMarquee"];
+    let mut used = std::collections::BTreeSet::new();
+    for seed in [0x5eed_0001u64, 0x5eed_0002] {
+        let mut rng = OpRng(seed);
+        let mut app = Is2dApp::default();
+        for step in 0..1500 {
+            let kind = if rng.range(10) < 3 { drawing[rng.range(drawing.len())].to_owned() } else { names[rng.range(names.len())].clone() };
+            let action = random_action(&kind, &mut rng, &app);
+            let label = format!("seed={seed:#x} step={step} op={}", action_kind_name(&action));
+            used.insert(action_kind_name(&action));
+            run_and_verify_scene_cache_consistency(&mut app, action, &label);
+        }
+    }
+    let unused: Vec<&String> = names.iter().filter(|n| !used.contains(*n)).collect();
     assert!(unused.is_empty(), "試していない種類：{unused:?}");
 }
 
@@ -40792,6 +40852,66 @@ fn menu_key_tap(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> 
         .to_vec()
 }
 
+/// 表の外にあったキー（矢印・F5・F6・Shift の付く道具のキー・Cmd+G など）も、表（`menu::COMMANDS`）から前と同じに動く
+/// （約束の棚卸し 5616fcc の C の E3）：
+/// - 矢印：選んでいれば動かす（Shift なら 10px）。押しっぱなしの繰り返しは1手にまとまり、押し直すと別の1手。選んでいなければ
+///   左右でコマを送る
+/// - Shift と押しても道具が変わる。F5 で延長、Shift+F5 で削除。Cmd+G でグループ化
+/// - 入力欄に文字を入れている最中は、メニューに出さないキーは受け付けない（Cmd+G でもグループにしない）
+#[test]
+fn keys_outside_the_menu_work_from_the_table() {
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let none = egui::Modifiers::NONE;
+    // キーを押して離す（`repeat` なら、押しっぱなしの繰り返しの合図を足してから離す）
+    let key = |key: egui::Key, modifiers: egui::Modifiers, repeat: bool| {
+        let ev = |pressed, repeat| egui::Event::Key { key, physical_key: Some(key), pressed, repeat, modifiers };
+        let mut events = vec![ev(true, false)];
+        if repeat {
+            events.extend([ev(true, true), ev(true, true)]);
+        }
+        events.push(ev(false, false));
+        events
+    };
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED)]);
+    app.session.set_selected_indices(vec![0]);
+    let undo0 = app.history.undo_stack.len();
+    let left = |app: &Is2dApp| app.tab().committed_document_copy().unwrap().root.layers[0].keyframes[0].cel.map_bounds().unwrap().x0;
+    // 押して、押しっぱなしの繰り返しを2回：3px 動いて1手
+    menu_test_frame(&ctx, &mut app, none, key(egui::Key::ArrowRight, none, true), |_, _| {});
+    assert!((left(&app) - 103.0).abs() < 1e-6, "矢印で動かない：{}", left(&app));
+    assert_eq!(app.history.undo_stack.len(), undo0 + 1, "押しっぱなしが1手にまとまらない");
+    // 押し直すと別の1手。Shift なら 10px
+    let shift = egui::Modifiers::SHIFT;
+    menu_test_frame(&ctx, &mut app, shift, key(egui::Key::ArrowRight, shift, false), |_, _| {});
+    assert!((left(&app) - 113.0).abs() < 1e-6, "Shift+矢印で 10px 動かない：{}", left(&app));
+    assert_eq!(app.history.undo_stack.len(), undo0 + 2, "押し直しが別の1手にならない");
+    // Shift と押しても道具が変わる
+    menu_test_frame(&ctx, &mut app, shift, key(egui::Key::B, shift, false), |_, _| {});
+    assert_eq!(app.tool.tool, Tool::Brush);
+    // 入力中の Cmd+G はグループにしない。入力をやめれば、グループにする
+    let cmd = egui::Modifiers::COMMAND;
+    menu_test_frame(&ctx, &mut app, none, key(egui::Key::V, none, false), |_, _| {});
+    app.session.set_selected_indices(vec![0]);
+    let focus = |ctx: &egui::Context, _: &mut Is2dApp| ctx.memory_mut(|m| m.request_focus(egui::Id::new("入力欄")));
+    menu_test_frame(&ctx, &mut app, cmd, key(egui::Key::G, cmd, false), focus);
+    assert!(app.scene().iter().all(|s| s.group_path.is_empty()), "入力中の Cmd+G でグループにした");
+    let unfocus = |ctx: &egui::Context, _: &mut Is2dApp| ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("入力欄")));
+    menu_test_frame(&ctx, &mut app, none, Vec::new(), unfocus);
+    menu_test_frame(&ctx, &mut app, cmd, key(egui::Key::G, cmd, false), |_, _| {});
+    assert!(app.scene().iter().any(|s| !s.group_path.is_empty()), "Cmd+G でグループにならない");
+    // 選んでいなければ、左右の矢印でコマを送る。F5 で延長、Shift+F5 で削除
+    menu_test_frame(&ctx, &mut app, none, key(egui::Key::Escape, none, false), |_, _| {});
+    assert!(app.session.selection().is_empty());
+    let frames = app.tab().active_timeline().total_frames;
+    menu_test_frame(&ctx, &mut app, none, key(egui::Key::F5, none, false), |_, _| {});
+    assert_eq!(app.tab().active_timeline().total_frames, frames + 1, "F5 で延長しない");
+    menu_test_frame(&ctx, &mut app, none, key(egui::Key::ArrowRight, none, false), |_, _| {});
+    assert_eq!(app.tab().active_timeline().current_frame, 1, "選んでいないときの矢印でコマを送らない");
+    menu_test_frame(&ctx, &mut app, shift, key(egui::Key::F5, shift, false), |_, _| {});
+    assert_eq!(app.tab().active_timeline().total_frames, frames, "Shift+F5 で削除しない");
+}
+
 /// 選択削除のキーは Backspace・Delete・G（利用者が決めた）。入力欄に文字を入れている最中の G は、入力欄の文字（絵を消さない）
 #[test]
 fn g_deletes_the_selection_unless_typing() {
@@ -40813,50 +40933,52 @@ fn g_deletes_the_selection_unless_typing() {
 /// egui のキー処理が受け取るキーは、項目どうしで重ならない（OS のメニューがあってもなくても）
 #[test]
 fn menu_table_keys_are_unique_and_command_keys_are_single_characters() {
+    use menu::ShiftKey;
     for command in &menu::COMMANDS {
-        if let Some(s) = command.shortcut.filter(|s| s.command) {
+        if let Some(s) = command.shortcut.filter(|s| s.command && command.menu.is_some()) {
             assert_eq!(s.key.name().chars().count(), 1, "{}", command.label);
+            // OS のメニューに付けるキーは、Shift を決めた、キーの意味で見るキー
+            assert!(s.shift != ShiftKey::Either && !s.by_position, "{}", command.label);
         }
     }
-    let keys: Vec<menu::Shortcut> = menu::COMMANDS
+    // 1回の押し方で2つの項目に当たるキーが無い（Shift がどちらでもよいキーは、Shift を押す・押さないの両方と重なる。キーの
+    // 意味と位置は、配列で重なりうるので区別しない。前は表の外の決まりと `else if` の並びで、黙って片方が勝った：約束の
+    // 棚卸し 5616fcc の C の E3）
+    let keys: Vec<(&str, menu::Shortcut)> = menu::COMMANDS
         .iter()
-        .flat_map(|c| c.shortcut.into_iter().chain(c.aliases.iter().copied()))
+        .flat_map(|c| c.shortcut.into_iter().chain(c.aliases.iter().copied()).map(move |k| (c.label, k)))
         .collect();
-    for (i, a) in keys.iter().enumerate() {
-        assert!(!keys[i + 1..].contains(a), "{a:?} が2つの項目にある");
-        for os_menu in [false, true] {
-            assert!(menu::command_for_key(*a, os_menu).is_some() || (os_menu && a.command));
+    let overlaps = |a: menu::Shortcut, b: menu::Shortcut| {
+        a.key == b.key
+            && a.command == b.command
+            && (a.shift == b.shift || a.shift == ShiftKey::Either || b.shift == ShiftKey::Either)
+    };
+    for (i, &(la, a)) in keys.iter().enumerate() {
+        for &(lb, b) in &keys[i + 1..] {
+            assert!(!overlaps(a, b), "{a:?}（{la}）と {b:?}（{lb}）が重なる");
+        }
+        // どのキーも、押せばその項目が動く（OS のメニューがあるときは、メニューに出す `Cmd` のキーは OS が受け取る）
+        for shift in [false, true] {
+            if a.shift == ShiftKey::On && !shift || a.shift == ShiftKey::Off && shift {
+                continue;
+            }
+            let pressed = menu::Pressed { key: a.key, position: Some(a.key), command: a.command, shift };
+            for os_menu in [false, true] {
+                let found = menu::command_for_key(pressed, os_menu).map(|i| menu::COMMANDS[i].label);
+                let os_takes = os_menu && a.command && menu::COMMANDS.iter().any(|c| c.label == la && c.menu.is_some());
+                assert!(found == Some(la) || (os_takes && found.is_none()), "{a:?}（{la}）：{found:?}");
+            }
         }
     }
     // OS のメニューがあるときは、メニューに出す `Cmd` のキーだけを egui が受け取らない
-    let cmd_c = menu::Shortcut {
-        key: egui::Key::C,
-        command: true,
-        shift: false,
-    };
-    assert_eq!(
-        menu::command_for_key(cmd_c, false),
-        Some(menu_index("コピー"))
-    );
+    let press = |key, command, shift| menu::Pressed { key, position: Some(key), command, shift };
+    let cmd_c = press(egui::Key::C, true, false);
+    assert_eq!(menu::command_for_key(cmd_c, false), Some(menu_index("コピー")));
     assert_eq!(menu::command_for_key(cmd_c, true), None);
-    let backspace = menu::Shortcut {
-        key: egui::Key::Backspace,
-        command: false,
-        shift: false,
-    };
-    assert_eq!(
-        menu::command_for_key(backspace, true),
-        Some(menu_index("選択削除"))
-    );
-    let cmd_shift_z = menu::Shortcut {
-        key: egui::Key::Z,
-        command: true,
-        shift: true,
-    };
-    assert_eq!(
-        menu::command_for_key(cmd_shift_z, true),
-        Some(menu_index("やり直し"))
-    );
+    assert_eq!(menu::command_for_key(press(egui::Key::Backspace, false, false), true), Some(menu_index("選択削除")));
+    assert_eq!(menu::command_for_key(press(egui::Key::Z, true, true), true), Some(menu_index("やり直し")));
+    // メニューに出さない `Cmd` のキーは、OS のメニューがあっても egui が受け取る
+    assert_eq!(menu::command_for_key(press(egui::Key::G, true, false), true), Some(menu_index("グループ化")));
 }
 
 /// メニューの見せ方：表の決まり（今と同じ）で使えるかが決まり、表示の切り替えにはチェックが付く。入力欄に文字を

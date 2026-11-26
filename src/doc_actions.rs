@@ -386,6 +386,11 @@ pub(crate) enum Action {
     EndCoalesce {
         key: Option<CoalesceKey>,
     },
+    /// 続けた編集のまとめのうち、区切る時（`CoalesceKey::ends`）が `end` のものを区切る（キーを押し直したとき：
+    /// `CoalesceEnd::KeyPressedAgain`）
+    EndCoalesceOn {
+        end: crate::canvas_tool::CoalesceEnd,
+    },
 }
 
 impl Action {
@@ -501,7 +506,7 @@ impl Action {
             Self::Undo | Self::Redo => none(Handles),
             // まとめの区切りは、ダイアログの間も受け付ける（未保存の確認の「保存」が、保存の前に区切る。区切れないと、保存の
             // あとに続けて打った分に未保存の印が付かない）
-            Self::EndCoalesce { .. } => Policy {
+            Self::EndCoalesce { .. } | Self::EndCoalesceOn { .. } => Policy {
                 keeps_playback: true,
                 keeps_drag: true,
                 during_dialog: true,
@@ -1270,6 +1275,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Redo => tab.redo(),
         Action::EndCoalesce { key } => {
             if key.is_none_or(|k| tab.history.last_coalesce_key == Some(k)) {
+                tab.history.end_coalesce();
+            }
+            true
+        }
+        Action::EndCoalesceOn { end } => {
+            if tab.history.last_coalesce_key.is_some_and(|k| k.ends() == end) {
                 tab.history.end_coalesce();
             }
             true

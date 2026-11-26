@@ -63,42 +63,6 @@ impl Tool {
         Tool::InkBottle,
         Tool::Eyedropper,
     ];
-
-    /// ツール切り替え用の単一キーショートカット
-    pub(crate) const fn shortcut_key(self) -> Key {
-        match self {
-            Tool::Select => Key::V,
-            Tool::Transform => Key::Q,
-            Tool::Brush => Key::B,
-            Tool::Pencil => Key::S,
-            Tool::Eraser => Key::E,
-            Tool::Bucket => Key::K,
-            Tool::InkBottle => Key::O,
-            Tool::Eyedropper => Key::I,
-        }
-    }
-
-    /// 押下されたショートカットキー（キーリピート除外）から対応するツールを返す
-    pub(crate) fn from_shortcut_input(i: &egui::InputState) -> Option<Tool> {
-        Self::ALL
-            .into_iter()
-            .find(|tool| key_pressed_no_repeat(i, tool.shortcut_key()))
-    }
-}
-
-/// キーリピートを除外して「押された最初のフレームのみ `true`」を返すヘルパー
-pub(crate) fn key_pressed_no_repeat(i: &egui::InputState, target: Key) -> bool {
-    i.events.iter().any(|ev| {
-        matches!(
-            ev,
-            egui::Event::Key {
-                key,
-                pressed: true,
-                repeat: false,
-                ..
-            } if *key == target
-        )
-    })
 }
 
 /// 選択ツール (`Tool::Select`) と自由変形ツール (`Tool::Transform`) で共通利用する選択オブジェクト平行移動ドラッグ状態
@@ -2385,6 +2349,31 @@ pub(crate) enum CoalesceKey {
     RenameSound(u64),
     RenameLayer(u64),
     NudgeSelection,
+}
+
+/// 続けた編集のまとめを区切る時
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CoalesceEnd {
+    /// 数値の欄の編集が一区切りした（どれかがフォーカスを失った、またはどれもドラッグ中・フォーカス中でない）
+    FieldIdle,
+    /// 名前の欄がフォーカスを失った
+    LostFocus,
+    /// キーを押し直した（押しっぱなしの繰り返しはまとめる）
+    KeyPressedAgain,
+}
+
+impl CoalesceKey {
+    /// このまとめを区切る時（まとめのキーごとの表。区切る時を決めるのはここだけ：前は区切りを送る8か所が、それぞれ
+    /// 自分の決まりで送っていた：約束の棚卸し 5616fcc の C の B7）
+    pub(crate) const fn ends(self) -> CoalesceEnd {
+        match self {
+            Self::StageSize | Self::Fps | Self::SymbolPlayback(_) | Self::SymbolColorEffect(_) => {
+                CoalesceEnd::FieldIdle
+            }
+            Self::RenameSymbol(_) | Self::RenameSound(_) | Self::RenameLayer(_) => CoalesceEnd::LostFocus,
+            Self::NudgeSelection => CoalesceEnd::KeyPressedAgain,
+        }
+    }
 }
 
 /// Undo / Redo スナップショット履歴および保存時点のドキュメント世代IDを管理する構造体

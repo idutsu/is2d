@@ -7,7 +7,9 @@ use eframe::egui::{self, Key};
 
 use crate::canvas_tool::{active_scope_layer_id, Clipboard, Tab, View, ViewSwitch};
 use crate::doc_actions::Action;
-use crate::panels::UiAction;
+use crate::panels::{ArrowDir, FrameEnd, UiAction, ZoomStep};
+use crate::canvas_tool::{SelectSubMode, Tool};
+use crate::select_ops::ArrangeMode;
 use crate::panels::MOD_KEY;
 
 /// メニュー。`App` はアプリのメニュー（終了）：Mac では OS のアプリメニュー（「is2d」）に、Windows・Linux では窓の中の
@@ -43,53 +45,116 @@ impl Menu {
     }
 }
 
-/// ショートカットのキー（キーと、`Cmd`（Windows・Linux では `Ctrl`）・`Shift` を押しているか。ほかの修飾キーは見ない）
+/// ショートカットの `Shift` の扱い
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ShiftKey {
+    /// 押していないとき
+    Off,
+    /// 押しているとき
+    On,
+    /// どちらでも（前からキーの決まりが `Shift` を見ていなかったキー）
+    Either,
+}
+
+/// ショートカットのキー（キーと、`Cmd`（Windows・Linux では `Ctrl`）・`Shift`。ほかの修飾キーは見ない）。`by_position` の
+/// キーは、キーの意味でなくキーの位置（`Event::Key` の `physical_key`）で見る（配列で刻印の位置が違う `+` のズーム）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Shortcut {
     pub(crate) key: Key,
+    pub(crate) command: bool,
+    pub(crate) shift: ShiftKey,
+    pub(crate) by_position: bool,
+}
+
+/// 押したキー1つ（キーの意味・キーの位置・`Cmd`（`Ctrl`）・`Shift`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Pressed {
+    pub(crate) key: Key,
+    pub(crate) position: Option<Key>,
     pub(crate) command: bool,
     pub(crate) shift: bool,
 }
 
 impl Shortcut {
-    /// `Cmd`（`Ctrl`）と合わせて押すキー
-    const fn command(key: Key) -> Self {
+    const fn new(key: Key, command: bool, shift: ShiftKey) -> Self {
         Self {
             key,
-            command: true,
-            shift: false,
+            command,
+            shift,
+            by_position: false,
         }
+    }
+
+    /// `Cmd`（`Ctrl`）と合わせて押すキー
+    const fn command(key: Key) -> Self {
+        Self::new(key, true, ShiftKey::Off)
     }
 
     /// `Cmd`（`Ctrl`）と `Shift` と合わせて押すキー
     const fn command_shift(key: Key) -> Self {
-        Self {
-            key,
-            command: true,
-            shift: true,
-        }
+        Self::new(key, true, ShiftKey::On)
+    }
+
+    /// `Cmd`（`Ctrl`）と合わせて押すキー（`Shift` はどちらでも）
+    const fn command_either(key: Key) -> Self {
+        Self::new(key, true, ShiftKey::Either)
     }
 
     /// 修飾キーなしで押すキー
     const fn plain(key: Key) -> Self {
+        Self::new(key, false, ShiftKey::Off)
+    }
+
+    /// `Shift` と合わせて押すキー
+    const fn plain_shift(key: Key) -> Self {
+        Self::new(key, false, ShiftKey::On)
+    }
+
+    /// `Cmd` なしで押すキー（`Shift` はどちらでも）
+    const fn plain_either(key: Key) -> Self {
+        Self::new(key, false, ShiftKey::Either)
+    }
+
+    /// キーの位置で見る
+    const fn by_position(self) -> Self {
         Self {
-            key,
-            command: false,
-            shift: false,
+            by_position: true,
+            ..self
         }
     }
 
-    /// 窓の中のメニュー（Windows・Linux）とボタンの吹き出しに出す文字（例：`Ctrl+Shift+S`・`Backspace`）。Mac の OS の
-    /// メニューは、OS が `Cmd` のショートカットを記号で出す
+    /// 押したキー `p` がこのショートカットか（決めるのはこれ1つ）
+    pub(crate) fn matches(self, p: Pressed) -> bool {
+        let key = if self.by_position { p.position } else { Some(p.key) };
+        key == Some(self.key)
+            && self.command == p.command
+            && match self.shift {
+                ShiftKey::Off => !p.shift,
+                ShiftKey::On => p.shift,
+                ShiftKey::Either => true,
+            }
+    }
+
+    /// 窓の中のメニュー（Windows・Linux）とボタンの吹き出しに出す文字（例：`Ctrl+Shift+S`・`Backspace`・`,`・`←`）。Mac の
+    /// OS のメニューは、OS が `Cmd` のショートカットを記号で出す
     pub(crate) fn text(self) -> String {
         let mut parts = Vec::new();
         if self.command {
             parts.push(MOD_KEY);
         }
-        if self.shift {
+        if self.shift == ShiftKey::On {
             parts.push("Shift");
         }
-        parts.push(self.key.name());
+        parts.push(match self.key {
+            Key::ArrowLeft => "←",
+            Key::ArrowRight => "→",
+            Key::ArrowUp => "↑",
+            Key::ArrowDown => "↓",
+            Key::Comma | Key::Period | Key::Minus | Key::Equals | Key::Semicolon | Key::Plus => {
+                self.key.symbol_or_name()
+            }
+            key => key.name(),
+        });
         parts.join("+")
     }
 }
@@ -128,9 +193,11 @@ impl TextOp {
     }
 }
 
-/// メニューの項目1つ
+/// メニューの項目1つ。メニューに出さないキーだけの項目（`menu` が `None`）も表に入れる（キーの決まりは、みなこの表から
+/// 引く：約束の棚卸し 5616fcc の C の E3）
 pub(crate) struct MenuCommand {
-    pub(crate) menu: Menu,
+    /// 出すメニュー（`None`：メニューに出さないキーだけの項目）
+    pub(crate) menu: Option<Menu>,
     /// この項目の前に区切り線を引くか
     pub(crate) separator_before: bool,
     pub(crate) label: &'static str,
@@ -168,7 +235,7 @@ impl MenuCommand {
     /// egui のキー処理が受け取るキー。OS のメニューに付けた `Cmd` のショートカット（`os_menu_has_keys`）は、OS が先に
     /// 受け取るので含めない（1回のキーで両方が動かないように）
     fn egui_keys(&self, os_menu_has_keys: bool) -> impl Iterator<Item = Shortcut> {
-        let shown = self.shortcut.filter(|s| !(os_menu_has_keys && s.command));
+        let shown = self.shortcut.filter(|s| !(os_menu_has_keys && s.command && self.menu.is_some()));
         shown.into_iter().chain(self.aliases.iter().copied())
     }
 }
@@ -208,14 +275,44 @@ fn can_paste(tab: &Tab, clipboard: &Clipboard) -> bool {
         && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl))
 }
 
+/// メニューに出さないキーだけの項目（キーは `keys`）
+const fn keys_only(label: &'static str, keys: &'static [Shortcut], repeats: bool, action: UiAction) -> MenuCommand {
+    MenuCommand {
+        menu: None,
+        separator_before: false,
+        label,
+        shortcut: None,
+        aliases: keys,
+        repeats,
+        enabled: always,
+        text_op: None,
+        action,
+    }
+}
+
+/// 道具を選ぶキーの項目（前から `Shift` を見ていなかった：Shift と押しても道具が変わる）
+const fn tool_key(label: &'static str, key: Key, tool: Tool) -> MenuCommand {
+    MenuCommand {
+        menu: None,
+        separator_before: false,
+        label,
+        shortcut: Some(Shortcut::plain_either(key)),
+        aliases: &[],
+        repeats: false,
+        enabled: always,
+        text_op: None,
+        action: UiAction::Doc(Action::SetTool { tool }),
+    }
+}
+
 /// 項目の数
-pub(crate) const COMMAND_COUNT: usize = 20;
+pub(crate) const COMMAND_COUNT: usize = 60;
 
 /// メニューの項目の表（メニューバーの順・メニューの中の上からの順）。番号（並びの位置）で項目を指す
 pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
     // ファイル
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: false,
         label: "新規作成",
         shortcut: Some(Shortcut::command(Key::N)),
@@ -226,7 +323,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::NewProject,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: true,
         label: "開く...",
         shortcut: Some(Shortcut::command(Key::O)),
@@ -237,7 +334,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::OpenProjectDialog,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: false,
         label: "保存",
         shortcut: Some(Shortcut::command(Key::S)),
@@ -248,7 +345,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::SaveProject,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: false,
         label: "名前を付けて保存...",
         shortcut: Some(Shortcut::command_shift(Key::S)),
@@ -259,7 +356,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::SaveProjectAsDialog,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: true,
         label: "音を読み込む（WAV・MP3）…",
         shortcut: None,
@@ -270,7 +367,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ImportSoundDialog,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: true,
         label: "動画を書き出し（MP4）…",
         shortcut: None,
@@ -281,7 +378,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ExportVideoDialog,
     },
     MenuCommand {
-        menu: Menu::File,
+        menu: Some(Menu::File),
         separator_before: true,
         label: "タブを閉じる",
         shortcut: Some(Shortcut::command(Key::W)),
@@ -293,7 +390,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
     },
     // アプリ（Windows・Linux では「ファイル」の一番下：`Menu::in_window_bar`）
     MenuCommand {
-        menu: Menu::App,
+        menu: Some(Menu::App),
         separator_before: true,
         // Mac の OS のアプリメニューの決まりの名前（前と同じ）
         label: if cfg!(target_os = "macos") {
@@ -310,7 +407,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
     },
     // 編集
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: false,
         label: "元に戻す",
         shortcut: Some(Shortcut::command(Key::Z)),
@@ -321,7 +418,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Undo),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: false,
         label: "やり直し",
         shortcut: Some(Shortcut::command(Key::Y)),
@@ -332,7 +429,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Redo),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: true,
         label: "カット",
         shortcut: Some(Shortcut::command(Key::X)),
@@ -343,7 +440,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Cut),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: false,
         label: "コピー",
         shortcut: Some(Shortcut::command(Key::C)),
@@ -354,7 +451,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Copy),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: false,
         label: "ペースト",
         shortcut: Some(Shortcut::command(Key::V)),
@@ -365,7 +462,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Paste { in_place: false }),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: false,
         label: "同じ位置にペースト",
         shortcut: Some(Shortcut::command_shift(Key::V)),
@@ -376,7 +473,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::Doc(Action::Paste { in_place: true }),
     },
     MenuCommand {
-        menu: Menu::Edit,
+        menu: Some(Menu::Edit),
         separator_before: true,
         label: "選択削除",
         shortcut: Some(Shortcut::plain(Key::Backspace)),
@@ -388,7 +485,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
     },
     // 表示
     MenuCommand {
-        menu: Menu::View,
+        menu: Some(Menu::View),
         separator_before: false,
         label: "100%表示",
         shortcut: Some(Shortcut::command(Key::Num1)),
@@ -399,7 +496,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ResetView,
     },
     MenuCommand {
-        menu: Menu::View,
+        menu: Some(Menu::View),
         separator_before: false,
         label: "ウィンドウに合わせる",
         shortcut: Some(Shortcut::command(Key::Num2)),
@@ -410,7 +507,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::FitStageToWindow,
     },
     MenuCommand {
-        menu: Menu::View,
+        menu: Some(Menu::View),
         separator_before: true,
         label: "枠外を隠す",
         shortcut: Some(Shortcut::command(Key::Num3)),
@@ -421,7 +518,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ToggleView(ViewSwitch::ClipOutsideStage),
     },
     MenuCommand {
-        menu: Menu::View,
+        menu: Some(Menu::View),
         separator_before: false,
         label: "アンカーを表示",
         shortcut: None,
@@ -432,7 +529,7 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         action: UiAction::ToggleView(ViewSwitch::Anchors),
     },
     MenuCommand {
-        menu: Menu::View,
+        menu: Some(Menu::View),
         separator_before: false,
         label: "オニオンスキン",
         shortcut: None,
@@ -442,6 +539,146 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         text_op: None,
         action: UiAction::ToggleView(ViewSwitch::OnionSkin),
     },
+    // メニューに出さないキーだけの項目
+    keys_only(
+        "拡大",
+        const { &[
+            Shortcut::command_either(Key::Equals).by_position(),
+            Shortcut::command_either(Key::Semicolon).by_position(),
+            Shortcut::command_either(Key::Plus).by_position(),
+        ] },
+        true,
+        UiAction::Zoom(ZoomStep::In),
+    ),
+    keys_only(
+        "縮小",
+        const { &[Shortcut::command_either(Key::Minus).by_position()] },
+        true,
+        UiAction::Zoom(ZoomStep::Out),
+    ),
+    keys_only("再生 / 一時停止", const { &[Shortcut::plain_either(Key::Enter)] }, false, UiAction::TogglePlayback),
+    keys_only("前のフレームへ", const { &[Shortcut::plain_either(Key::Comma)] }, true, UiAction::StepFrame(-1)),
+    keys_only("次のフレームへ", const { &[Shortcut::plain_either(Key::Period)] }, true, UiAction::StepFrame(1)),
+    keys_only(
+        "←",
+        const { &[Shortcut::plain(Key::ArrowLeft)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Left, big: false },
+    ),
+    keys_only(
+        "→",
+        const { &[Shortcut::plain(Key::ArrowRight)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Right, big: false },
+    ),
+    keys_only(
+        "↑",
+        const { &[Shortcut::plain(Key::ArrowUp)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Up, big: false },
+    ),
+    keys_only(
+        "↓",
+        const { &[Shortcut::plain(Key::ArrowDown)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Down, big: false },
+    ),
+    keys_only(
+        "Shift+←",
+        const { &[Shortcut::plain_shift(Key::ArrowLeft)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Left, big: true },
+    ),
+    keys_only(
+        "Shift+→",
+        const { &[Shortcut::plain_shift(Key::ArrowRight)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Right, big: true },
+    ),
+    keys_only(
+        "Shift+↑",
+        const { &[Shortcut::plain_shift(Key::ArrowUp)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Up, big: true },
+    ),
+    keys_only(
+        "Shift+↓",
+        const { &[Shortcut::plain_shift(Key::ArrowDown)] },
+        true,
+        UiAction::Arrow { dir: ArrowDir::Down, big: true },
+    ),
+    keys_only("最初のフレームへ", const { &[Shortcut::plain_either(Key::Home)] }, false, UiAction::GoToFrame(FrameEnd::First)),
+    keys_only("最後のフレームへ", const { &[Shortcut::plain_either(Key::End)] }, false, UiAction::GoToFrame(FrameEnd::Last)),
+    keys_only("フレームを延長", const { &[Shortcut::plain(Key::F5)] }, true, UiAction::Doc(Action::ExtendFrame)),
+    keys_only("フレームを削除", const { &[Shortcut::plain_shift(Key::F5)] }, true, UiAction::Doc(Action::RemoveFrame)),
+    keys_only(
+        "キーフレームを挿入",
+        const { &[Shortcut::plain(Key::F6)] },
+        true,
+        UiAction::Doc(Action::InsertKeyframe { copy_prev: true }),
+    ),
+    keys_only("キーフレームを削除", const { &[Shortcut::plain_shift(Key::F6)] }, true, UiAction::Doc(Action::DeleteKeyframe)),
+    keys_only(
+        "空白キーフレームを挿入",
+        const { &[Shortcut::plain_either(Key::F7)] },
+        true,
+        UiAction::Doc(Action::InsertKeyframe { copy_prev: false }),
+    ),
+    keys_only("シンボルに変換", const { &[Shortcut::plain_either(Key::F8)] }, false, UiAction::Doc(Action::ConvertToSymbol)),
+    keys_only("トゥイーン", const { &[Shortcut::plain_either(Key::T)] }, false, UiAction::Doc(Action::ToggleTween)),
+    tool_key("選択ツール", Key::V, Tool::Select),
+    tool_key("自由変形ツール", Key::Q, Tool::Transform),
+    tool_key("ブラシツール", Key::B, Tool::Brush),
+    tool_key("鉛筆ツール", Key::S, Tool::Pencil),
+    tool_key("消しゴムツール", Key::E, Tool::Eraser),
+    tool_key("バケツツール", Key::K, Tool::Bucket),
+    tool_key("インクボトルツール", Key::O, Tool::InkBottle),
+    tool_key("スポイトツール", Key::I, Tool::Eyedropper),
+    keys_only("Esc", const { &[Shortcut::plain_either(Key::Escape)] }, false, UiAction::Escape),
+    keys_only("アンカーを表示", const { &[Shortcut::plain_either(Key::A)] }, false, UiAction::AnchorEdit(None)),
+    keys_only(
+        "アンカーを追加",
+        const { &[Shortcut::plain_either(Key::D)] },
+        false,
+        UiAction::AnchorEdit(Some(SelectSubMode::AddAnchor)),
+    ),
+    keys_only(
+        "アンカーを削除",
+        const { &[Shortcut::plain_either(Key::F)] },
+        false,
+        UiAction::AnchorEdit(Some(SelectSubMode::DeleteAnchor)),
+    ),
+    keys_only("グループ化", const { &[Shortcut::command(Key::G)] }, false, UiAction::Doc(Action::Group)),
+    keys_only(
+        "グループ解除",
+        const { &[Shortcut::command_shift(Key::G), Shortcut::command_either(Key::B)] },
+        false,
+        UiAction::Doc(Action::Ungroup),
+    ),
+    keys_only(
+        "前面へ",
+        const { &[Shortcut::command(Key::ArrowUp)] },
+        false,
+        UiAction::Doc(Action::Arrange { mode: ArrangeMode::Forward }),
+    ),
+    keys_only(
+        "最前面へ",
+        const { &[Shortcut::command_shift(Key::ArrowUp)] },
+        false,
+        UiAction::Doc(Action::Arrange { mode: ArrangeMode::ToFront }),
+    ),
+    keys_only(
+        "背面へ",
+        const { &[Shortcut::command(Key::ArrowDown)] },
+        false,
+        UiAction::Doc(Action::Arrange { mode: ArrangeMode::Backward }),
+    ),
+    keys_only(
+        "最背面へ",
+        const { &[Shortcut::command_shift(Key::ArrowDown)] },
+        false,
+        UiAction::Doc(Action::Arrange { mode: ArrangeMode::ToBack }),
+    ),
 ];
 
 /// `is` に当たる項目のキー（メニューに出すものと出さないもの）を「 / 」で並べた文字（ボタンの吹き出しに出す。キーの決まりは
@@ -456,11 +693,11 @@ pub(crate) fn keys_text(is: impl Fn(&UiAction) -> bool) -> String {
         .join(" / ")
 }
 
-/// キー `shortcut` で動く項目の番号。OS のメニューがキーを受け取るとき（`os_menu_has_keys`）は、そのキーは含めない
-pub(crate) fn command_for_key(shortcut: Shortcut, os_menu_has_keys: bool) -> Option<usize> {
+/// 押したキー `pressed` で動く項目の番号。OS のメニューがキーを受け取るとき（`os_menu_has_keys`）は、そのキーは含めない
+pub(crate) fn command_for_key(pressed: Pressed, os_menu_has_keys: bool) -> Option<usize> {
     COMMANDS
         .iter()
-        .position(|c| c.egui_keys(os_menu_has_keys).any(|k| k == shortcut))
+        .position(|c| c.egui_keys(os_menu_has_keys).any(|k| k.matches(pressed)))
 }
 
 /// このコマに押したショートカットと、押しっぱなしの繰り返しか。egui-winit は `Cmd+C`・`Cmd+X`・`Cmd+V` を
@@ -469,25 +706,27 @@ pub(crate) fn command_for_key(shortcut: Shortcut, os_menu_has_keys: bool) -> Opt
 pub(crate) fn pressed_shortcuts(
     input: &egui::InputState,
     swallowed_paste: bool,
-) -> Vec<(Shortcut, bool)> {
-    let clipboard_key = |key| Shortcut {
+) -> Vec<(Pressed, bool)> {
+    let clipboard_key = |key| Pressed {
         key,
+        position: None,
         command: true,
         shift: input.modifiers.shift,
     };
-    let mut pressed: Vec<(Shortcut, bool)> = input
+    let mut pressed: Vec<(Pressed, bool)> = input
         .events
         .iter()
         .filter_map(|ev| match ev {
             egui::Event::Key {
                 key,
+                physical_key,
                 pressed: true,
                 repeat,
                 modifiers,
-                ..
             } => Some((
-                Shortcut {
+                Pressed {
                     key: *key,
+                    position: *physical_key,
                     command: modifiers.command || modifiers.ctrl,
                     shift: modifiers.shift,
                 },

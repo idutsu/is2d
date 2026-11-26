@@ -530,23 +530,29 @@ impl Floating {
 
     /// 同じ中身か（地図は同じしまう形、変換は同じ値。預かり物は見ない）
     pub(crate) fn same_content(&self, other: &Self) -> bool {
-        self.layers.len() == other.layers.len()
-            && self.layers.iter().zip(&other.layers).all(|(a, b)| {
-                a.layer_id == b.layer_id
-                    && match (&a.origin, &b.origin) {
-                        (None, None) => true,
-                        (Some(x), Some(y)) => {
-                            x.rest.id() == y.rest.id()
-                                && x.from.id() == y.from.id()
-                                && x.kept.id() == y.kept.id()
-                        }
-                        _ => false,
-                    }
-                    && a.groups.len() == b.groups.len()
-                    && a.groups.iter().zip(&b.groups).all(|(g, h)| {
-                        g.map.id() == h.map.id() && g.xform == h.xform && g.placed == h.placed
-                    })
-            })
+        // 項目はみな分解で並べる（項目を足すと、比べるか比べないかを決めるまでコンパイラが止める）。預かり物（`fresh`）は
+        // 計算に使う写し、隠す図形・残りの図形は残りの地図から決まるので比べない
+        let same_origin = |x: &Origin, y: &Origin| {
+            let Origin { rest, fresh: _, hidden: _, remainder: _, from, kept } = x;
+            rest.id() == y.rest.id() && from.id() == y.from.id() && kept.id() == y.kept.id()
+        };
+        let same_group = |g: &PieceGroup, h: &PieceGroup| {
+            let PieceGroup { map, fresh: _, xform, placed } = g;
+            map.id() == h.map.id() && *xform == h.xform && *placed == h.placed
+        };
+        let same_layer = |a: &FloatLayer, b: &FloatLayer| {
+            let FloatLayer { layer_id, origin, groups } = a;
+            *layer_id == b.layer_id
+                && match (origin, &b.origin) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => same_origin(x, y),
+                    _ => false,
+                }
+                && groups.len() == b.groups.len()
+                && groups.iter().zip(&b.groups).all(|(g, h)| same_group(g, h))
+        };
+        let Floating { layers } = self;
+        layers.len() == other.layers.len() && layers.iter().zip(&other.layers).all(|(a, b)| same_layer(a, b))
     }
 
     /// テスト用：レイヤーごとの（レイヤー, 残りの地図と預かり物を持つか, 片の組の地図と預かり物を持つか）

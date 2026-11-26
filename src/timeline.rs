@@ -1712,24 +1712,27 @@ impl Layer {
 
     /// 中身が `other` と同じか（`Timeline::same_content`）：名前・表示・ロック・コマの数と、キーフレームの列（始まりのコマ・
     /// トゥイーン・音・セル画。セル画は地図とインスタンスの並びが同じもの（番地が同じか、どちらも空））
+    /// 項目はみな分解で並べる（項目を足すと、ここで比べるか比べないかを決めるまでコンパイラが止める：約束の棚卸し 5616fcc
+    /// の A の P-14）
     fn same_content(&self, other: &Layer) -> bool {
         let same_cel = |a: &Cel, b: &Cel| {
-            (Arc::ptr_eq(&a.maps, &b.maps) || (a.maps.is_empty() && b.maps.is_empty()))
-                && (Arc::ptr_eq(&a.instances, &b.instances)
-                    || (a.instances.is_empty() && b.instances.is_empty()))
+            // 版はセル画の写しの鍵なので比べない（中身は地図とインスタンスで比べる）
+            let Cel { maps, instances, revision: _ } = a;
+            (Arc::ptr_eq(maps, &b.maps) || (maps.is_empty() && b.maps.is_empty()))
+                && (Arc::ptr_eq(instances, &b.instances) || (instances.is_empty() && b.instances.is_empty()))
         };
         let same_keyframe = |a: &Keyframe, b: &Keyframe| {
-            a.tween == b.tween
-                && a.tween_rotate == b.tween_rotate
-                && a.sound == b.sound
-                && same_cel(&a.cel, &b.cel)
+            // 始まりのコマは、列の比べ（`same_keyed`）が比べる
+            let Keyframe { rel_start: _, cel, tween, tween_rotate, sound } = a;
+            *tween == b.tween && *tween_rotate == b.tween_rotate && *sound == b.sound && same_cel(cel, &b.cel)
         };
-        self.id == other.id
-            && self.name == other.name
-            && self.visible == other.visible
-            && self.locked == other.locked
-            && self.frame_count == other.frame_count
-            && self.keyframes.same_keyed(&other.keyframes, same_keyframe)
+        let Layer { id, name, visible, locked, frame_count, keyframes } = self;
+        *id == other.id
+            && *name == other.name
+            && *visible == other.visible
+            && *locked == other.locked
+            && *frame_count == other.frame_count
+            && keyframes.same_keyed(&other.keyframes, same_keyframe)
     }
 
     /// 始まりのコマが `frame` より前のキーフレームの数（`frame` に入れるキーフレームの番号）
@@ -2237,10 +2240,22 @@ impl Timeline {
     /// 列を共有したままなので番地を見るだけ。書き換えたレイヤーも、変わっていないキーフレームは番地が同じ（手間は触った
     /// レイヤーのキーフレームの数の分）
     pub(crate) fn same_content(&self, other: &Timeline) -> bool {
-        self.total_frames == other.total_frames
-            && self.next_layer_id == other.next_layer_id
-            && self.layers.len() == other.layers.len()
-            && self.layers.iter().zip(&other.layers).all(|(a, b)| a.same_content(b))
+        // 項目はみな分解で並べる（項目を足すと、比べるか比べないかを決めるまでコンパイラが止める：約束の棚卸し 5616fcc の
+        // A の P-14）。今のコマ・選んでいるレイヤー・コマの選択は中身でない
+        let Timeline {
+            layers,
+            current_frame: _,
+            active_layer: _,
+            total_frames,
+            next_layer_number,
+            next_layer_id,
+            cell_selection: _,
+        } = self;
+        *total_frames == other.total_frames
+            && *next_layer_number == other.next_layer_number
+            && *next_layer_id == other.next_layer_id
+            && layers.len() == other.layers.len()
+            && layers.iter().zip(&other.layers).all(|(a, b)| a.same_content(b))
     }
 
     /// まだ確かめていない地図に、壊れていたときの知らせ先 `sink` と場所（`place` に続けて、レイヤーの名前とキーフレームの

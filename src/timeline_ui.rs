@@ -97,6 +97,8 @@ pub(crate) trait TimelineHost: ActionHost {
     fn timeline_ui(&self) -> &TimelineUiState;
     fn timeline_ui_mut(&mut self) -> &mut TimelineUiState;
     fn tab_and_timeline_ui_mut(&mut self) -> (&mut Tab, &mut TimelineUiState);
+    /// メニュー・キーと同じ `UiAction` を送る（受け付けるか・何をするかは、アプリの1つの入口が決める）
+    fn send_ui_action(&mut self, action: crate::panels::UiAction, ctx: &egui::Context);
 }
 
 /// タイムラインのスクロールバーの向き
@@ -651,7 +653,7 @@ fn draw_layer_rename_field(
             },
         );
     }
-    if resp.lost_focus() {
+    if coalesce_end(CoalesceKey::RenameLayer(layer_id), &[&resp]).is_some() {
         finish_layer_rename(host);
     }
 }
@@ -681,7 +683,7 @@ fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
                 ui.separator();
                 draw_control_bar_keyframe_buttons(host, ui);
                 ui.separator();
-                draw_control_bar_onion_controls(host.tab_mut(), ui);
+                draw_control_bar_onion_controls(host, ui);
                 ui.separator();
                 draw_control_bar_frame_and_fps(host, ui);
             });
@@ -692,14 +694,14 @@ fn draw_timeline_control_bar(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
 fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
     if ui
         .button(icons::SKIP_PREV)
-        .on_hover_text("最初のフレームへ (Home)")
+        .on_hover_text(format!("最初のフレームへ ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::GoToFrame(crate::panels::FrameEnd::First)))))
         .clicked()
     {
         go_to_frame(host, 0);
     }
     if ui
         .button(icons::STEP_PREV)
-        .on_hover_text("前のフレームへ (, / ←)")
+        .on_hover_text(format!("前のフレームへ ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::StepFrame(-1) | crate::panels::UiAction::Arrow { dir: crate::panels::ArrowDir::Left, big: false }))))
         .clicked()
     {
         step_frame(host, -1);
@@ -712,21 +714,21 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
     };
     if ui
         .selectable_label(is_playing, play_label)
-        .on_hover_text("再生 / 一時停止 (Enter)")
+        .on_hover_text(format!("再生 / 一時停止 ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::TogglePlayback))))
         .clicked()
     {
         toggle_playback(host);
     }
     if ui
         .button(icons::STEP_NEXT)
-        .on_hover_text("次のフレームへ (. / →)")
+        .on_hover_text(format!("次のフレームへ ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::StepFrame(1) | crate::panels::UiAction::Arrow { dir: crate::panels::ArrowDir::Right, big: false }))))
         .clicked()
     {
         step_frame(host, 1);
     }
     if ui
         .button(icons::SKIP_NEXT)
-        .on_hover_text("最後のフレームへ (End)")
+        .on_hover_text(format!("最後のフレームへ ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::GoToFrame(crate::panels::FrameEnd::Last)))))
         .clicked()
     {
         let last = host.tab().active_timeline().total_frames.saturating_sub(1);
@@ -761,20 +763,22 @@ fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::U
         let next_fps = fps_val.clamp(1, crate::symbol::MAX_FPS);
         apply(host, Action::SetFps { fps: next_fps });
     }
-    if editing_idle(&[&fps_resp]) {
-        apply(
-            host,
-            Action::EndCoalesce {
-                key: Some(CoalesceKey::Fps),
-            },
-        );
+    if let Some(end) = coalesce_end(CoalesceKey::Fps, &[&fps_resp]) {
+        apply(host, end);
     }
 }
 
-/// 数値の欄 `resps` の編集が一区切りした（どれかがフォーカスを失った、またはどれもドラッグ中・フォーカス中でない）かを返す。
-/// `true` のフレームで連続操作のまとめ（`EndCoalesce`）を区切る
-pub(crate) fn editing_idle(resps: &[&egui::Response]) -> bool {
-    resps.iter().any(|r| r.lost_focus()) || !resps.iter().any(|r| r.dragged() || r.has_focus())
+/// まとめのキー `key` で編集する欄 `resps` を見て、まとめを区切る時（`CoalesceKey::ends`）なら区切る操作を返す（欄の部品は
+/// みなこれで区切りを送る）。キーを押し直したときに区切るまとめは、キーの入口（`Is2dApp::run_menu_key`）が区切る
+pub(crate) fn coalesce_end(key: CoalesceKey, resps: &[&egui::Response]) -> Option<Action> {
+    let ends = match key.ends() {
+        crate::canvas_tool::CoalesceEnd::FieldIdle => {
+            resps.iter().any(|r| r.lost_focus()) || !resps.iter().any(|r| r.dragged() || r.has_focus())
+        }
+        crate::canvas_tool::CoalesceEnd::LostFocus => resps.iter().any(|r| r.lost_focus()),
+        crate::canvas_tool::CoalesceEnd::KeyPressedAgain => false,
+    };
+    ends.then_some(Action::EndCoalesce { key: Some(key) })
 }
 
 /// コントロールバー：キーフレーム挿入・削除・フレーム延長/短縮・クラシックトゥイーンボタン
@@ -786,35 +790,35 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
     let can_delete_kf = tl.can_delete_keyframe_on_targets(&targets);
     if ui
         .add_enabled(editable, egui::Button::new("●"))
-        .on_hover_text("現在の絵を複製して新しいキーフレームを挿入 (F6)")
+        .on_hover_text(format!("現在の絵を複製して新しいキーフレームを挿入 ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::InsertKeyframe { copy_prev: true })))))
         .clicked()
     {
         apply(host, Action::InsertKeyframe { copy_prev: true });
     }
     if ui
         .add_enabled(editable, egui::Button::new("○"))
-        .on_hover_text("空の新しいキーフレームを挿入 (F7)")
+        .on_hover_text(format!("空の新しいキーフレームを挿入 ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::InsertKeyframe { copy_prev: false })))))
         .clicked()
     {
         apply(host, Action::InsertKeyframe { copy_prev: false });
     }
     if ui
         .add_enabled(editable, egui::Button::new("＋"))
-        .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 (F5)")
+        .on_hover_text(format!("選択レイヤー（未選択時は全レイヤー）のフレーム尺を1コマ延長 ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::ExtendFrame)))))
         .clicked()
     {
         apply(host, Action::ExtendFrame);
     }
     if ui
         .add_enabled(can_remove_frame, egui::Button::new("－"))
-        .on_hover_text("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 (Shift+F5)")
+        .on_hover_text(format!("選択レイヤー（未選択時は全レイヤー）のフレームを1コマ削除・短縮 ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::RemoveFrame)))))
         .clicked()
     {
         apply(host, Action::RemoveFrame);
     }
     if ui
         .add_enabled(can_delete_kf, egui::Button::new("×"))
-        .on_hover_text("現在のキーフレームを削除 / クリア (Shift+F6)")
+        .on_hover_text(format!("現在のキーフレームを削除 / クリア ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::DeleteKeyframe)))))
         .clicked()
     {
         apply(host, Action::DeleteKeyframe);
@@ -846,7 +850,7 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
     ));
     if ui
         .add_enabled(can_tween, tween_btn)
-        .on_hover_text("クラシックトゥイーンの ON / OFF を切り替え (T)")
+        .on_hover_text(format!("クラシックトゥイーンの ON / OFF を切り替え ({})", crate::menu::keys_text(|a| matches!(a, crate::panels::UiAction::Doc(Action::ToggleTween)))))
         .on_disabled_hover_text(
             "トゥイーンを設定するには、開始キーフレームにシンボルが1つだけ存在する必要があります (F8 でシンボル化)",
         )
@@ -856,14 +860,15 @@ fn draw_control_bar_keyframe_buttons(host: &mut impl TimelineHost, ui: &mut egui
     }
 }
 
-/// コントロールバー：オニオンスキン ON/OFF・前後フレーム数設定
-fn draw_control_bar_onion_controls(tab: &mut Tab, ui: &mut egui::Ui) {
+/// コントロールバー：オニオンスキン ON/OFF（メニューと同じ `UiAction::ToggleView` を送る：約束の棚卸し 5616fcc の C の D1）
+fn draw_control_bar_onion_controls(host: &mut impl TimelineHost, ui: &mut egui::Ui) {
+    let switch = crate::canvas_tool::ViewSwitch::OnionSkin;
     if ui
-        .selectable_label(tab.view.onion_skin_enabled, icons::ONION_SKIN)
+        .selectable_label(host.tab().view.switch(switch), icons::ONION_SKIN)
         .on_hover_text("オニオンスキン（前後のフレームの透かし表示）切替")
         .clicked()
     {
-        tab.view.onion_skin_enabled = !tab.view.onion_skin_enabled;
+        host.send_ui_action(crate::panels::UiAction::ToggleView(switch), ui.ctx());
     }
 }
 

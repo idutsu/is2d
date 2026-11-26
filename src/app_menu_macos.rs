@@ -152,7 +152,7 @@ fn add_table_items(
     items: &mut Vec<Retained<NSMenuItem>>,
 ) {
     for (index, command) in COMMANDS.iter().enumerate() {
-        if command.menu != menu {
+        if command.menu != Some(menu) {
             continue;
         }
         if command.separator_before {
@@ -175,7 +175,7 @@ fn add_table_items(
         };
         if let Some(shortcut) = shortcut {
             let mut mask = NSEventModifierFlags::Command;
-            if shortcut.shift {
+            if shortcut.shift == crate::menu::ShiftKey::On {
                 mask |= NSEventModifierFlags::Shift;
             }
             item.setKeyEquivalentModifierMask(mask);

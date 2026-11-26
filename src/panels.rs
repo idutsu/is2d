@@ -8,7 +8,6 @@ use crate::canvas_tool::{
 use crate::doc_actions::Action;
 #[cfg(not(target_os = "macos"))]
 use crate::menu::{ItemState, Menu, MenuCommand, COMMANDS, COMMAND_COUNT};
-use crate::project_io::PendingCloseConfirm;
 use crate::select_ops::ArrangeMode;
 use crate::symbol::{
     ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate, STAGE_MAX,
@@ -16,7 +15,7 @@ use crate::symbol::{
 };
 use crate::symbol_ops::selected_single_symbol_info;
 pub(crate) use crate::timeline_ui::icons;
-use crate::timeline_ui::{editing_idle, TimelineUiState};
+use crate::timeline_ui::{coalesce_end, TimelineUiState};
 use crate::planar_map::STROKE_WIDTHS;
 use crate::vector_engine::transform_mesh_to_screen;
 
@@ -104,7 +103,7 @@ pub(crate) const fn tool_label(tool: Tool) -> &'static str {
 }
 
 /// ツール種別に対応する左ツールバー用ツールチップ文言（Layer 4 プレゼンテーション定義）。名前は `tool_label`、キーは、ツールの
-/// キーの決まり（`Tool::shortcut_key`）から出す（名前やキーを変えたときに吹き出しだけ古いまま残らないように）
+/// キーの表（`menu::COMMANDS`）から出す（名前やキーを変えたときに吹き出しだけ古いまま残らないように）
 pub(crate) fn tool_tooltip(tool: Tool) -> String {
     let what = match tool {
         Tool::Select => "クリックで選択 / 範囲スライス選択 / 輪郭ドラッグで粘土変形",
@@ -119,13 +118,36 @@ pub(crate) fn tool_tooltip(tool: Tool) -> String {
     format!(
         "{} ({}) - {what}",
         tool_label(tool),
-        tool.shortcut_key().name()
+        crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::SetTool { tool: t }) if *t == tool))
     )
 }
 
 // ============================================================================
 // UIコマンドアクション（パネル描画中に収集し、アプリケーション層で一括ディスパッチする）
 // ============================================================================
+
+/// 矢印キーの向き
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArrowDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// 最初か最後のコマ
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameEnd {
+    First,
+    Last,
+}
+
+/// ズームの向き
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomStep {
+    In,
+    Out,
+}
 
 /// UIパネル（メニュー・ツールバー・タブバー・プロパティ・ライブラリ・確認モーダル）が発行するコマンドアクション
 #[derive(Clone, Debug)]
@@ -159,6 +181,22 @@ pub(crate) enum UiAction {
     FitStageToWindow,
     /// 表示のオン・オフの切り替え（枠外を隠す・アンカーを表示・オニオンスキン）
     ToggleView(ViewSwitch),
+    /// ズーム（ポインタの所を中心に）
+    Zoom(ZoomStep),
+
+    // キーだけの操作（メニューに出さない、表 `menu::COMMANDS` のキーだけの項目）
+    /// 再生 / 一時停止
+    TogglePlayback,
+    /// コマを `isize` 進める・戻す
+    StepFrame(isize),
+    /// 最初・最後のコマへ
+    GoToFrame(FrameEnd),
+    /// 矢印キー：選んでいれば動かし（`big` なら 10px）、選んでいなければ左右でコマを送る
+    Arrow { dir: ArrowDir, big: bool },
+    /// Esc：ドラッグをやめ、選んでいれば選択を外し、選んでいなければグループを1段出る
+    Escape,
+    /// アンカーの編集のキー（A：表示（`None`）、D：追加、F：削除）
+    AnchorEdit(Option<crate::canvas_tool::SelectSubMode>),
 
     // 文書・編集アクション（`doc_actions::apply` へそのまま渡す）
     Doc(Action),
@@ -197,7 +235,7 @@ pub(crate) fn draw_top_menu_bar(
                     ui.menu_button(menu.label(), |ui| {
                         ui.set_min_width(menu_min_width(menu));
                         for (command, state) in COMMANDS.iter().zip(states) {
-                            if command.menu.in_window_bar() != menu {
+                            if command.menu.map(Menu::in_window_bar) != Some(menu) {
                                 continue;
                             }
                             if command.separator_before {
@@ -394,7 +432,7 @@ pub(crate) fn draw_document_tab_bar(
                                                 )
                                                 .frame(false),
                                             )
-                                            .on_hover_text(format!("タブを閉じる ({MOD_KEY}+W)"))
+                                            .on_hover_text(format!("タブを閉じる ({})", crate::menu::keys_text(|a| matches!(a, UiAction::CloseActiveTab))))
                                             .clicked()
                                         {
                                             close_target = Some(idx);
@@ -418,7 +456,7 @@ pub(crate) fn draw_document_tab_bar(
                         .frame(false);
                         let plus_resp = ui
                             .add_sized([TAB_BAR_HEIGHT, TAB_BAR_HEIGHT], plus_btn)
-                            .on_hover_text(format!("新規ドキュメントタブを追加 ({MOD_KEY}+N)"));
+                            .on_hover_text(format!("新規ドキュメントタブを追加 ({})", crate::menu::keys_text(|a| matches!(a, UiAction::NewProject))));
                         ui.painter()
                             .vline(plus_resp.rect.max.x, bar_rect.y_range(), border_stroke);
                         ui.painter().hline(
@@ -502,7 +540,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
 
     if ui
         .button(icons::ARROW_BACK)
-        .on_hover_text("1つ上の階層へ戻る (Esc)")
+        .on_hover_text(format!("1つ上の階層へ戻る ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Escape))))
         .clicked()
     {
         actions.push(UiAction::Doc(Action::ExitGroupSteps { steps: 1 }));
@@ -690,7 +728,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 追加", icons::ADD))
                     .selected(tool.select_sub_mode == SelectSubMode::AddAnchor),
             )
-            .on_hover_text("輪郭上をクリックしてアンカーポイントを追加 (D)")
+            .on_hover_text(format!("輪郭上をクリックしてアンカーポイントを追加 ({})", crate::menu::keys_text(|a| matches!(a, UiAction::AnchorEdit(Some(SelectSubMode::AddAnchor))))))
             .clicked()
         {
             actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
@@ -703,7 +741,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 削除", icons::REMOVE))
                     .selected(tool.select_sub_mode == SelectSubMode::DeleteAnchor),
             )
-            .on_hover_text("アンカーポイントをクリックして削除 (F)")
+            .on_hover_text(format!("アンカーポイントをクリックして削除 ({})", crate::menu::keys_text(|a| matches!(a, UiAction::AnchorEdit(Some(SelectSubMode::DeleteAnchor))))))
             .clicked()
         {
             actions.push(UiAction::Doc(Action::ToggleSelectSubMode {
@@ -716,7 +754,7 @@ fn draw_select_tool_properties(
                 egui::Button::new(format!("{} 表示", icons::WIREFRAME))
                     .selected(tab.view.show_wireframe),
             )
-            .on_hover_text("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示 (A)")
+            .on_hover_text(format!("選択ツール使用中にベクター輪郭のアンカーポイントとパスを表示 ({})", crate::menu::keys_text(|a| matches!(a, UiAction::AnchorEdit(None)))))
             .clicked()
         {
             actions.push(UiAction::ToggleView(ViewSwitch::Anchors));
@@ -777,7 +815,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
                 crate::select_ops::selected_single_layer_id(tab).is_some(),
                 egui::Button::new("シンボル化").min_size(Vec2::new(cell_w, 28.0)),
             )
-            .on_hover_text("選択中の図形をシンボルに変換してライブラリに登録します (F8)")
+            .on_hover_text(format!("選択中の図形をシンボルに変換してライブラリに登録します ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::ConvertToSymbol)))))
             .on_disabled_hover_text("シンボルにできるのは、1つのレイヤーの中で選んだ図形だけです")
             .clicked()
         {
@@ -788,9 +826,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
                 crate::select_ops::selected_single_layer_id(tab).is_some(),
                 egui::Button::new("グループ化").min_size(Vec2::new(cell_w, 28.0)),
             )
-            .on_hover_text(format!(
-                "選択中のオブジェクトを1つのグループにまとめる ({MOD_KEY}+G)"
-            ))
+            .on_hover_text(format!("選択中のオブジェクトを1つのグループにまとめる ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::Group)))))
             .on_disabled_hover_text("グループにできるのは、1つのレイヤーの中で選んだ図形だけです")
             .clicked()
         {
@@ -801,9 +837,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
                 has_group,
                 egui::Button::new("解除").min_size(Vec2::new(cell_w, 28.0)),
             )
-            .on_hover_text(format!(
-                "選択中のグループまたはシンボルインスタンスを1段階解除する ({MOD_KEY}+B)"
-            ))
+            .on_hover_text(format!("選択中のグループまたはシンボルインスタンスを1段階解除する ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::Ungroup)))))
             .clicked()
         {
             actions.push(UiAction::Doc(Action::Ungroup));
@@ -812,24 +846,25 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 
     for pair in [
         [
-            (ArrangeMode::ToFront, "最前面へ", "+Shift+↑"),
-            (ArrangeMode::Forward, "前面へ", "+↑"),
+            (ArrangeMode::ToFront, "最前面へ"),
+            (ArrangeMode::Forward, "前面へ"),
         ],
         [
-            (ArrangeMode::Backward, "背面へ", "+↓"),
-            (ArrangeMode::ToBack, "最背面へ", "+Shift+↓"),
+            (ArrangeMode::Backward, "背面へ"),
+            (ArrangeMode::ToBack, "最背面へ"),
         ],
     ] {
         ui.add_space(4.0);
         equal_width_row(ui, 2, |ui, cell_w| {
-            for (mode, label, suffix) in pair {
+            for (mode, label) in pair {
                 if ui
                     .add_enabled(
                         has_group,
                         egui::Button::new(label).min_size(Vec2::new(cell_w, 28.0)),
                     )
                     .on_hover_text(format!(
-                        "選択中のグループまたはシンボルの重ね順を変更 ({MOD_KEY}{suffix})"
+                        "選択中のグループまたはシンボルの重ね順を変更 ({})",
+                        crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::Arrange { mode: m }) if *m == mode))
                     ))
                     .clicked()
                 {
@@ -1046,10 +1081,8 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
         if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
             actions.push(UiAction::Doc(Action::SetStageSize { size: next_size }));
         }
-        if editing_idle(&[&w_resp, &h_resp]) {
-            actions.push(UiAction::Doc(Action::EndCoalesce {
-                key: Some(CoalesceKey::StageSize),
-            }));
+        if let Some(end) = coalesce_end(CoalesceKey::StageSize, &[&w_resp, &h_resp]) {
+            actions.push(UiAction::Doc(end));
         }
     });
 
@@ -1062,7 +1095,8 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
         egui::Button::new("枠外を隠す").selected(tab.view.clip_outside_stage),
     )
     .on_hover_text(format!(
-        "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします ({MOD_KEY}+3)"
+        "ステージ枠の外側にはみ出た図形を隠して完成画面をプレビューします ({})",
+        crate::menu::keys_text(|a| matches!(a, UiAction::ToggleView(ViewSwitch::ClipOutsideStage)))
     ))
     .clicked()
     {
@@ -1073,7 +1107,8 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
 
     if wide_button(ui, egui::Button::new("ウィンドウに合わせる"))
         .on_hover_text(format!(
-            "ステージ全体が中央キャンバス領域に収まるようにズームと位置を自動調整します ({MOD_KEY}+2)"
+            "ステージ全体が中央キャンバス領域に収まるようにズームと位置を自動調整します ({})",
+            crate::menu::keys_text(|a| matches!(a, UiAction::FitStageToWindow))
         ))
         .clicked()
     {
@@ -1084,7 +1119,8 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
 
     if wide_button(ui, egui::Button::new("100%表示"))
         .on_hover_text(format!(
-            "クリック（または {MOD_KEY}+1）で 100% 表示・初期位置にリセットします"
+            "クリック（または {}）で 100% 表示・初期位置にリセットします",
+            crate::menu::keys_text(|a| matches!(a, UiAction::ResetView))
         ))
         .clicked()
     {
@@ -1321,7 +1357,7 @@ pub(crate) fn draw_selected_symbol_properties(
         SymbolLoopMode::SingleFrame => "表示フレーム:",
         SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => "開始フレーム:",
     };
-    let mut idle = true;
+    let mut end = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(
@@ -1356,7 +1392,7 @@ pub(crate) fn draw_selected_symbol_properties(
         {
             next_first_1based = (next_first_1based + 1).min(max_first_1based);
         }
-        idle = editing_idle(&[&drag_resp]);
+        end = coalesce_end(CoalesceKey::SymbolPlayback(binding.instance_gid), &[&drag_resp]);
     });
 
     if next_mode == SymbolLoopMode::SingleFrame && (2..=12).contains(&max_first_1based) {
@@ -1385,10 +1421,9 @@ pub(crate) fn draw_selected_symbol_properties(
         }
     }
 
-    if next_mode != binding.loop_mode || idle {
-        actions.push(UiAction::Doc(Action::EndCoalesce {
-            key: Some(CoalesceKey::SymbolPlayback(binding.instance_gid)),
-        }));
+    // 区切りは変える前に送る（モードの切り替え・コマのボタンは、開始コマの欄を触っていないので、毎回別の1手になる）
+    if let Some(end) = end {
+        actions.push(UiAction::Doc(end));
     }
     if next_mode != binding.loop_mode || next_first_1based != current_first_1based {
         actions.push(UiAction::Doc(Action::SetSymbolPlayback {
@@ -1446,10 +1481,8 @@ fn draw_symbol_color_effect(
             effect: next_effect,
         }));
     }
-    if editing_idle(&[&a_resp, &b_resp]) {
-        actions.push(UiAction::Doc(Action::EndCoalesce {
-            key: Some(CoalesceKey::SymbolColorEffect(binding.instance_gid)),
-        }));
+    if let Some(end) = coalesce_end(CoalesceKey::SymbolColorEffect(binding.instance_gid), &[&a_resp, &b_resp]) {
+        actions.push(UiAction::Doc(end));
     }
 }
 
@@ -1625,7 +1658,7 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
                                 if resp.changed() {
                                     rename_req = Some((sym_id, name));
                                 }
-                                if resp.lost_focus() {
+                                if coalesce_end(CoalesceKey::RenameSymbol(sym_id), &[&resp]).is_some() {
                                     clear_renaming_id = Some(sym_id);
                                 }
                             });
@@ -1698,7 +1731,7 @@ fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui
                                         if resp.changed() {
                                             rename_req = Some((s.id, name));
                                         }
-                                        if resp.lost_focus() {
+                                        if coalesce_end(CoalesceKey::RenameSound(s.id), &[&resp]).is_some() {
                                             finished_id = Some(s.id);
                                         }
                                     },
@@ -2215,13 +2248,9 @@ fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut
 /// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
 pub(crate) fn draw_unsaved_close_confirm_modal(
     tab: &Tab,
-    pending_close_confirm: &Option<PendingCloseConfirm>,
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    if pending_close_confirm.is_none() {
-        return;
-    }
     let tab_name = tab.base_title();
 
     modal_window(ctx, "未保存の変更の確認", |ui| {
@@ -2277,10 +2306,6 @@ pub(crate) fn draw_recovery_modal(
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    if found.is_empty() {
-        return;
-    }
-
     let now = std::time::SystemTime::now();
     modal_window(ctx, "作業の復元", |ui| {
         ui.set_min_width(320.0);
@@ -2317,13 +2342,10 @@ pub(crate) fn draw_recovery_modal(
 
 /// 動画書き出し中の進み具合と「中止」ボタンを画面中央に表示し、背後の操作をブロックするモーダルダイアログ
 pub(crate) fn draw_video_export_modal(
-    progress: Option<(usize, usize)>,
+    (done, total): (usize, usize),
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    let Some((done, total)) = progress else {
-        return;
-    };
     let total = total.max(1);
     let done = done.min(total);
 

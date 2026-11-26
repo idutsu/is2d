@@ -38,17 +38,16 @@ mod video_export_windows;
 
 use std::time::Instant;
 
-use eframe::egui::{self, Color32, CursorIcon, Key, Pos2, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, CursorIcon, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 
 use canvas_tool::{
-    key_pressed_no_repeat, Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
+    Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
     ToolSettings,
 };
 use doc_actions::{apply, Action, ActionHost};
-use panels::{RightPanelTab, UiAction};
+use panels::{ArrowDir, FrameEnd, RightPanelTab, UiAction, ZoomStep};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
-use select_ops::ArrangeMode;
 use timeline::EditBlock;
 use timeline_ui::{TimelineHost, TimelineUiState};
 #[cfg(test)]
@@ -150,7 +149,8 @@ fn configure_sharp_light_theme(ctx: &egui::Context) {
 /// 出ている間、ほかの操作を止めるダイアログ（`Is2dApp::shown_dialog`）
 #[derive(Clone, Copy)]
 enum Dialog {
-    VideoExport,
+    /// 動画の書き出し中（書いたコマの数, 全部のコマの数）
+    VideoExport((usize, usize)),
     Recovery,
     CloseConfirm,
 }
@@ -162,7 +162,7 @@ impl Dialog {
     /// これ1つで決める
     fn accepts(self, action: &UiAction) -> bool {
         match self {
-            Dialog::VideoExport => matches!(
+            Dialog::VideoExport(_) => matches!(
                 action,
                 UiAction::CancelVideoExport
                     | UiAction::CloseActiveTab
@@ -387,6 +387,10 @@ impl TimelineHost for Is2dApp {
     fn tab_and_timeline_ui_mut(&mut self) -> (&mut Tab, &mut TimelineUiState) {
         (&mut self.tabs[self.active], &mut self.timeline_ui)
     }
+
+    fn send_ui_action(&mut self, action: UiAction, ctx: &egui::Context) {
+        self.apply_action(action, ctx);
+    }
 }
 
 impl Is2dApp {
@@ -469,18 +473,11 @@ impl Is2dApp {
         }
     }
 
-    /// 動画を書き出している途中か（中止の合図を送った後は、裏の処理が残っていても偽）
-    pub(crate) fn is_exporting_video(&self) -> bool {
-        self.video_export
-            .as_ref()
-            .is_some_and(|j| !j.is_cancelled())
-    }
-
     /// いま出ているダイアログ（いちばん上に描くもの：動画の書き出し・復旧・閉じる前の確認の順）。出ている間は、その
     /// ダイアログの操作のほか（ほかの UI の操作・ショートカット・キャンバスの操作）を止める。判定はこれ1つ
     fn shown_dialog(&self) -> Option<Dialog> {
-        if self.is_exporting_video() {
-            Some(Dialog::VideoExport)
+        if let Some(job) = self.video_export.as_ref().filter(|j| !j.is_cancelled()) {
+            Some(Dialog::VideoExport(job.progress()))
         } else if !self.recovery.found.is_empty() {
             Some(Dialog::Recovery)
         } else if self.pending_close_confirm.is_some() {
@@ -515,39 +512,8 @@ impl Is2dApp {
 
     /// UIパネルから収集した `UiAction` を一括ディスパッチする
     pub(crate) fn apply_action(&mut self, action: UiAction, ctx: &egui::Context) {
-        match self.shown_dialog() {
-            None => self.apply_action_without_dialog(action, ctx),
-            Some(dialog) if dialog.accepts(&action) => self.apply_dialog_action(action, ctx),
-            Some(_) => {}
-        }
-    }
-
-    /// ダイアログが出ている間に受け付けた `UiAction`（`Dialog::accepts`）の適用
-    fn apply_dialog_action(&mut self, action: UiAction, ctx: &egui::Context) {
-        match action {
-            UiAction::RestoreRecovered => {
-                let found = std::mem::take(&mut self.recovery.found);
-                recovery::Recovery::restore_found(found, self, ctx);
-            }
-            UiAction::DiscardRecovered => self.recovery.discard_found(),
-            UiAction::CancelVideoExport => self.cancel_active_video_export(),
-            UiAction::CloseActiveTab => {
-                self.cancel_active_video_export();
-                project_io::close_active_tab(self, Some(ctx));
-            }
-            UiAction::CloseTab(idx) => {
-                self.cancel_active_video_export();
-                project_io::close_tab(self, idx, Some(ctx));
-            }
-            UiAction::ConfirmPendingCloseSave => project_io::confirm_pending_close_save(self, ctx),
-            UiAction::ConfirmPendingCloseDiscard => {
-                project_io::confirm_pending_close_discard(self, ctx)
-            }
-            UiAction::ConfirmPendingCloseCancel => {
-                project_io::confirm_pending_close_cancel(self, ctx)
-            }
-            UiAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            _ => {}
+        if self.shown_dialog().is_none_or(|d| d.accepts(&action)) {
+            self.apply_ui_action(action, ctx);
         }
     }
 
@@ -572,31 +538,94 @@ impl Is2dApp {
         std::array::from_fn(|index| self.menu_item_state(index, typing))
     }
 
-    /// ダイアログが出ていないときの `UiAction` の適用
-    fn apply_action_without_dialog(&mut self, action: UiAction, ctx: &egui::Context) {
+    /// `UiAction` の適用（受け付けるかは `apply_action` が決める。ダイアログが出ているときと出ていないときで同じ関数：
+    /// 前は2つの関数に同じ扱いを書き、ダイアログの側は書き忘れると黙って何もしなかった：約束の棚卸し 5616fcc の C の
+    /// D5・E1）。タブを閉じるときは、書き出しを止める（書き出していなければ何もしない）。ダイアログのボタンの操作は、
+    /// そのダイアログが無いときは何もしない（確かめるものが無い）
+    fn apply_ui_action(&mut self, action: UiAction, ctx: &egui::Context) {
         match action {
             UiAction::SelectLibrarySymbol(id) => self.tab_mut().view.select_library_symbol(id),
             UiAction::NewProject => project_io::new_project(self, ctx),
             UiAction::ResetView => self.tab_mut().view.reset_view(),
             UiAction::FitStageToWindow => self.fit_stage_to_window(),
             UiAction::ToggleView(switch) => self.tab_mut().view.toggle(switch),
+            UiAction::Zoom(step) => {
+                let factor = match step {
+                    ZoomStep::In => 1.25,
+                    ZoomStep::Out => 0.8,
+                };
+                let center = ctx
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or_else(|| self.canvas_rect.center());
+                self.tab_mut().view.zoom_around_screen_pos(center, factor);
+            }
+            UiAction::TogglePlayback => timeline_ui::toggle_playback(self),
+            UiAction::StepFrame(delta) => timeline_ui::step_frame(self, delta),
+            UiAction::GoToFrame(end) => {
+                let frame = match end {
+                    FrameEnd::First => 0,
+                    FrameEnd::Last => self.tab().active_timeline().total_frames.saturating_sub(1),
+                };
+                timeline_ui::go_to_frame(self, frame);
+            }
+            UiAction::Arrow { dir, big } => {
+                if self.tab().session.selection().is_empty() {
+                    match dir {
+                        ArrowDir::Left => timeline_ui::step_frame(self, -1),
+                        ArrowDir::Right => timeline_ui::step_frame(self, 1),
+                        ArrowDir::Up | ArrowDir::Down => {}
+                    }
+                } else {
+                    let step = if big { 10.0 } else { 1.0 };
+                    let delta = match dir {
+                        ArrowDir::Left => kurbo::Vec2::new(-step, 0.0),
+                        ArrowDir::Right => kurbo::Vec2::new(step, 0.0),
+                        ArrowDir::Up => kurbo::Vec2::new(0.0, -step),
+                        ArrowDir::Down => kurbo::Vec2::new(0.0, step),
+                    };
+                    apply(self, Action::NudgeSelection { delta });
+                }
+            }
+            UiAction::Escape => {
+                canvas_tool::cancel_active_drag(self.tab_mut());
+                if !self.tab().session.selection().is_empty() {
+                    apply(self, Action::Deselect);
+                } else {
+                    apply(self, Action::ExitGroupSteps { steps: 1 });
+                }
+                self.tool.select_sub_mode = SelectSubMode::Reshape;
+            }
+            UiAction::AnchorEdit(mode) => self.anchor_edit_key(mode),
             UiAction::OpenProjectDialog => project_io::open_project_dialog(self, ctx),
             UiAction::SaveProject => project_io::save_project(self),
             UiAction::SaveProjectAsDialog => project_io::save_project_as_dialog(self),
             UiAction::ExportVideoDialog => self.export_video_dialog(),
             UiAction::ImportSoundDialog => self.import_sound_dialog(),
             UiAction::CancelVideoExport => self.cancel_active_video_export(),
-            UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
-            UiAction::CloseTab(idx) => project_io::close_tab(self, idx, Some(ctx)),
+            UiAction::CloseActiveTab => {
+                self.cancel_active_video_export();
+                project_io::close_active_tab(self, Some(ctx));
+            }
+            UiAction::CloseTab(idx) => {
+                self.cancel_active_video_export();
+                project_io::close_tab(self, idx, Some(ctx));
+            }
             UiAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             UiAction::SwitchToTab(idx) => {
                 project_io::switch_to_tab(self, idx, Some(ctx));
             }
-            UiAction::ConfirmPendingCloseSave
-            | UiAction::ConfirmPendingCloseDiscard
-            | UiAction::ConfirmPendingCloseCancel
-            | UiAction::RestoreRecovered
-            | UiAction::DiscardRecovered => {}
+            UiAction::ConfirmPendingCloseSave => project_io::confirm_pending_close_save(self, ctx),
+            UiAction::ConfirmPendingCloseDiscard => {
+                project_io::confirm_pending_close_discard(self, ctx)
+            }
+            UiAction::ConfirmPendingCloseCancel => {
+                project_io::confirm_pending_close_cancel(self, ctx)
+            }
+            UiAction::RestoreRecovered => {
+                let found = std::mem::take(&mut self.recovery.found);
+                recovery::Recovery::restore_found(found, self, ctx);
+            }
+            UiAction::DiscardRecovered => self.recovery.discard_found(),
             UiAction::Doc(action) => {
                 apply(self, action);
             }
@@ -612,50 +641,39 @@ impl Is2dApp {
         // V の押す・離すの合図は、ほかの判定で抜ける前に毎コマ見る（`Clipboard::swallowed_paste`）
         let swallowed_paste = self.clipboard.swallowed_paste(&input.events);
         let typing = ctx.wants_keyboard_input();
-        for (shortcut, repeat) in menu::pressed_shortcuts(&input, swallowed_paste) {
-            self.run_menu_key(shortcut, repeat, typing, ctx);
-        }
-        let cmd = input.modifiers.command || input.modifiers.ctrl;
-        // ダイアログが出ている間に受け付けるキーは、表のキー（上の `run_menu_key`。`Dialog::accepts` で決める）だけ
-        if self.shown_dialog().is_some() {
-            return;
-        }
-        if typing {
-            return;
-        }
-        let clipboard_event = input.events.iter().any(|ev| {
-            matches!(
-                ev,
-                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
-            )
-        });
-
-        self.handle_command_shortcuts(&input, cmd);
-
-        if !cmd && !clipboard_event {
-            self.handle_single_key_shortcuts(&input, input.modifiers.shift);
+        // キーはみな表（`menu::COMMANDS`）から引く（前は表の外に、1文字のキーと `Cmd` のキーを決める所が2つあった：
+        // 約束の棚卸し 5616fcc の C の E3）。ダイアログが出ている間に受け付けるかは `Dialog::accepts` が決める
+        for (pressed, repeat) in menu::pressed_shortcuts(&input, swallowed_paste) {
+            self.run_menu_key(pressed, repeat, typing, ctx);
         }
     }
 
     /// メニューの項目のキー `shortcut`（`repeat` は押しっぱなしの繰り返しか）を、表（`menu::COMMANDS`）で決めて動かす。
     /// 入力欄に文字を入れている最中（`typing`）は、入力欄が使うキー（`Cmd` の付かないキーと、文字の操作のある項目の
     /// キー：`MenuCommand::text_op_for`）は入力欄のもの（キーの合図は egui が入力欄へ渡している）
+    /// メニューに出さないキーだけの項目（`MenuCommand::menu` が `None`）は、入力欄に文字を入れている最中は受け付けない
+    /// （キャンバスとタイムラインのキー）。押し直した（繰り返しでない）キーは、押し直しで区切るまとめを区切ってから動かす
+    /// （矢印で動かすのは押しているあいだ1手にまとめ、押し直すと別の1手にする）
     fn run_menu_key(
         &mut self,
-        shortcut: menu::Shortcut,
+        pressed: menu::Pressed,
         repeat: bool,
         typing: bool,
         ctx: &egui::Context,
     ) {
-        let Some(index) = menu::command_for_key(shortcut, self.os_menu_has_keys()) else {
+        let Some(index) = menu::command_for_key(pressed, self.os_menu_has_keys()) else {
             return;
         };
         let command = &menu::COMMANDS[index];
         if repeat && !command.repeats {
             return;
         }
-        if typing && (!shortcut.command || command.text_op_for(typing).is_some()) {
+        if typing && (!pressed.command || command.menu.is_none() || command.text_op_for(typing).is_some()) {
             return;
+        }
+        // キーを押し直したら、押し直しで区切るまとめ（`CoalesceKey::ends`）を区切る
+        if !repeat {
+            apply(self, Action::EndCoalesceOn { end: canvas_tool::CoalesceEnd::KeyPressedAgain });
         }
         self.apply_action(command.action.clone(), ctx);
     }
@@ -688,139 +706,6 @@ impl Is2dApp {
                 }
                 None => self.apply_action(command.action.clone(), ctx),
             }
-        }
-    }
-
-    fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.tab().session.selection().is_empty() {
-            let step = if shift { 10.0 } else { 1.0 };
-            let mut delta = kurbo::Vec2::ZERO;
-            let mut any_non_repeat = false;
-            for ev in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat,
-                    ..
-                } = ev
-                {
-                    match key {
-                        Key::ArrowLeft => {
-                            delta.x -= step;
-                            any_non_repeat |= !*repeat;
-                        }
-                        Key::ArrowRight => {
-                            delta.x += step;
-                            any_non_repeat |= !*repeat;
-                        }
-                        Key::ArrowUp => {
-                            delta.y -= step;
-                            any_non_repeat |= !*repeat;
-                        }
-                        Key::ArrowDown => {
-                            delta.y += step;
-                            any_non_repeat |= !*repeat;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if delta != kurbo::Vec2::ZERO {
-                if any_non_repeat {
-                    apply(
-                        self,
-                        Action::EndCoalesce {
-                            key: Some(canvas_tool::CoalesceKey::NudgeSelection),
-                        },
-                    );
-                }
-                apply(self, Action::NudgeSelection { delta });
-                return;
-            }
-        }
-
-        if key_pressed_no_repeat(i, Key::Enter) {
-            timeline_ui::toggle_playback(self);
-        } else if i.key_pressed(Key::Comma) || i.key_pressed(Key::ArrowLeft) {
-            timeline_ui::step_frame(self, -1);
-        } else if i.key_pressed(Key::Period) || i.key_pressed(Key::ArrowRight) {
-            timeline_ui::step_frame(self, 1);
-        } else if key_pressed_no_repeat(i, Key::Home) {
-            timeline_ui::go_to_frame(self, 0);
-        } else if key_pressed_no_repeat(i, Key::End) {
-            let last = self.tab().active_timeline().total_frames.saturating_sub(1);
-            timeline_ui::go_to_frame(self, last);
-        } else if i.key_pressed(Key::F6) {
-            if shift {
-                apply(self, Action::DeleteKeyframe);
-            } else {
-                apply(self, Action::InsertKeyframe { copy_prev: true });
-            }
-        } else if i.key_pressed(Key::F7) {
-            apply(self, Action::InsertKeyframe { copy_prev: false });
-        } else if key_pressed_no_repeat(i, Key::F8) {
-            apply(self, Action::ConvertToSymbol);
-        } else if i.key_pressed(Key::F5) {
-            if shift {
-                apply(self, Action::RemoveFrame);
-            } else {
-                apply(self, Action::ExtendFrame);
-            }
-        } else if key_pressed_no_repeat(i, Key::T) {
-            apply(self, Action::ToggleTween);
-        } else if let Some(tool) = Tool::from_shortcut_input(i) {
-            apply(self, Action::SetTool { tool });
-        } else if key_pressed_no_repeat(i, Key::Escape) {
-            canvas_tool::cancel_active_drag(self.tab_mut());
-            if !self.tab().session.selection().is_empty() {
-                apply(self, Action::Deselect);
-            } else {
-                apply(self, Action::ExitGroupSteps { steps: 1 });
-            }
-            self.tool.select_sub_mode = SelectSubMode::Reshape;
-        } else if key_pressed_no_repeat(i, Key::A) {
-            self.anchor_edit_key(None);
-        } else if key_pressed_no_repeat(i, Key::D) {
-            self.anchor_edit_key(Some(SelectSubMode::AddAnchor));
-        } else if key_pressed_no_repeat(i, Key::F) {
-            self.anchor_edit_key(Some(SelectSubMode::DeleteAnchor));
-        }
-    }
-
-    /// 表（`menu::COMMANDS`）に無い `Cmd` のショートカット
-    fn handle_command_shortcuts(&mut self, i: &egui::InputState, cmd: bool) {
-        if let Some(key) = plus_minus_pressed(&i.events).filter(|_| cmd) {
-            let factor = match key {
-                PlusMinus::Plus => 1.25,
-                PlusMinus::Minus => 0.8,
-            };
-            let center = i
-                .pointer
-                .hover_pos()
-                .unwrap_or_else(|| self.canvas_rect.center());
-            self.tab_mut().view.zoom_around_screen_pos(center, factor);
-        } else if cmd && key_pressed_no_repeat(i, Key::G) {
-            if i.modifiers.shift {
-                apply(self, Action::Ungroup);
-            } else {
-                apply(self, Action::Group);
-            }
-        } else if cmd && key_pressed_no_repeat(i, Key::B) {
-            apply(self, Action::Ungroup);
-        } else if cmd && key_pressed_no_repeat(i, Key::ArrowUp) {
-            let mode = if i.modifiers.shift {
-                ArrangeMode::ToFront
-            } else {
-                ArrangeMode::Forward
-            };
-            apply(self, Action::Arrange { mode });
-        } else if cmd && key_pressed_no_repeat(i, Key::ArrowDown) {
-            let mode = if i.modifiers.shift {
-                ArrangeMode::ToBack
-            } else {
-                ArrangeMode::Backward
-            };
-            apply(self, Action::Arrange { mode });
         }
     }
 
@@ -1138,21 +1023,17 @@ impl Is2dApp {
                 );
             });
 
-        panels::draw_unsaved_close_confirm_modal(
-            self.tab(),
-            &self.pending_close_confirm,
-            &mut actions,
-            ctx,
-        );
-        panels::draw_recovery_modal(&self.recovery.found, &mut actions, ctx);
-        panels::draw_video_export_modal(
-            self.video_export
-                .as_ref()
-                .filter(|j| !j.is_cancelled())
-                .map(|j| j.progress()),
-            &mut actions,
-            ctx,
-        );
+        // 出ているダイアログ（`shown_dialog`。受け付ける操作 `Dialog::accepts` と同じ1つの判定）だけを描く
+        match self.shown_dialog() {
+            Some(Dialog::VideoExport(progress)) => {
+                panels::draw_video_export_modal(progress, &mut actions, ctx)
+            }
+            Some(Dialog::Recovery) => panels::draw_recovery_modal(&self.recovery.found, &mut actions, ctx),
+            Some(Dialog::CloseConfirm) => {
+                panels::draw_unsaved_close_confirm_modal(self.tab(), &mut actions, ctx)
+            }
+            None => {}
+        }
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
@@ -1222,36 +1103,6 @@ impl Is2dApp {
         let maps = prefetch::wanted_maps(tl, first, last, !playing, self.timeline_ui.loop_playback);
         self.prefetch.want(maps);
     }
-}
-
-/// `+` と `-` のキー（`Cmd` と合わせてズームイン・アウト）
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PlusMinus {
-    Plus,
-    Minus,
-}
-
-/// このコマに押した `+`／`-` のキーを、キーの位置（`Event::Key` の `physical_key`）だけで決める。
-/// キーの位置は配列（US・JIS など）や日本語入力に左右されないので、文字の合図は見ない。
-///
-/// キーの位置の名前は US 配列の刻印で付いている。`-` は、どちらの配列でも `0` の右のキー
-/// （`Key::Minus`。テンキーの `-` も同じ名前で来る）。`+` の刻印は、US では `0` の2つ右のキー
-/// （`Key::Equals`）、JIS では `L` の右のキー（`Key::Semicolon`）にある。キーの位置からは配列が
-/// わからないので、`+` はこの2つの位置とテンキーの `+`（`Key::Plus`）のどれでも `+` とする
-/// （そのため US の `;`、JIS の `^` のキーも `+` になる）。押しっぱなしの繰り返しの合図も数える（ズームを続ける）
-fn plus_minus_pressed(events: &[egui::Event]) -> Option<PlusMinus> {
-    events.iter().find_map(|ev| match ev {
-        egui::Event::Key {
-            physical_key: Some(key),
-            pressed: true,
-            ..
-        } => match key {
-            Key::Equals | Key::Semicolon | Key::Plus => Some(PlusMinus::Plus),
-            Key::Minus => Some(PlusMinus::Minus),
-            _ => None,
-        },
-        _ => None,
-    })
 }
 
 impl eframe::App for Is2dApp {
