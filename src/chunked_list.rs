@@ -390,6 +390,29 @@ impl<T: Keyed> ChunkedList<T> {
     }
 
     /// 数と要素を、前から順に
+    /// `other` と同じ並びか：数と要素が順に同じ（要素は同じ箱か `same`）。同じ所にある同じ塊（番地と基準が同じ）は、中を
+    /// 見ない（手間は変わった塊の分。編集で写すのは触った塊だけなので、作品の大きさによらない）。塊の切れ目が違うとき
+    /// だけ、要素を順に比べる
+    pub(crate) fn same_keyed(&self, other: &Self, same: impl Fn(&T, &T) -> bool) -> bool {
+        if self.ptr_eq(other) {
+            return true;
+        }
+        if self.len != other.len {
+            return false;
+        }
+        let eq = |(ka, a): (usize, &Arc<T>), (kb, b): (usize, &Arc<T>)| ka == kb && (Arc::ptr_eq(a, b) || same(a, b));
+        let (x, y) = (&self.chunks, &other.chunks);
+        if x.starts != y.starts {
+            return self.iter_keyed().zip(other.iter_keyed()).all(|(a, b)| eq(a, b));
+        }
+        x.chunks.iter().zip(&y.chunks).zip(x.bases.iter().zip(&y.bases)).all(|((ca, cb), (&ba, &bb))| {
+            (Arc::ptr_eq(ca, cb) && ba == bb)
+                || ca.iter().zip(cb.iter()).all(|(a, b)| {
+                    eq(((ba + a.rel()) as usize, a), ((bb + b.rel()) as usize, b))
+                })
+        })
+    }
+
     pub(crate) fn iter_keyed(&self) -> impl Iterator<Item = (usize, &Arc<T>)> + '_ {
         self.chunks
             .chunks

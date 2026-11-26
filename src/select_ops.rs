@@ -304,7 +304,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let editable_lids = editable_layer_ids(tab);
     let scope = tab.session.editing_group_path.clone();
     let floating = tab.session.floating();
-    let modified = floating.is_some_and(|fl| fl.modified);
+    let modified = floating.is_some_and(|fl| fl.modified());
     let pieces: HashSet<ShapeId> = tab.session.floating_view().piece_ids();
     let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
     // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー。レイヤーごとに、
@@ -538,7 +538,6 @@ pub(crate) fn selected_single_layer_id(tab: &Tab) -> Option<LayerId> {
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる
 pub(crate) fn prepare_group_selected_shapes(
     tab: &mut Tab,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     cancel_active_drag(tab);
     let Some(target_lid) = selected_single_layer_id(tab) else {
@@ -550,8 +549,6 @@ pub(crate) fn prepare_group_selected_shapes(
     {
         return false;
     }
-
-    before_mutate(tab);
     // 選んだ生の図形は先に片に持ち上げ（持ち上げられなければ断る）、レイヤーごとに片の組を重ねた地図（変換をかけて、
     // その座標の格子で正しい地図にしたもの）にして、新しいグループの階層の地図にする。生の図形は、この片の地図だけで
     // 書く（図形の並びでは書かない）。地図にできない片（格子に置けない座標がある）があれば、グループにしない
@@ -661,7 +658,6 @@ pub(crate) fn prepare_group_selected_shapes(
 /// 運び、図形から地図は作らない。中身が格子の外にかかるなら、文書を変える前に断る
 pub(crate) fn prepare_ungroup_selected_shapes(
     tab: &mut Tab,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     cancel_active_drag(tab);
     if !tab
@@ -750,7 +746,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(
             Affine::IDENTITY,
         ));
     }
-    before_mutate(tab);
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
     let selection = tab.session.selection.clone();
@@ -799,7 +794,6 @@ pub(crate) enum ArrangeMode {
 pub(crate) fn prepare_arrange_selected(
     tab: &mut Tab,
     mode: ArrangeMode,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     if !commit_floating(tab) {
         return false;
@@ -863,8 +857,6 @@ pub(crate) fn prepare_arrange_selected(
     if layer_orders.is_empty() {
         return false;
     }
-
-    before_mutate(tab);
     let target_lids: Vec<LayerId> = layer_orders.iter().map(|(lid, _)| *lid).collect();
     write_cels(tab, &target_lids, |lid, cel, _| {
         Ok(layer_orders
@@ -878,7 +870,6 @@ pub(crate) fn prepare_arrange_selected(
 /// 選択中のオブジェクトをキャンバスから削除する
 pub(crate) fn prepare_delete_selected_shapes(
     tab: &mut Tab,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     cancel_active_drag(tab);
     if tab.session.selection.is_empty() {
@@ -894,8 +885,6 @@ pub(crate) fn prepare_delete_selected_shapes(
     if !any_valid {
         return false;
     }
-
-    before_mutate(tab);
 
     // 浮いた片は捨て、残りだけを確定する
     if let Some(fl) = tab.session.take_floating() {
@@ -923,7 +912,6 @@ pub(crate) fn prepare_delete_selected_shapes(
 /// 現在の編集スコープの図形をすべて消去する
 pub(crate) fn prepare_clear_active_frame_shapes(
     tab: &mut Tab,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     let layer_ids = editable_layer_ids(tab);
     let has_any_in_scope = tab.scene().iter().any(|s| {
@@ -935,7 +923,6 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     if !clear_selection(tab) {
         return false;
     }
-    before_mutate(tab);
     let scope = tab.session.editing_group_path.clone();
     write_cels(tab, &layer_ids, |_, cel, _| Ok(cel.clear(&scope)));
     true

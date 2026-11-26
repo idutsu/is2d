@@ -56,7 +56,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     let xform = session.edit_path.world_xform();
     // 動かしていない浮いた片は、どの操作でも先に戻してから地図を編集する（`apply_anchor_edit_at`）ので、カーソル合わせも
     // 戻した後の地図（セル画の地図）で行う。動かした浮いた片は、残りの地図と片の地図（`floating_maps`）で行う
-    let floating = session.floating().filter(|fl| fl.modified);
+    let floating = session.floating().filter(|fl| fl.modified());
     let pieces: HashSet<ShapeId> = if floating.is_some() {
         session.floating_view().piece_ids()
     } else {
@@ -237,7 +237,7 @@ fn anchor_hover_in(
 
 /// 動かして浮いている片の、片の組ごとの地図（片の地図を「ステージへの変換 ∘ 片の変換」で置く）
 fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
-    let Some(fl) = session.floating().filter(|fl| fl.modified) else {
+    let Some(fl) = session.floating().filter(|fl| fl.modified()) else {
         return Vec::new();
     };
     let world = session.edit_path.world_xform();

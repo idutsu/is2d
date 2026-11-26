@@ -5473,7 +5473,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     assert!(self_union_app
         .session
         .floating()
-        .is_some_and(|fl| !fl.modified));
+        .is_some_and(|fl| !fl.modified()));
     assert!(self_union_app.scene().len() >= 2);
     doc_actions::apply(
         &mut self_union_app,
@@ -11419,7 +11419,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .session
         .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
-    assert!(!fl.modified);
+    assert!(!fl.modified());
     assert_eq!(app.session.floating_view().pieces().len(), 1);
     assert_eq!(app.session.floating_view().remainder().count(), 1);
     assert_eq!(app.session.floating_view().hidden().len(), 1);
@@ -11451,7 +11451,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .session
         .floating()
         .expect("スライス断片の移動後も Floating が保持されること");
-    assert!(fl_moved.modified);
+    assert!(fl_moved.modified());
 
     // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
     run(&mut app, &[Action::CommitFloating]);
@@ -11477,7 +11477,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .session
         .floating()
         .expect("ペースト直後に Floating が生成されること");
-    assert!(fl_paste.modified);
+    assert!(fl_paste.modified());
     assert_eq!(app.scene().len(), 2);
 
     run(&mut app, &[Action::CommitFloating]);
@@ -18020,7 +18020,7 @@ fn test_m5_1_n3002_f7_on_empty_frame_preserves_redo_and_clean_state() {
         &mut app,
         Action::InsertKeyframe { copy_prev: false }
     ));
-    assert!(app.tab().history.pending.is_none());
+    assert!(app.tab().history.before.is_none());
     assert_eq!(app.tab().history.undo_stack.len(), 0);
     assert_eq!(app.tab().history.redo_stack.len(), 1);
     assert!(!app.tab().history.is_dirty());
@@ -18058,7 +18058,7 @@ fn test_m5_1_f7_twice_on_drawn_frame_second_is_noop() {
         &mut app,
         Action::InsertKeyframe { copy_prev: false }
     ));
-    assert!(app.tab().history.pending.is_none());
+    assert!(app.tab().history.before.is_none());
     assert_eq!(app.tab().history.undo_stack.len(), undo_after_first);
     assert!(!app.tab().history.is_dirty());
 }
@@ -18101,7 +18101,7 @@ fn test_m5_1_n3001_f8_nest_limit_preserves_redo_and_oldest_undo() {
     // 一番外のインスタンスを選んで F8 → 9段目は拒否され、Redo 1件が残り、Redo で線が戻ること
     assert!(apply(&mut app, Action::SelectSingleAt { pt: c }));
     assert!(!apply(&mut app, Action::ConvertToSymbol));
-    assert!(app.tab().history.pending.is_none());
+    assert!(app.tab().history.before.is_none());
     assert_eq!(app.tab().doc.library.len(), 8);
     assert_eq!(app.tab().history.undo_stack.len(), undo_before_reject);
     assert_eq!(app.tab().history.redo_stack.len(), 1);
@@ -18196,40 +18196,314 @@ fn test_m5_1_deform_shape_without_editable_target_preserves_undo_and_clean_state
     assert!(!app.tab().history.is_dirty());
 }
 
-#[test]
-fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
-    use crate::doc_actions::{apply, Action};
-    use crate::project_io::ProjectDocument;
-    use crate::select_ops::ArrangeMode;
-    use crate::timeline::TimelineCellSelection;
-    use std::collections::BTreeMap;
+/// でたらめな操作の試しの乱数（同じ種からは同じ並び）
+struct OpRng(u64);
 
-    struct Rng(u64);
-    impl Rng {
-        fn next_u32(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (self.0 >> 32) as u32
-        }
-        fn range(&mut self, max: usize) -> usize {
-            if max == 0 {
-                0
-            } else {
-                (self.next_u32() as usize) % max
-            }
-        }
-        fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
-            let t = (self.next_u32() as f64) / (u32::MAX as f64);
-            lo + (hi - lo) * t
+impl OpRng {
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 32) as u32
+    }
+    fn range(&mut self, max: usize) -> usize {
+        if max == 0 {
+            0
+        } else {
+            (self.next_u32() as usize) % max
         }
     }
+    fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
+        let t = (self.next_u32() as f64) / (u32::MAX as f64);
+        lo + (hi - lo) * t
+    }
+    fn coin(&mut self) -> bool {
+        self.range(2) == 0
+    }
+}
 
-    let doc_json =
-        |app: &Is2dApp| -> String { content_json(&ProjectDocument::from_app(app.tab()).unwrap()) };
-    let doc_json_ignoring_active_layer = |app: &Is2dApp| -> String {
-        let mut pd = ProjectDocument::from_app(app.tab()).unwrap();
+/// `doc_actions::Action` の種類の名前を、定義（doc_actions.rs）から全部読む。でたらめな操作の試しが全部の種類を作れることを、
+/// 手で書いた名簿でなく定義と突き合わせて確かめるため（種類を足すと、試しが作れるようにするまでテストが止まる：設計
+/// claude/約束を入口で守る設計_5616fcc.md の 7.）
+fn action_kind_names() -> Vec<String> {
+    let src = include_str!("doc_actions.rs");
+    let start = src.find("pub(crate) enum Action {").expect("Action の定義");
+    let mut depth = 0i32;
+    let mut names = Vec::new();
+    for line in src[start..].lines().skip(1) {
+        let t = line.trim();
+        if depth == 0 {
+            if t == "}" {
+                break;
+            }
+            if let Some(c) = t.chars().next() {
+                if c.is_ascii_uppercase() {
+                    let name: String = t.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                    names.push(name);
+                }
+            }
+        }
+        depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+    }
+    names
+}
+
+/// 種類の名前（`Debug` の頭）
+fn action_kind_name(action: &Action) -> String {
+    format!("{action:?}").chars().take_while(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// 今の作品の状態から選んだ、種類 `kind` のでたらめな操作（断られてもよい：断られたときに何も変えないことを確かめる）
+fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
+    use crate::canvas_tool::SelectSubMode;
+    use crate::planar_map::EdgeStroke;
+    use crate::select_ops::ArrangeMode;
+    use crate::timeline::{TimelineCellSelection, TweenRotate};
+    use crate::vector_engine::{ColorEffect, SymbolLoopMode};
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let tab = app.tab();
+    let tl = tab.active_timeline();
+    let pt = |rng: &mut OpRng| Point::new(rng.f64_range(c.x - 130.0, c.x + 130.0), rng.f64_range(c.y - 100.0, c.y + 100.0));
+    let colors = [Color32::from_rgb(220, 50, 50), Color32::from_rgb(50, 160, 80), Color32::from_rgb(50, 100, 220)];
+    let color = |rng: &mut OpRng| colors[rng.range(colors.len())];
+    let stroke = |rng: &mut OpRng| EdgeStroke { color: colors[rng.range(colors.len())], width: 2 + rng.range(5) as u8 };
+    // 画面の図形の輪郭の点（輪郭の変形・アンカー・インクボトルが当たるように）
+    let scene = tab.scene();
+    let shapes: Vec<FillShape> = scene.iter().cloned().collect();
+    let on_contour = |rng: &mut OpRng| -> Option<(FillShape, QuadBez, f64)> {
+        let s = shapes.get(rng.range(shapes.len()))?;
+        let segs: Vec<QuadBez> = s.contours().flat_map(|c| c.segments.iter().copied()).collect();
+        let q = *segs.get(rng.range(segs.len()))?;
+        Some((s.clone(), q, rng.f64_range(0.1, 0.9)))
+    };
+    let contour_pt = |rng: &mut OpRng| on_contour(rng).map_or_else(|| pt(rng), |(_, q, t)| q.eval(t));
+    let sym_id = |rng: &mut OpRng| tab.doc.library.get(rng.range(tab.doc.library.len())).map_or(999, |s| s.id);
+    let sound_id = |rng: &mut OpRng| tab.doc.sounds.get(rng.range(tab.doc.sounds.len())).map_or(999, |s| s.id);
+    let layer = |rng: &mut OpRng| rng.range(tl.layers.len() + 1);
+    let frame = |rng: &mut OpRng| rng.range(tl.total_frames + 2);
+    let selected = tab.session.selected_indices();
+    let pivot = tab.session.transform_pivot.unwrap_or(c);
+    match kind {
+        "PaintStroke" => {
+            let p0 = pt(rng);
+            Action::PaintStroke { points: vec![p0, p0 + KVec2::new(rng.f64_range(20.0, 70.0), rng.f64_range(-40.0, 40.0))], radius: 6.0, color: color(rng) }
+        }
+        "EraseStroke" => {
+            let p0 = pt(rng);
+            Action::EraseStroke { points: vec![p0, p0 + KVec2::new(50.0, 20.0)], radius: 8.0 }
+        }
+        "CommitRawOutline" => {
+            let p0 = pt(rng);
+            let r = rng.f64_range(10.0, 40.0);
+            Action::CommitRawOutline { raw: vec![p0, p0 + KVec2::new(r, 0.0), p0 + KVec2::new(r, r), p0 + KVec2::new(0.0, r)] }
+        }
+        "BucketFill" => Action::BucketFill { pt: pt(rng), color: color(rng) },
+        "PencilStroke" => {
+            let p0 = pt(rng);
+            Action::PencilStroke { points: vec![p0, p0 + KVec2::new(30.0, 10.0), p0 + KVec2::new(60.0, 35.0)], stroke: stroke(rng) }
+        }
+        "DrawLines" => {
+            let (a, b) = (pt(rng), pt(rng));
+            Action::DrawLines { segs: vec![(QuadBez::new(a, a.midpoint(b), b), stroke(rng))] }
+        }
+        "InkBottle" => Action::InkBottle { pt: contour_pt(rng), stroke: stroke(rng) },
+        "SelectSingleAt" => {
+            let p = shapes.get(rng.range(shapes.len())).map_or_else(|| pt(rng), |s| s.bounding_box().center());
+            Action::SelectSingleAt { pt: p }
+        }
+        "ToggleSelectionAt" => Action::ToggleSelectionAt { scene_idx: rng.range(shapes.len().max(1)) },
+        "RetainSelection" => Action::RetainSelection { keep_indices: selected.iter().copied().filter(|_| rng.coin()).collect() },
+        "SelectMarquee" => {
+            let p0 = Point::new(rng.f64_range(c.x - 140.0, c.x + 20.0), rng.f64_range(c.y - 100.0, c.y + 20.0));
+            Action::SelectMarquee { p0, p1: p0 + KVec2::new(rng.f64_range(30.0, 160.0), rng.f64_range(30.0, 120.0)), additive: rng.coin() }
+        }
+        "SelectAll" => Action::SelectAll,
+        "Deselect" => Action::Deselect,
+        "CommitFloating" => Action::CommitFloating,
+        "MoveSelected" => Action::MoveSelected { delta: KVec2::new(rng.f64_range(-20.0, 20.0), rng.f64_range(-20.0, 20.0)) },
+        "NudgeSelection" => Action::NudgeSelection { delta: KVec2::new([-1.0, 1.0, 10.0][rng.range(3)], 0.0) },
+        "FinishMoveSelectionDrag" => Action::FinishMoveSelectionDrag { total_delta: KVec2::new(15.0, 12.0), alt_duplicate: rng.coin() },
+        "DeleteSelection" => Action::DeleteSelection,
+        "ClearActiveFrame" => Action::ClearActiveFrame,
+        "Group" => Action::Group,
+        "Ungroup" => Action::Ungroup,
+        "Arrange" => Action::Arrange { mode: [ArrangeMode::ToFront, ArrangeMode::Forward, ArrangeMode::Backward, ArrangeMode::ToBack][rng.range(4)] },
+        "EnterGroupAt" => Action::EnterGroupAt { pt: contour_pt(rng) },
+        "SelectConnectedAt" => Action::SelectConnectedAt { pt: contour_pt(rng), add: rng.coin() },
+        "ExitGroupSteps" => Action::ExitGroupSteps { steps: 1 + rng.range(2) },
+        "ReshapeEdge" => match on_contour(rng) {
+            Some((s, q, t)) => Action::ReshapeEdge { layer_id: s.layer_id, grab_t: t, target_pos: q.eval(t) + KVec2::new(8.0, -6.0), orig_seg: q, follow: rng.coin() },
+            None => Action::Deselect,
+        },
+        "MoveVertex" => match on_contour(rng) {
+            Some((s, q, _)) => Action::MoveVertex { layer_id: s.layer_id, orig_vertex: q.p0, target_pos: q.p0 + KVec2::new(-7.0, 9.0), follow: rng.coin() },
+            None => Action::Deselect,
+        },
+        "PullEdgeFromTo" => {
+            let from = contour_pt(rng);
+            Action::PullEdgeFromTo { from, to: from + KVec2::new(6.0, 6.0) }
+        }
+        "MoveVertexFromTo" => {
+            let from = on_contour(rng).map_or_else(|| pt(rng), |(_, q, _)| q.p0);
+            Action::MoveVertexFromTo { from, to: from + KVec2::new(5.0, -5.0) }
+        }
+        "AddAnchor" => Action::AddAnchor { pt: contour_pt(rng) },
+        "DeleteAnchor" => Action::DeleteAnchor { pt: on_contour(rng).map_or_else(|| pt(rng), |(_, q, _)| q.p0) },
+        "ScaleSelection" => Action::ScaleSelection { sx: rng.f64_range(0.6, 1.5), sy: rng.f64_range(0.6, 1.5) },
+        "FlipSelection" => Action::FlipSelection { flip_x: rng.coin(), flip_y: rng.coin() },
+        "RotateSelection" => Action::RotateSelection { angle_rad: rng.f64_range(-1.0, 1.0) },
+        "SetTransformPivot" => Action::SetTransformPivot { world_pivot: rng.coin().then(|| pt(rng)) },
+        "ResetTransformPivot" => Action::ResetTransformPivot,
+        "CommitTransformDrag" => {
+            let s = rng.f64_range(0.7, 1.4);
+            let affine = kurbo::Affine::translate(pivot.to_vec2()) * kurbo::Affine::scale(s) * kurbo::Affine::translate(-pivot.to_vec2());
+            Action::CommitTransformDrag { affine, orig_pivot: pivot, had_custom_pivot: tab.session.transform_pivot.is_some(), changed: true }
+        }
+        "CommitPivotDrag" => Action::CommitPivotDrag { new_pivot: pt(rng), orig_pivot: pivot, had_custom_pivot: tab.session.transform_pivot.is_some(), changed: true },
+        "Copy" => Action::Copy,
+        "Cut" => Action::Cut,
+        "Paste" => Action::Paste { in_place: rng.coin() },
+        "ConvertToSymbol" => Action::ConvertToSymbol,
+        "PlaceSymbol" => Action::PlaceSymbol { sym_id: sym_id(rng) },
+        "EnterSymbolTimeline" => {
+            let gids: Vec<u64> = tl.layers.iter().filter_map(|l| l.keyframe_index_at(tl.current_frame).and_then(|k| l.keyframes.get(k))).flat_map(|k| k.cel.instances.iter().map(|i| i.binding.instance_gid)).collect();
+            Action::EnterSymbolTimeline { instance_gid: gids.get(rng.range(gids.len())).copied().unwrap_or(999) }
+        }
+        "EnterSymbolFromLibrary" => Action::EnterSymbolFromLibrary { sym_id: sym_id(rng) },
+        "ExitSymbolTimeline" => Action::ExitSymbolTimeline,
+        "ExitSymbolToDepth" => Action::ExitSymbolToDepth { depth: rng.range(tab.session.edit_path.levels.len() + 1) },
+        "RenameSymbol" => Action::RenameSymbol { sym_id: sym_id(rng), new_name: format!("S{}", rng.range(5)) },
+        "DeleteSymbol" => Action::DeleteSymbol { sym_id: sym_id(rng) },
+        "DuplicateSymbol" => Action::DuplicateSymbol { sym_id: sym_id(rng) },
+        "SwapSymbol" => Action::SwapSymbol { sym_id: sym_id(rng) },
+        "SetSymbolPlayback" => Action::SetSymbolPlayback {
+            loop_mode: rng.coin().then(|| [SymbolLoopMode::Loop, SymbolLoopMode::PlayOnce, SymbolLoopMode::SingleFrame][rng.range(3)]),
+            first_frame: rng.coin().then(|| rng.range(4)),
+        },
+        "SetSymbolColorEffect" => Action::SetSymbolColorEffect { effect: ColorEffect { alpha: rng.f64_range(0.2, 1.0) as f32, brightness: rng.f64_range(-0.5, 0.5) as f32 } },
+        "ToggleTween" => Action::ToggleTween,
+        "SetTweenRotate" => Action::SetTweenRotate { rotate: [TweenRotate::Auto, TweenRotate::Clockwise, TweenRotate::CounterClockwise][rng.range(3)] },
+        "SwitchLayerAndFrame" => Action::SwitchLayerAndFrame { layer_idx: layer(rng), frame: frame(rng) },
+        "ScrubRulerToFrame" => Action::ScrubRulerToFrame { frame: frame(rng) },
+        "SelectTimelineCells" => Action::SelectTimelineCells { l0: layer(rng), f0: frame(rng), l1: layer(rng), f1: frame(rng) },
+        "ClearTimelineCells" => Action::ClearTimelineCells,
+        "ImportSound" => Action::ImportSound { name: "テスト.wav".to_owned(), bytes: short_wav().into() },
+        "SetKeyframeSound" => Action::SetKeyframeSound { sound: rng.coin().then(|| sound_id(rng)) },
+        "RenameSound" => Action::RenameSound { sound_id: sound_id(rng), new_name: format!("音{}", rng.range(5)) },
+        "DeleteSound" => Action::DeleteSound { sound_id: sound_id(rng) },
+        "TrimSound" => {
+            let (l, kf_start) = tl.active_sound_slot().map_or((0, 0), |(l, k)| (l, tl.layers[l].start_of(k)));
+            Action::TrimSound { layer: l, kf_start, edge: if rng.coin() { crate::sound::SoundEdge::Start } else { crate::sound::SoundEdge::End }, frame: frame(rng) }
+        }
+        "InsertKeyframe" => Action::InsertKeyframe { copy_prev: rng.coin() },
+        "DeleteKeyframe" => Action::DeleteKeyframe,
+        "ExtendFrame" => Action::ExtendFrame,
+        "RemoveFrame" => Action::RemoveFrame,
+        "MoveOrCopyFrames" => {
+            let sel = tl.cell_selection.unwrap_or(TimelineCellSelection::single(tl.active_layer, tl.current_frame));
+            Action::MoveOrCopyFrames { sel, layer_delta: rng.range(3) as isize - 1, frame_delta: rng.range(5) as isize - 2, copy_mode: rng.coin() }
+        }
+        "AddLayer" => Action::AddLayer,
+        "DeleteActiveLayer" => Action::DeleteActiveLayer,
+        "ReorderLayer" => Action::ReorderLayer { src_idx: layer(rng), dst_idx: layer(rng) },
+        "SetLayerVisible" => Action::SetLayerVisible { layer_idx: layer(rng), visible: rng.range(4) != 0 },
+        "SetLayerLocked" => Action::SetLayerLocked { layer_idx: layer(rng), locked: rng.range(4) == 0 },
+        "RenameLayer" => Action::RenameLayer { layer_id: tl.layers.get(rng.range(tl.layers.len())).map_or(999, |l| l.id), new_name: format!("L{}", rng.range(5)) },
+        "SetFps" => Action::SetFps { fps: [12, 24, 30][rng.range(3)] },
+        "SetStageSize" => Action::SetStageSize { size: Vec2::new([640.0, 800.0, 1280.0][rng.range(3)], [480.0, 600.0, 720.0][rng.range(3)]) },
+        "SetTool" => Action::SetTool { tool: Tool::ALL[rng.range(Tool::ALL.len())] },
+        "ToggleSelectSubMode" => Action::ToggleSelectSubMode { mode: [SelectSubMode::Reshape, SelectSubMode::AddAnchor, SelectSubMode::DeleteAnchor][rng.range(3)] },
+        "Undo" => Action::Undo,
+        "Redo" => Action::Redo,
+        "EndCoalesce" => Action::EndCoalesce { key: None },
+        other => panic!("でたらめな操作の試しが、種類 {other} を作れない（random_action に足す）"),
+    }
+}
+
+/// でたらめな操作の試しが、`Action` の全部の種類を作れる（種類を足したら、試しにも足さないと止まる）
+#[test]
+fn random_actions_cover_every_action_kind() {
+    let names = action_kind_names();
+    assert!(names.len() > 50, "Action の種類を読めていない：{names:?}");
+    let app = Is2dApp::default();
+    let mut rng = OpRng(7);
+    for name in &names {
+        let a = random_action(name, &mut rng, &app);
+        // 状態から作れないときに別の種類で代わりにする所（輪郭が無いとき）は、図形を描いた作品で確かめる
+        if action_kind_name(&a) != *name {
+            let mut drawn = Is2dApp::default();
+            put_cel_shapes(&mut drawn, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+            let b = random_action(name, &mut rng, &drawn);
+            assert_eq!(action_kind_name(&b), *name, "random_action が種類 {name} を作らない");
+        }
+    }
+}
+
+/// 絵として同じかを比べるための、文書の絵の要約（でたらめな操作の試しの、取り消しの1手にしない操作の確かめ）：タイムラインと
+/// シンボルの、レイヤー・キーフレームごとの、面と線の色・線の太さ・外接矩形（絵の精度より粗い 1/20px に丸める）と、
+/// インスタンスの置き方。図形の番号と、絵の精度より細かい座標の違い（一部だけ確定したときの、格子にそろえる計算の順の
+/// 違い）は見ない
+fn picture_summary(doc: &symbol::Document) -> Vec<String> {
+    let r = |v: f64| (v * 20.0).round() as i64;
+    let mut out = Vec::new();
+    let mut timeline = |name: String, tl: &timeline::Timeline| {
+        for (li, layer) in tl.layers.iter().enumerate() {
+            for (ki, kf) in layer.keyframes.iter().enumerate() {
+                let mut items: Vec<String> = Vec::new();
+                for m in kf.cel.maps.iter() {
+                    for f in m.base().drawn_shapes(&m.group_path) {
+                        let b = f.bounding_box();
+                        items.push(format!(
+                            "{:?} {:?} {:?} {} {} {} {}",
+                            m.group_path,
+                            f.color,
+                            f.line.map(|l| (l.color, l.width)),
+                            r(b.x0),
+                            r(b.y0),
+                            r(b.x1),
+                            r(b.y1)
+                        ));
+                    }
+                }
+                for i in kf.cel.instances.iter() {
+                    let c = i.binding.xform.as_coeffs().map(r);
+                    items.push(format!("inst {} {:?} {:?} {:?}", i.binding.symbol_id, i.parent_scope, i.order, c));
+                }
+                items.sort();
+                out.push(format!("{name} L{li} K{ki} start{} {items:?}", layer.start_of(ki)));
+            }
+        }
+    };
+    timeline("root".into(), &doc.root);
+    for sym in doc.library.iter() {
+        timeline(format!("sym{} {}", sym.id, sym.name), &sym.timeline);
+    }
+    out
+}
+
+/// でたらめな操作の試し：`Action` の全部の種類を、でたらめな順と引数で `apply` に通し、毎手、次を確かめる（設計
+/// claude/約束を入口で守る設計_5616fcc.md の 7.。前は手で並べた 26 通りだけだったので、インクボトルの書き忘れ（審査 5616fcc の
+/// D-1）をすり抜けた）：
+/// 1. `apply` のあと、操作の前の写し（`before`）は残らない
+/// 2. 断った（`false`）ら、作品の中身・取り消しとやり直しの数・未保存の印は変わらない
+/// 3. いつも保存できる（`ProjectDocument::from_app` が作れる：浮いた片を確定できる）
+/// 4. 取り消しの1手になる操作（操作ごとの表 `Action::policy`）は、作品の中身（今のコマ・選んでいるレイヤーを除く）が変わったら、
+///    取り消しが1手増え（まとめ中は増えない）、未保存の印が付く。作品の中身も浮いた片も変わらなければ、取り消しは増えない
+/// 5. 取り消しの1手にしない操作（選ぶ・見る場所を変えるなど）は、絵を変えず、取り消しを積まない
+/// 6. 取り消し・やり直しは、できるときは数が1つずつ動き、できないときは何も変えない
+#[test]
+fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
+    use crate::project_io::ProjectDocument;
+    use std::collections::BTreeMap;
+
+    let names = action_kind_names();
+    let drawing = ["PaintStroke", "PencilStroke", "BucketFill", "InkBottle", "SelectMarquee", "FinishMoveSelectionDrag"];
+    let saved = |app: &Is2dApp, ctx: &str| -> ProjectDocument {
+        match ProjectDocument::from_app(app.tab()) {
+            Ok(pd) => pd,
+            Err(e) => panic!("{ctx}: 保存できない（{e}）"),
+        }
+    };
+    let content = |pd: &ProjectDocument| -> String {
+        let mut pd = pd.clone();
         pd.timeline.active_layer = 0;
         pd.timeline.current_frame = 0;
         for sym in &mut pd.library {
@@ -18238,374 +18512,74 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
         }
         content_json(&pd)
     };
-
-    let mut true_without_json_change: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut total_true_by_op: BTreeMap<&'static str, usize> = BTreeMap::new();
-
-    for &seed in &[
-        0x1234_5678_9abc_def0u64,
-        0xfedc_ba98_7654_3210,
-        0x2026_1103_cafe_babe,
-    ] {
-        let mut rng = Rng(seed);
+    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    for &seed in &[0x1234_5678_9abc_def0u64, 0xfedc_ba98_7654_3210, 0x2026_1103_cafe_babe] {
+        let mut rng = OpRng(seed);
         let mut app = Is2dApp::default();
-        let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
-
-        for step in 0..1050 {
-            let op_idx = rng.range(26);
-            if op_idx == 24 {
-                let before_undo = app.tab().history.undo_stack.len();
-                let before_redo = app.tab().history.redo_stack.len();
-                let before_json = doc_json(&app);
-                let ok = app.tab_mut().undo();
-                assert!(app.tab().history.pending.is_none());
-                if !ok {
-                    assert_eq!(before_undo, 0);
-                    assert_eq!(app.tab().history.redo_stack.len(), before_redo);
-                    assert_eq!(doc_json(&app), before_json);
-                } else {
-                    assert_eq!(app.tab().history.undo_stack.len() + 1, before_undo);
-                    assert_eq!(app.tab().history.redo_stack.len(), before_redo + 1);
-                }
-                continue;
-            }
-            if op_idx == 25 {
-                let before_undo = app.tab().history.undo_stack.len();
-                let before_redo = app.tab().history.redo_stack.len();
-                let before_json = doc_json(&app);
-                let ok = app.tab_mut().redo();
-                assert!(app.tab().history.pending.is_none());
-                if !ok {
-                    assert_eq!(before_redo, 0);
-                    assert_eq!(app.tab().history.undo_stack.len(), before_undo);
-                    assert_eq!(doc_json(&app), before_json);
-                } else {
-                    assert_eq!(app.tab().history.undo_stack.len(), before_undo + 1);
-                    assert_eq!(app.tab().history.redo_stack.len() + 1, before_redo);
-                }
-                continue;
-            }
-
-            // ペーストのときは事前に選択図形があれば Copy しておく
-            if op_idx == 13 && !app.tab().session.selection.is_empty() {
-                let _ = apply(&mut app, Action::Copy);
-            }
-
-            let (op_name, action, is_navigation_or_selection): (&'static str, Action, bool) =
-                match op_idx {
-                    0 => {
-                        let x0 = rng.f64_range(c.x - 120.0, c.x + 120.0);
-                        let y0 = rng.f64_range(c.y - 90.0, c.y + 90.0);
-                        let dx = rng.f64_range(20.0, 70.0);
-                        let dy = rng.f64_range(-40.0, 40.0);
-                        let colors = [
-                            Color32::from_rgb(220, 50, 50),
-                            Color32::from_rgb(50, 160, 80),
-                            Color32::from_rgb(50, 100, 220),
-                        ];
-                        (
-                            "PaintStroke",
-                            Action::PaintStroke {
-                                points: vec![Point::new(x0, y0), Point::new(x0 + dx, y0 + dy)],
-                                radius: 6.0,
-                                color: colors[rng.range(colors.len())],
-                            },
-                            false,
-                        )
-                    }
-                    1 => {
-                        let x0 = rng.f64_range(c.x - 100.0, c.x + 100.0);
-                        let y0 = rng.f64_range(c.y - 80.0, c.y + 80.0);
-                        (
-                            "EraseStroke",
-                            Action::EraseStroke {
-                                points: vec![Point::new(x0, y0), Point::new(x0 + 50.0, y0 + 20.0)],
-                                radius: 8.0,
-                            },
-                            false,
-                        )
-                    }
-                    2 => {
-                        let pt = Point::new(
-                            rng.f64_range(c.x - 100.0, c.x + 100.0),
-                            rng.f64_range(c.y - 80.0, c.y + 80.0),
-                        );
-                        (
-                            "BucketFill",
-                            Action::BucketFill {
-                                pt,
-                                color: Color32::from_rgb(240, 180, 40),
-                            },
-                            false,
-                        )
-                    }
-                    3 => {
-                        if rng.range(2) == 0 {
-                            let pt = if let Some(s) = app.tab().scene().iter().next() {
-                                let b = s.bounding_box();
-                                Point::new((b.x0 + b.x1) * 0.5, (b.y0 + b.y1) * 0.5)
-                            } else {
-                                Point::new(
-                                    rng.f64_range(c.x - 100.0, c.x + 100.0),
-                                    rng.f64_range(c.y - 80.0, c.y + 80.0),
-                                )
-                            };
-                            ("SelectSingleAt", Action::SelectSingleAt { pt }, true)
-                        } else {
-                            let x0 = rng.f64_range(c.x - 140.0, c.x + 20.0);
-                            let y0 = rng.f64_range(c.y - 100.0, c.y + 20.0);
-                            let w = rng.f64_range(30.0, 160.0);
-                            let h = rng.f64_range(30.0, 120.0);
-                            (
-                                "SelectMarquee",
-                                Action::SelectMarquee {
-                                    p0: Point::new(x0, y0),
-                                    p1: Point::new(x0 + w, y0 + h),
-                                    additive: false,
-                                },
-                                true,
-                            )
-                        }
-                    }
-                    4 => (
-                        "MoveSelected",
-                        Action::MoveSelected {
-                            delta: KVec2::new(
-                                rng.f64_range(-20.0, 20.0),
-                                rng.f64_range(-20.0, 20.0),
-                            ),
-                        },
-                        false,
-                    ),
-                    5 => (
-                        "AltDuplicate",
-                        Action::FinishMoveSelectionDrag {
-                            total_delta: KVec2::new(15.0, 12.0),
-                            alt_duplicate: true,
-                        },
-                        false,
-                    ),
-                    6 => ("DeleteSelection", Action::DeleteSelection, false),
-                    7 => ("Group", Action::Group, false),
-                    8 => ("Ungroup", Action::Ungroup, false),
-                    9 => {
-                        let modes = [
-                            ArrangeMode::ToFront,
-                            ArrangeMode::Forward,
-                            ArrangeMode::Backward,
-                            ArrangeMode::ToBack,
-                        ];
-                        (
-                            "Arrange",
-                            Action::Arrange {
-                                mode: modes[rng.range(4)],
-                            },
-                            false,
-                        )
-                    }
-                    10 => {
-                        let (fx, fy) = match rng.range(3) {
-                            0 => (true, false),
-                            1 => (false, true),
-                            _ => (true, true),
-                        };
-                        (
-                            "FlipSelection",
-                            Action::FlipSelection {
-                                flip_x: fx,
-                                flip_y: fy,
-                            },
-                            false,
-                        )
-                    }
-                    11 => (
-                        "RotateSelection",
-                        Action::RotateSelection { angle_rad: 0.35 },
-                        false,
-                    ),
-                    12 => ("ConvertToSymbol", Action::ConvertToSymbol, false),
-                    13 => (
-                        "Paste",
-                        Action::Paste {
-                            in_place: rng.range(2) == 0,
-                        },
-                        false,
-                    ),
-                    14 => {
-                        let sym_id = app
-                            .tab()
-                            .doc
-                            .library
-                            .get(rng.range(app.tab().doc.library.len().max(1)))
-                            .map(|s| s.id)
-                            .unwrap_or(999);
-                        ("PlaceSymbol", Action::PlaceSymbol { sym_id }, false)
-                    }
-                    15 => {
-                        if !app.tab().session.edit_path.is_empty()
-                            || !app.tab().session.editing_group_path.is_empty()
-                        {
-                            ("ExitGroup", Action::ExitGroupSteps { steps: 1 }, true)
-                        } else if let Some(sym) = app
-                            .tab()
-                            .doc
-                            .library
-                            .get(rng.range(app.tab().doc.library.len().max(1)))
-                        {
-                            (
-                                "EnterSymbolFromLibrary",
-                                Action::EnterSymbolFromLibrary { sym_id: sym.id },
-                                true,
-                            )
-                        } else {
-                            ("EnterGroupAt", Action::EnterGroupAt { pt: c }, true)
-                        }
-                    }
-                    16 => ("ExtendFrame(F5)", Action::ExtendFrame, false),
-                    17 => (
-                        "InsertKeyframe(F6)",
-                        Action::InsertKeyframe { copy_prev: true },
-                        false,
-                    ),
-                    18 => (
-                        "InsertBlankKeyframe(F7)",
-                        Action::InsertKeyframe { copy_prev: false },
-                        false,
-                    ),
-                    19 => ("RemoveFrame(Shift+F5)", Action::RemoveFrame, false),
-                    20 => ("DeleteKeyframe(Shift+F6)", Action::DeleteKeyframe, false),
-                    21 => {
-                        if app.tab().active_timeline().layers.len() < 4 {
-                            ("AddLayer", Action::AddLayer, false)
-                        } else {
-                            ("DeleteActiveLayer", Action::DeleteActiveLayer, false)
-                        }
-                    }
-                    22 => ("ToggleTween", Action::ToggleTween, false),
-                    _ => {
-                        let tl = app.tab().active_timeline();
-                        let sel = tl.cell_selection.unwrap_or(TimelineCellSelection::single(
-                            tl.active_layer,
-                            tl.current_frame,
-                        ));
-                        let df = if rng.range(2) == 0 { 1 } else { -1 };
-                        (
-                            "MoveOrCopyFrames",
-                            Action::MoveOrCopyFrames {
-                                sel,
-                                layer_delta: 0,
-                                frame_delta: df,
-                                copy_mode: rng.range(2) == 0,
-                            },
-                            false,
-                        )
-                    }
-                };
-
-            let before_json = doc_json(&app);
-            let before_no_act_layer_json = doc_json_ignoring_active_layer(&app);
+        for step in 0..1500 {
+            let kind = if rng.range(10) < 3 { drawing[rng.range(drawing.len())].to_owned() } else { names[rng.range(names.len())].clone() };
+            let action = random_action(&kind, &mut rng, &app);
+            let op = action_kind_name(&action);
+            *used.entry(op.clone()).or_insert(0) += 1;
+            let ctx = format!("seed={seed:#x} step={step} op={op}");
+            let before = content(&saved(&app, &ctx));
             let before_undo = app.tab().history.undo_stack.len();
             let before_redo = app.tab().history.redo_stack.len();
             let before_dirty = app.tab().history.is_dirty();
             let before_floating = app.session.floating().cloned();
-            let coalesce_key = action.coalesce_key(app.tab());
-            let was_coalesced =
-                coalesce_key.is_some() && app.tab().history.last_coalesce_key == coalesce_key;
-
+            let coalesce = match action.policy(app.tab()).undo {
+                crate::doc_actions::UndoUse::Coalesce(key) => Some(key),
+                _ => None,
+            };
+            let was_coalesced = coalesce.is_some() && app.tab().history.last_coalesce_key == coalesce;
+            let is_history = matches!(action, Action::Undo | Action::Redo);
+            let not_a_step = action.policy(app.tab()).undo == crate::doc_actions::UndoUse::None;
+            let picture_before = app.tab().committed_document_copy().map(|d| picture_summary(&d));
             let res = apply(&mut app, action);
-
-            // 3. apply のあと、pending は必ず None
-            assert!(
-                app.tab().history.pending.is_none(),
-                "seed={seed:#x} step={step} op={op_name}: pending must be None after apply"
-            );
-
-            let after_json = doc_json(&app);
-            let after_no_act_layer_json = doc_json_ignoring_active_layer(&app);
+            assert!(app.tab().history.before.is_none(), "{ctx}: 操作の前の写しが残った");
+            let after = content(&saved(&app, &ctx));
             let after_undo = app.tab().history.undo_stack.len();
             let after_redo = app.tab().history.redo_stack.len();
             let after_dirty = app.tab().history.is_dirty();
-
-            // 1. apply が false を返したときは、前後の ProjectDocument::from_app の JSON も、Undo/Redo の件数も、is_dirty() も変わらない
-            if !res {
-                assert_eq!(
-                    after_json, before_json,
-                    "seed={seed:#x} step={step} op={op_name}: JSON changed when apply returned false"
-                );
-                assert_eq!(
-                    after_undo, before_undo,
-                    "seed={seed:#x} step={step} op={op_name}: undo count changed when apply returned false"
-                );
-                assert_eq!(
-                    after_redo, before_redo,
-                    "seed={seed:#x} step={step} op={op_name}: redo count changed when apply returned false"
-                );
-                assert_eq!(
-                    after_dirty, before_dirty,
-                    "seed={seed:#x} step={step} op={op_name}: is_dirty changed when apply returned false"
-                );
+            if is_history {
+                if res {
+                    let (fewer, more) = if op == "Undo" { (before_undo, before_redo) } else { (before_redo, before_undo) };
+                    let (now_fewer, now_more) = if op == "Undo" { (after_undo, after_redo) } else { (after_redo, after_undo) };
+                    assert_eq!((now_fewer + 1, now_more), (fewer, more + 1), "{ctx}: 取り消し・やり直しの数");
+                } else {
+                    assert_eq!((after_undo, after_redo, &after), (before_undo, before_redo, &before), "{ctx}: できない取り消し・やり直しが何かを変えた");
+                }
                 continue;
             }
-
-            if is_navigation_or_selection {
-                assert_eq!(
-                    after_no_act_layer_json, before_no_act_layer_json,
-                    "seed={seed:#x} step={step} op={op_name}: navigation/selection changed document content"
-                );
-                assert_eq!(after_undo, before_undo);
-                assert_eq!(after_redo, before_redo);
-                assert_eq!(after_dirty, before_dirty);
-            } else {
-                *total_true_by_op.entry(op_name).or_insert(0) += 1;
-                let expected_undo = if was_coalesced {
-                    before_undo
-                } else {
-                    (before_undo + 1).min(100)
-                };
-                // 2. 作品の中身（ProjectDocument::from_app の JSON から、今のコマ・選んでいるレイヤーを除いたもの）が変わったときは、
-                //    Undo が 1 件増え（連続操作のまとめ中は 0 件）、is_dirty() が true になる。今のコマ・レイヤーだけが動いたときは、
-                //    コマを選ぶ操作と同じく取り消しの1手にしない（下の 4.。持ち主が決めた：2026-11-26、設計
-                //    claude/取り消しの約束を入口で守る設計_43c2564.md の 2.1）
-                if after_no_act_layer_json != before_no_act_layer_json {
-                    assert_eq!(
-                        after_undo, expected_undo,
-                        "seed={seed:#x} step={step} op={op_name}: undo count did not increase as expected on JSON change"
-                    );
-                    assert!(
-                        after_dirty,
-                        "seed={seed:#x} step={step} op={op_name}: is_dirty must be true on JSON change"
-                    );
-                } else if match (&before_floating, app.session.floating()) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => a.same_content(b),
-                    _ => false,
-                } {
-                    // 4. 作品の中身も浮いた片も変わらなければ、Undo は増えない（取り消しても何も起きない1手を作らない。取り消しが
-                    //    戻すのは、作品の中身と浮いた片：浮いた片が同じかは `Floating::same_content`。その場に貼り付けは、
-                    //    確定した中身が同じでも浮いた写しができるので、1手になる）
-                    assert_eq!(
-                        after_undo, before_undo,
-                        "seed={seed:#x} step={step} op={op_name}: undo step recorded without a content change"
-                    );
-                    *true_without_json_change.entry(op_name).or_insert(0) += 1;
-                }
+            if !res {
+                assert_eq!(after, before, "{ctx}: 断ったのに作品の中身が変わった");
+                assert_eq!((after_undo, after_redo, after_dirty), (before_undo, before_redo, before_dirty), "{ctx}: 断ったのに取り消し・未保存の印が変わった");
+                continue;
+            }
+            if not_a_step {
+                // 取り消しの1手にしない操作（選ぶ・見る場所を変えるなど）は、絵を変えない（持ち上げた絵の確定は、保存する絵と
+                // 同じ絵を書く。一部だけ確定すると、図形の番号の振り方と、絵の精度より細かい座標が、一度に確定したときと違う
+                // ことがあるので、絵として比べる：`picture_summary`）
+                let picture_after = app.tab().committed_document_copy().map(|d| picture_summary(&d));
+                assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
+                assert_eq!(after_undo, before_undo, "{ctx}: 取り消しの1手にしない操作が取り消しを積んだ");
+                continue;
+            }
+            if after != before {
+                let expected = if was_coalesced { before_undo } else { (before_undo + 1).min(100) };
+                assert_eq!(after_undo, expected, "{ctx}: 中身が変わったのに取り消しが1手増えない");
+                assert!(after_dirty, "{ctx}: 中身が変わったのに未保存の印が付かない");
+            } else if match (&before_floating, app.session.floating()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.same_content(b),
+                _ => false,
+            } {
+                assert_eq!(after_undo, before_undo, "{ctx}: 何も変わらないのに取り消しが1手増えた");
             }
         }
     }
-
-    println!("=== M5-1 Random Test Summary (3 seeds x 1050 steps) ===");
-    for (op, total_true) in &total_true_by_op {
-        let no_json = true_without_json_change.get(op).copied().unwrap_or(0);
-        println!("  {op:<26}: true={total_true:>4}, true_without_json_change={no_json:>4}");
-    }
-    assert_eq!(
-        true_without_json_change
-            .get("InsertBlankKeyframe(F7)")
-            .copied()
-            .unwrap_or(0),
-        0,
-        "F7 must never return true and push Undo without changing ProjectDocument JSON"
-    );
+    let unused: Vec<&String> = names.iter().filter(|n| !used.contains_key(*n)).collect();
+    assert!(unused.is_empty(), "試していない種類：{unused:?}");
 }
 
 #[test]
@@ -22418,7 +22392,7 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
     // 絵を持ち上げて動かしたまま（浮いた片）：控えは、置いた形で書く
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 200.0), alt_duplicate: false }));
-    assert!(app.session.floating().is_some_and(|f| f.modified));
+    assert!(app.session.floating().is_some_and(|f| f.modified()));
     unsaved.refresh(&app.tabs);
     let recovery = Recovery { dir: Some(rec_dir.clone()), found: Vec::new() };
     recovery.write_unsaved(&unsaved.get());
@@ -23591,11 +23565,13 @@ fn video_export_fails_instead_of_pushing_blank_frames() {
 }
 
 #[test]
-fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
+fn test_reshape_edge_with_floating_commits_first_and_empty_v1_file_rejected() {
     use crate::doc_actions::{apply, Action};
     use kurbo::ParamCurve;
 
-    // 1. Floating があるときの輪郭の変形は何もしない
+    // 1. 持ち上げた絵（Floating）があるときに輪郭の変形が来たら、入口が先に貼り戻してから変形する（操作ごとの表
+    //    `Action::policy` の `CommitFirst`。前は変形の関数の中で「持ち上げた絵があれば何もしない」と守っていた。画面で
+    //    輪郭の変形を始めるときは、今までも先に貼り戻している：設計 claude/約束を入口で守る設計_5616fcc.md の 1.）
     let mut app = Is2dApp::default();
     assert!(apply(
         &mut app,
@@ -23606,7 +23582,9 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
         },
     ));
     let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
-    let layer_id = orig_shape.layer_id;
+    // セル画の図形はレイヤーの番号を持たないので、タイムラインのレイヤーから取る（前はセル画の図形から取ったので、
+    // 持ち上げた絵が無くても「編集できないレイヤー」として断られ、狙いと違う理由で通っていた）
+    let layer_id = app.doc.root.layers[0].id;
     let orig_bbox = orig_shape.bounding_box();
     let orig_seg_count = orig_shape.exterior.segments.len();
     let orig_seg = orig_shape.exterior.segments[0];
@@ -23624,7 +23602,7 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
     assert!(app.session.floating().is_some());
     let undo_before = app.history.undo_stack.len();
 
-    assert!(!apply(
+    assert!(apply(
         &mut app,
         Action::ReshapeEdge {
             layer_id,
@@ -23634,11 +23612,15 @@ fn test_reshape_edge_with_floating_is_noop_and_empty_v1_file_rejected() {
             follow: true,
         },
     ));
-    assert_eq!(app.history.undo_stack.len(), undo_before);
-    assert!(app.session.floating().is_some());
+    assert_eq!(app.history.undo_stack.len(), undo_before + 1);
+    assert!(app.session.floating().is_none());
     let after_shape = &app.doc.root.layers[0].keyframes[0].cel.shapes()[0];
-    assert_eq!(after_shape.bounding_box(), orig_bbox);
-    assert_eq!(after_shape.exterior.segments.len(), orig_seg_count);
+    assert_ne!(after_shape.bounding_box(), orig_bbox, "貼り戻したあとに変形していない");
+    // 取り消すと、持ち上げた絵がある状態に戻る（控えは貼り戻す前に取る）
+    assert!(apply(&mut app, Action::Undo));
+    assert!(app.session.floating().is_some());
+    let undone = &app.doc.root.layers[0].keyframes[0].cel.shapes();
+    assert!(undone.iter().all(|s| s.exterior.segments.len() <= orig_seg_count + 8));
 
     // 2. 前の版（版 2）のファイルは、図形がなくても開くと「未対応のプロジェクトバージョン」エラーが返り、タブが増えない
     let empty_doc = SavedProject {
@@ -33332,6 +33314,45 @@ fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
     assert!((after.x1 - (bbox.x1 + 50.0)).abs() < 0.5);
 }
 
+/// 絵の一部を選んで動かし、選んだまま（持ち上げた絵を持ったまま）インクボトルで線を付けても、そのあと選択を外せ、保存
+/// できる（入口が先に貼り戻す：操作ごとの表 `Action::policy`。直す前は、インクボトルが貼り戻さずにセル画を書き、持ち上げた
+/// 絵の出どころと食い違って、選択を外す・コマを移る・保存がみな断られた：設計審査 5616fcc の D-1）
+#[test]
+fn ink_bottle_while_holding_moved_pieces_keeps_the_work_savable() {
+    use crate::planar_map::EdgeStroke;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(20.0, 0.0) }));
+    assert!(app.session.floating().is_some_and(|f| f.modified()));
+    // 残りの右の縁に線を付ける
+    let ink = EdgeStroke { color: Color32::BLACK, width: 4 };
+    apply(&mut app, Action::InkBottle { pt: Point::new(300.0, 200.0), stroke: ink });
+    assert!(crate::project_io::ProjectDocument::from_app(app.tab()).is_ok(), "インクボトルのあと保存できない");
+    assert!(apply(&mut app, Action::Deselect), "インクボトルのあと選択を外せない");
+}
+
+/// 絵を書く入口（`write_cel`）は、持ち上げた絵の出どころ（そのレイヤー・編集中の階層の、持ち上げた元の地図）を、確定の
+/// ほかで書き換えない：書かずに断りを記す（操作ごとの表を書き間違えても、絵は壊れずに断られる：設計
+/// claude/約束を入口で守る設計_5616fcc.md の 2.）。ほかの階層や、持ち上げていないレイヤーには書ける
+#[test]
+fn writing_under_lifted_pieces_is_refused_at_the_write_entry() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(20.0, 0.0) }));
+    let lid = app.doc.root.layers[0].id;
+    let before = app.doc.root.layers[0].keyframes[0].cel.maps.clone();
+    let tab = app.tab_mut();
+    let wrote = crate::canvas_tool::write_cel(tab, lid, |cel| {
+        cel.maps = std::sync::Arc::new(Vec::new());
+        true
+    });
+    assert!(!wrote, "持ち上げた絵の出どころを書き換えた");
+    assert_eq!(tab.session.refusal, Some(crate::canvas_tool::Refusal::UnderLifted));
+    assert!(std::sync::Arc::ptr_eq(&app.doc.root.layers[0].keyframes[0].cel.maps, &before));
+}
+
 /// `Alt` で、中心点をハンドルにほとんど重ねて拡大しても、倍率が飛ばない：中心とハンドルが画面で重なっている向きは
 /// 拡大しない（`View::moves_on_screen`。直す前は文書の座標で 0.001 より離れていれば割り、0.002 離れていると 5px 動かす
 /// だけで 2500 倍になった：レビュー de92ceb の N-3003）
@@ -33447,7 +33468,7 @@ fn anchor_hover_works_on_unmoved_slices() {
         Point::new(400.0, 150.0),
         false,
     );
-    assert!(app.session.floating().is_some_and(|fl| !fl.modified));
+    assert!(app.session.floating().is_some_and(|fl| !fl.modified()));
     app.tool.select_sub_mode = SelectSubMode::AddAnchor;
     // 切り出した片の中の辺（線の下の縁）
     let pt = Point::new(260.0, 110.0);
@@ -41912,4 +41933,7 @@ mod strokes {
         assert!(app.scene().iter().any(|s| s.line.is_some() && s.contains_point(Point::new(200.0, 100.0))));
     }
 }
+
+
+
 

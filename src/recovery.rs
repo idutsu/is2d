@@ -38,7 +38,7 @@ pub(crate) struct UnsavedTab {
     file: PathBuf,
     /// 控えたときの文書の世代（控え直すかを決める：`UnsavedTabs::refresh`）
     #[cfg(any(target_os = "windows", test))]
-    commit: u64,
+    content_gen: u64,
     doc: Document,
     edit_path: EditPath,
     editing_group_path: Vec<u64>,
@@ -54,7 +54,7 @@ impl UnsavedTab {
             untitled_number: tab.untitled_number,
             file,
             #[cfg(any(target_os = "windows", test))]
-            commit: tab.history.current_commit_id,
+            content_gen: tab.history.content_gen,
             doc: tab.doc.clone(),
             edit_path: tab.session.edit_path.clone(),
             editing_group_path: tab.session.editing_group_path.clone(),
@@ -78,8 +78,8 @@ impl UnsavedTabs {
         let now = tabs
             .iter()
             .filter(|t| t.history.is_dirty() && t.file.is_some())
-            .map(|t| (t.id, t.history.current_commit_id, t.file.as_deref()));
-        if !now.eq(held.iter().map(|u| (u.id, u.commit, Some(u.file.as_path())))) {
+            .map(|t| (t.id, t.history.content_gen, t.file.as_deref()));
+        if !now.eq(held.iter().map(|u| (u.id, u.content_gen, Some(u.file.as_path())))) {
             *held = tabs.iter().filter_map(UnsavedTab::of).collect();
         }
     }

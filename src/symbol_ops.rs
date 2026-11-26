@@ -18,7 +18,6 @@ use crate::vector_engine::{invertible, union_bounding_boxes};
 /// `(sym_id, target_lid)` を返す
 pub(crate) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> Option<(u64, u64)> {
     cancel_active_drag(tab);
     if tab.session.selection.is_empty() {
@@ -53,8 +52,6 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     };
     let mut sym_def = SymbolDef::from_cel(0, String::new(), cel);
 
-    before_mutate(tab);
-
     // 選んだ生の図形は先に片に持ち上げる（グループ化と同じ：`prepare_group_selected_shapes`）。選んだ生の図形は片にだけ
     // あり、残り（確定する分）には無いので、残りを書いても選んだ図形が今の階層に戻らない（選び方によらない。持ち上げずに
     // 進むと、浮いた片があるとき、残りの確定が選んだ図形を外す前のセル画から作った地図で今の階層を書き直し、図形が
@@ -78,6 +75,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         .collect();
     let rest_plan = match tab.session.take_floating() {
         Some(mut fl) => {
+            // シンボルの中身に入れる片は、元の所から取り出す（元の所は切り抜いたまま書く：`Floating::place_all`）
+            fl.place_all();
             let Ok(rest) = fl.split_off(&keep, &tab.session.editing_group_path) else {
                 tab.session.set_floating(before);
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
@@ -180,7 +179,6 @@ pub(crate) fn swap_targets(tab: &Tab, symbol_id: u64) -> HashSet<u64> {
 pub(crate) fn prepare_swap_selected_instances(
     tab: &mut Tab,
     symbol_id: u64,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     if swap_targets(tab, symbol_id).is_empty() || !commit_floating(tab) {
         return false;
@@ -190,7 +188,6 @@ pub(crate) fn prepare_swap_selected_instances(
     if targets.is_empty() {
         return false;
     }
-    before_mutate(tab);
     let layer_ids = editable_layer_ids(tab);
     let updated = update_instances(
         tab,
@@ -208,7 +205,6 @@ pub(crate) fn prepare_swap_selected_instances(
 pub(crate) fn prepare_place_symbol_instance(
     tab: &mut Tab,
     symbol_id: u64,
-    before_mutate: impl FnOnce(&mut Tab),
 ) -> bool {
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab
@@ -256,7 +252,6 @@ pub(crate) fn prepare_place_symbol_instance(
     if !clear_selection(tab) {
         return false;
     }
-    before_mutate(tab);
     put_placements(tab, vec![placement], |sym| sym);
     true
 }

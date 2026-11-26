@@ -183,6 +183,20 @@ pub(crate) struct SymbolDef {
     pub(crate) revision: u64,
 }
 
+impl SymbolDef {
+    /// 中身が同じか（取り消しの1手にするかの比べ：`doc_actions::ContentMark`）。項目は全部書く（足すと組み立てが止まるので、
+    /// 比べるかを必ず決める）。版は中身の世代の印なので比べない。タイムラインは、今のコマ・選んでいるレイヤーを除いて比べる
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            name,
+            timeline,
+            revision: _,
+        } = self;
+        *id == other.id && *name == other.name && timeline.same_content(&other.timeline)
+    }
+}
+
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
 
 type SymbolEvalMemoKey = (u64, usize, usize);

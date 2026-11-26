@@ -1330,7 +1330,7 @@ impl Cel {
     }
 
     /// 階層 `group_path` のしまった地図
-    fn scope_stored(&self, group_path: &[u64]) -> Option<&StoredMap> {
+    pub(crate) fn scope_stored(&self, group_path: &[u64]) -> Option<&StoredMap> {
         self.maps
             .iter()
             .find(|m| m.group_path == group_path)
@@ -1703,11 +1703,7 @@ impl Layer {
             && self.visible == other.visible
             && self.locked == other.locked
             && self.frame_count == other.frame_count
-            && (self.keyframes.ptr_eq(&other.keyframes)
-                || (self.keyframes.len() == other.keyframes.len()
-                    && self.keyframes_with_start().zip(other.keyframes_with_start()).all(
-                        |((sa, a), (sb, b))| sa == sb && (Arc::ptr_eq(a, b) || same_keyframe(a, b)),
-                    )))
+            && self.keyframes.same_keyed(&other.keyframes, same_keyframe)
     }
 
     /// 始まりのコマが `frame` より前のキーフレームの数（`frame` に入れるキーフレームの番号）

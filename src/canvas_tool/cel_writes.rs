@@ -12,6 +12,9 @@ pub(crate) enum Refusal {
     Unplaceable,
     /// 地図の編集の結果が正しい地図にならない（書かない。文書は前のまま）
     Unwritable,
+    /// 持ち上げた絵の出どころ（持ち上げた元のセル画の地図）に、確定のほかで書こうとした（`write_cel` の見張り。操作ごとの表
+    /// `Action::policy` が正しければ起きない）
+    UnderLifted,
 }
 
 /// 1本の道が断った理由の、知らせ（読み替えはこれ1つ）
@@ -31,6 +34,7 @@ impl Refusal {
             Refusal::OffGrid => "地図の範囲（±65,536px）の外や、潰れるほど小さくには置けません",
             Refusal::Unplaceable => "選んだ図形をここに置けません（動かすか、取り消してください）",
             Refusal::Unwritable => "この編集の結果を地図にできないので、何も変えていません",
+            Refusal::UnderLifted => "持ち上げている絵の下の絵には書けないので、何も変えていません",
         }
     }
 }
@@ -59,7 +63,11 @@ pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
 
 /// 今のコマの、レイヤー `layer_id` のセル画を `f` で書き換える（`f` が `true` を返したら書いた）。後始末はしないので、
 /// 書いたあとに、書いたレイヤーで `finish_cel_writes` を1回呼ぶ。`false`：編集できない（ロック・非表示・キーフレームが
-/// 無い・トゥイーンの途中）か、`f` が書かなかった
+/// 無い・トゥイーンの途中）か、`f` が書かなかったか、持ち上げた絵の出どころを書き換えようとした（書かずに断りを記す：
+/// `Refusal::UnderLifted`）。セル画を書く道はみなここを通るので、持ち上げた絵の出どころ（そのレイヤー・編集中の階層の、
+/// 持ち上げた元の地図）を、確定のほかで書き換えることは無い（確定は浮いた片をセッションから取り出してから書く。設計
+/// claude/約束を入口で守る設計_5616fcc.md の 2.。前は操作ごとに先に確定する約束で、インクボトルが書き忘れた：審査
+/// 5616fcc の D-1）
 pub(crate) fn write_cel(
     tab: &mut Tab,
     layer_id: LayerId,
@@ -78,8 +86,20 @@ pub(crate) fn write_cel(
         return false;
     };
     let mut cel = tl.layers[li].keyframes[kf].cel.clone();
+    let scope = &tab.session.editing_group_path;
+    let lifted_from = tab
+        .session
+        .floating()
+        .is_some_and(|fl| fl.layers().iter().any(|l| l.layer_id == layer_id && l.origin.is_some()))
+        .then(|| cel.scope_stored(scope).map(crate::stored_map::StoredMap::id));
     if !f(&mut cel) {
         return false;
+    }
+    if let Some(from) = lifted_from {
+        if cel.scope_stored(&tab.session.editing_group_path).map(crate::stored_map::StoredMap::id) != from {
+            tab.session.refusal = Some(Refusal::UnderLifted);
+            return false;
+        }
     }
     tab.write_active_timeline(|tl, _| tl.layers[li].keyframe_mut(kf).cel = cel);
     true
@@ -115,13 +135,13 @@ pub(crate) fn write_cels(
         for base in held {
             tab.session.base_cache.hold(lid, base);
         }
-        if refusal.is_some() {
+        if refusal.is_some() || tab.session.refusal.is_some() {
             break;
         }
     }
     finish_cel_writes(tab, &written);
-    if refusal.is_some() {
-        tab.session.refusal = refusal;
+    if refusal.is_some() || tab.session.refusal.is_some() {
+        tab.session.refusal = refusal.or(tab.session.refusal);
         return false;
     }
     !written.is_empty()
@@ -403,7 +423,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         let Some(fl) = tab.session.take_floating() else {
             return true;
         };
-        if fl.modified && commit_floating_layers(tab, &fl).is_none() {
+        if fl.modified() && commit_floating_layers(tab, &fl).is_none() {
             tab.session.set_floating(Some(fl));
             return false;
         }
@@ -425,7 +445,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         return true;
     };
 
-    if !fl.modified {
+    if !fl.modified() {
         if keep.is_empty() {
             tab.session.retain_existing_selection();
             return true;
@@ -462,15 +482,22 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return false;
         }
     };
-    if !keep.is_empty() {
-        tab.session.set_floating(Some(fl));
-    }
-    if let Some(to_commit) = to_commit {
-        if commit_floating_layers(tab, &to_commit).is_none() {
+    if let Some(to_commit) = &to_commit {
+        if commit_floating_layers(tab, to_commit).is_none() {
             tab.session.set_floating(whole);
             tab.session.selection = before;
             return false;
         }
+        // 持ったまま残る置かない組の残りを、書いたあとのセル画に合わせて作り直す
+        if !keep.is_empty() && !fl.rebase_after_commit(tab.session.stage(), to_commit) {
+            tab.session.set_floating(whole);
+            tab.session.selection = before;
+            tab.session.refusal = Some(Refusal::Unplaceable);
+            return false;
+        }
+    }
+    if !keep.is_empty() {
+        tab.session.set_floating(Some(fl));
     }
     // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`。選び直しは
     // `Session::sync_floating`）

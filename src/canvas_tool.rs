@@ -1567,7 +1567,7 @@ impl Session {
         let mut fl = self
             .floating
             .take()
-            .map_or_else(|| Floating::new(false), Arc::unwrap_or_clone);
+            .map_or_else(Floating::new, Arc::unwrap_or_clone);
         let res = f(&mut fl, self.stage());
         self.put_floating(Some(fl));
         res
@@ -1755,7 +1755,7 @@ impl Session {
             // 動かす生の絵は、離したときに置く写しの絵（`copy`：`clipboard_ops::begin_move_selection_drag`。レイヤーごとに1つの
             // 地図なので、組は1つ）
             let mut plan = Some(crate::canvas_tool::CommitPlan::new());
-            if let Some(fl) = self.floating.as_ref().filter(|fl| fl.modified) {
+            if let Some(fl) = self.floating.as_ref().filter(|fl| fl.modified()) {
                 let outcomes = fl.commit_edits(self.stage());
                 for (l, outcome) in fl.layers().iter().zip(outcomes) {
                     match outcome {
@@ -1888,11 +1888,11 @@ impl Session {
     #[cfg(test)]
     #[inline]
     pub(crate) fn has_modified_floating(&self) -> bool {
-        self.floating.as_ref().is_some_and(|fl| fl.modified)
+        self.floating.as_ref().is_some_and(|fl| fl.modified())
     }
 
-    /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げ、動かした扱いにする（動かす・変形・
-    /// 色を変える・グループにする前）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
+    /// 選択中の生の図形（隠していないセル画の図形と、浮いている残り）を片に持ち上げる（動かす・変形・色を変える・グループに
+    /// する前。持ち上げただけの組は置かない組で、動かす・色を変える・取り出すときに置く組になる：`Floating::place_all`）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
     /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（操作を断る呼ぶ側が
     /// `refusal` に記す）
     pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
@@ -1927,11 +1927,10 @@ impl Session {
             .floating
             .as_deref()
             .cloned()
-            .unwrap_or_else(|| Floating::new(false));
+            .unwrap_or_else(Floating::new);
         if !fl.cut(self.stage(), &by_layer, None).is_empty() {
             return Err(());
         }
-        fl.modified = true;
         Ok(Some(fl))
     }
 
@@ -2022,7 +2021,7 @@ impl Session {
     }
 
     /// 地図 `maps`（レイヤーごと、下から順。文書の座標。面の番号が片の番号）を、それぞれ変換をかける浮いた片の組として
-    /// 足す（動かした扱い。確定のときに、変換をかけて、その階層の地図に重ねる）。グループの解除はグループの地図そのもの、
+    /// 足す（置く組。確定のときに、変換をかけて、その階層の地図に重ねる）。グループの解除はグループの地図そのもの、
     /// 新しい中身（貼り付け・Alt 複製・シンボルの分解）は中身の生の図形の地図（`clipboard_ops::put_placements`）
     pub(crate) fn add_floating_maps(
         &mut self,
@@ -2053,7 +2052,7 @@ impl Session {
     /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
     pub(crate) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
         if self.floating.as_ref().is_some_and(|fl| {
-            !fl.modified
+            !fl.modified()
                 && !self
                     .floating_view
                     .pieces()
@@ -2310,12 +2309,14 @@ pub(crate) struct UndoHistory {
     pub(crate) next_commit_id: u64,
     /// 直前の変更操作の `CoalesceKey`（同一キーが連続した場合は新規 Undo エントリを積まずに合流する）
     pub(crate) last_coalesce_key: Option<CoalesceKey>,
-    /// `apply` 実行中に保持される変更前スナップショットと合流キー（`apply` の末尾でのみ確定または破棄される）
-    pub(crate) pending: Option<(UndoEntry, Option<CoalesceKey>)>,
-    /// `apply` 実行中の、操作を始める前の状態（控えにしまうのはこれ：`push_undo`。操作の中で、選択を確定して外すのと控えを
-    /// しまうのが、どちらの順に書かれていても、取り消すと操作を始める前の絵と選択に戻る。前は控えをしまう時の状態だった
-    /// ので、先に選択を外す操作（貼り付け・ブラシなど）を取り消すと、前の選択が戻らなかった）
+    /// `apply` 実行中の、操作を始める前の状態（取り消しの1手にするときにしまうのはこれ。操作の中で選択を確定して外して
+    /// いても、取り消すと操作を始める前の絵と選択に戻る）。`apply` の中だけで持つ
     pub(crate) before: Option<UndoEntry>,
+    /// 中身の世代：`apply` が中身の変化を見つけるたびに進む（続けた編集をまとめて取り消しの1手を積まないときも進む）。
+    /// 「中身が変わったか」で控え直す所（Windows の確認なしに終わるときの控え `recovery::UnsavedTabs`、タイムラインの
+    /// ドラッグを捨てる判定）はこれを見る（前は取り消しの世代 `current_commit_id` を見たので、まとめた2回目以降の編集を
+    /// 取りこぼした：約束の棚卸し 5616fcc の C の A2）
+    pub(crate) content_gen: u64,
 }
 
 impl Default for UndoHistory {
@@ -2327,8 +2328,8 @@ impl Default for UndoHistory {
             saved_commit_id: Some(0),
             next_commit_id: 1,
             last_coalesce_key: None,
-            pending: None,
             before: None,
+            content_gen: 0,
         }
     }
 }
@@ -2473,7 +2474,7 @@ pub(crate) fn committed_document(
     editing_group_path: &[u64],
     floating: Option<&Floating>,
 ) -> Option<Document> {
-    let Some(fl) = floating.filter(|fl| fl.modified) else {
+    let Some(fl) = floating.filter(|fl| fl.modified()) else {
         return Some(doc.clone());
     };
     let mut temp_tab = Tab::new_empty(id, untitled_number);
@@ -2676,7 +2677,7 @@ impl Tab {
     /// だけ作り直す（`Session::floating_rev`・`Document::revision` を鍵に持つ）。浮いた片を確定できないとき（置けない）は、
     /// 確定する前の今の文書のまま
     fn backdrop_document(&self) -> Option<Arc<Document>> {
-        let fl = self.session.floating().filter(|fl| fl.modified)?;
+        let fl = self.session.floating().filter(|fl| fl.modified())?;
         if self.session.edit_path.levels.is_empty() {
             return None;
         }

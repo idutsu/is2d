@@ -192,7 +192,7 @@ pub(crate) struct TimelineUiState {
     /// 離れると終わる
     renaming_layer: Option<(TimelineKey, u64)>,
     pub(crate) grid_drag: TimelineGridDrag,
-    /// ドラッグ中の、直近の画面の終わりの文書の世代（`UndoHistory::current_commit_id`）。ドラッグ中でなければ `None`
+    /// ドラッグ中の、直近の画面の終わりの中身の世代（`UndoHistory::content_gen`）。ドラッグ中でなければ `None`
     drag_generation: Option<u64>,
     /// 直近に同期したタイムライン識別キー
     last_timeline_key: TimelineKey,
@@ -917,7 +917,7 @@ fn handle_timeline_pointer_input(
 ) -> Option<(usize, usize)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
-    let generation = host.tab().history.current_commit_id;
+    let generation = host.tab().history.content_gen;
     host.timeline_ui_mut().drop_drag_if_document_changed(generation);
     let handle_w = handle_width(ui.ctx());
     if response.hovered() && primary_pressed {
@@ -933,7 +933,7 @@ fn handle_timeline_pointer_input(
     update_timeline_grid_drag(host, ui.ctx(), layout, primary_down, alt_held, pointer_pos);
     let drag_layer_feedback =
         update_timeline_layer_drag(host, ui.ctx(), layout, primary_down, pointer_pos);
-    let generation = host.tab().history.current_commit_id;
+    let generation = host.tab().history.content_gen;
     host.timeline_ui_mut().remember_drag_generation(generation);
     update_timeline_cursor_icon(
         host,

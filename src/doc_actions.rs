@@ -373,30 +373,218 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// 連続する同一種の変更を1つのUndoステップにまとめるための `CoalesceKey` を返す
-    pub(crate) fn coalesce_key(&self, tab: &Tab) -> Option<CoalesceKey> {
+    /// 操作ごとの表：入口 `apply` が、操作の前と後にすることを、ここだけで決める（呼ぶ側に前置きを覚えさせない：設計
+    /// claude/約束を入口で守る設計_5616fcc.md の 1.）。全部の種類を書く（`_ =>` は使わない。種類を足すと、ここが組み立てで
+    /// 止まるので、足した人が必ず決める）
+    pub(crate) fn policy(&self, tab: &Tab) -> Policy {
+        use FloatingUse::{CommitFirst, Handles, Untouched};
+        let step = |floating| Policy::new(floating, UndoUse::Step);
+        let none = |floating| Policy::new(floating, UndoUse::None);
+        let coalesce = |floating, key| Policy::new(floating, UndoUse::Coalesce(key));
+        // 選んでいるシンボルのインスタンス1つの設定（続けた変更をまとめるキーは、そのインスタンス）
+        let symbol_key = |key: fn(u64) -> CoalesceKey| {
+            selected_single_symbol_info(tab).map(|(b, _, _)| key(b.instance_gid))
+        };
         match self {
-            Self::SetStageSize { .. } => Some(CoalesceKey::StageSize),
-            Self::SetFps { .. } => Some(CoalesceKey::Fps),
-            Self::RenameSymbol { sym_id, .. } => Some(CoalesceKey::RenameSymbol(*sym_id)),
-            Self::RenameSound { sound_id, .. } => Some(CoalesceKey::RenameSound(*sound_id)),
-            Self::RenameLayer { layer_id, .. } => Some(CoalesceKey::RenameLayer(*layer_id)),
-            Self::SetSymbolPlayback {
-                loop_mode,
-                first_frame: Some(_),
-            } => selected_single_symbol_info(tab).and_then(|(b, _, _)| {
-                if loop_mode.is_none_or(|m| m == b.loop_mode) {
-                    Some(CoalesceKey::SymbolPlayback(b.instance_gid))
-                } else {
-                    None
-                }
-            }),
-            Self::SetSymbolColorEffect { .. } => selected_single_symbol_info(tab)
-                .map(|(b, _, _)| CoalesceKey::SymbolColorEffect(b.instance_gid)),
-            Self::NudgeSelection { .. } => Some(CoalesceKey::NudgeSelection),
-            _ => None,
+            // 絵を書く（持ち上げた絵を先に貼り戻す）
+            Self::PaintStroke { .. } | Self::EraseStroke { .. } | Self::PencilStroke { .. } | Self::InkBottle { .. } => {
+                step(CommitFirst)
+            }
+            #[cfg(test)]
+            Self::CommitRawOutline { .. } | Self::DrawLines { .. } => step(CommitFirst),
+            // 選んでいれば持ち上げた絵の色を変え、選んでいなければセル画を塗る（持ち上げた絵がある間は選択がある）
+            Self::BucketFill { .. } => step(Handles),
+            // 選ぶ・外す（持ち上げた絵の扱いは操作が決める。取り消しの1手にしない）
+            Self::SelectSingleAt { .. } | Self::Deselect | Self::ToggleSelectSubMode { .. } => none(CommitFirst),
+            Self::ToggleSelectionAt { .. } | Self::RetainSelection { .. } => none(Handles),
+            Self::SelectMarquee { additive, .. } | Self::SelectConnectedAt { add: additive, .. } => {
+                none(if *additive { Handles } else { CommitFirst })
+            }
+            #[cfg(test)]
+            Self::SelectAll | Self::CommitFloating => none(CommitFirst),
+            // 選んだものを動かす・変形する（持ち上げた絵を動かす）
+            Self::NudgeSelection { .. } => coalesce(Handles, CoalesceKey::NudgeSelection),
+            #[cfg(test)]
+            Self::MoveSelected { .. } | Self::ScaleSelection { .. } => step(Handles),
+            Self::FinishMoveSelectionDrag { .. }
+            | Self::FlipSelection { .. }
+            | Self::RotateSelection { .. }
+            | Self::CommitTransformDrag { .. } => step(Handles),
+            // 中心点（インスタンスの中心点を書く。持ち上げた絵は使わない）
+            Self::ResetTransformPivot | Self::CommitPivotDrag { .. } => step(Handles),
+            #[cfg(test)]
+            Self::SetTransformPivot { .. } => step(Handles),
+            // 選んだものを消す・まとめる・解く・重ね順（持ち上げた絵を自分で扱う。重ね順は貼り戻してから並べる）
+            Self::DeleteSelection | Self::Cut | Self::Group | Self::Ungroup | Self::ConvertToSymbol => step(Handles),
+            Self::Arrange { .. } | Self::ClearActiveFrame => step(CommitFirst),
+            Self::Copy => none(Handles),
+            Self::Paste { .. } | Self::PlaceSymbol { .. } => step(CommitFirst),
+            // 輪郭の変形・アンカー（アンカーは、持ち上げた絵の上なら、その地図を編集する）
+            Self::ReshapeEdge { .. } | Self::MoveVertex { .. } => step(CommitFirst),
+            #[cfg(test)]
+            Self::PullEdgeFromTo { .. } | Self::MoveVertexFromTo { .. } => step(CommitFirst),
+            Self::AddAnchor { .. } | Self::DeleteAnchor { .. } => step(Handles),
+            // 見る場所を変える（グループ・シンボル・コマ・レイヤー）
+            Self::EnterGroupAt { .. }
+            | Self::ExitGroupSteps { .. }
+            | Self::EnterSymbolTimeline { .. }
+            | Self::EnterSymbolFromLibrary { .. }
+            | Self::SwitchLayerAndFrame { .. }
+            | Self::ScrubRulerToFrame { .. }
+            | Self::SelectTimelineCells { .. } => none(CommitFirst),
+            #[cfg(test)]
+            Self::ExitSymbolTimeline | Self::ExitSymbolToDepth { .. } => none(CommitFirst),
+            Self::ClearTimelineCells => none(Untouched),
+            // シンボル
+            Self::RenameSymbol { sym_id, .. } => coalesce(Untouched, CoalesceKey::RenameSymbol(*sym_id)),
+            Self::DeleteSymbol { .. } | Self::DuplicateSymbol { .. } | Self::SwapSymbol { .. } => step(CommitFirst),
+            Self::SetSymbolPlayback { loop_mode, first_frame } => {
+                // コマ番号だけを続けて変える（同じ再生の仕方のまま）ときは1つにまとめる
+                let key = first_frame
+                    .and(selected_single_symbol_info(tab))
+                    .filter(|(b, _, _)| loop_mode.is_none_or(|m| m == b.loop_mode))
+                    .map(|(b, _, _)| CoalesceKey::SymbolPlayback(b.instance_gid));
+                Policy::new(CommitFirst, key.map_or(UndoUse::Step, UndoUse::Coalesce))
+            }
+            Self::SetSymbolColorEffect { .. } => Policy::new(
+                CommitFirst,
+                symbol_key(CoalesceKey::SymbolColorEffect).map_or(UndoUse::Step, UndoUse::Coalesce),
+            ),
+            // タイムライン・トゥイーン・音・レイヤー（タイムラインの書き換えは、持ち上げた絵を先に貼り戻す）
+            Self::ToggleTween
+            | Self::SetTweenRotate { .. }
+            | Self::ImportSound { .. }
+            | Self::SetKeyframeSound { .. }
+            | Self::TrimSound { .. }
+            | Self::InsertKeyframe { .. }
+            | Self::DeleteKeyframe
+            | Self::ExtendFrame
+            | Self::RemoveFrame
+            | Self::MoveOrCopyFrames { .. }
+            | Self::AddLayer
+            | Self::DeleteActiveLayer
+            | Self::ReorderLayer { .. }
+            | Self::SetLayerVisible { .. }
+            | Self::SetLayerLocked { .. } => step(CommitFirst),
+            // 名前・音のライブラリ・作品の設定（絵に関わらない）
+            Self::RenameSound { sound_id, .. } => coalesce(Untouched, CoalesceKey::RenameSound(*sound_id)),
+            Self::DeleteSound { .. } => step(Untouched),
+            Self::RenameLayer { layer_id, .. } => coalesce(Untouched, CoalesceKey::RenameLayer(*layer_id)),
+            Self::SetStageSize { .. } => coalesce(Untouched, CoalesceKey::StageSize),
+            // 再生中に FPS を変えても再生を止めない（鳴らし直す）
+            Self::SetFps { .. } => Policy { keeps_playback: true, keeps_drag: true, ..coalesce(Untouched, CoalesceKey::Fps) },
+            // 道具の切り替え・取り消し・やり直し・まとめの区切り
+            Self::SetTool { .. } => none(Untouched),
+            Self::Undo | Self::Redo => none(Handles),
+            Self::EndCoalesce { .. } => Policy { keeps_playback: true, keeps_drag: true, ..none(Untouched) },
         }
     }
+}
+
+/// 操作の前に、持ち上げた絵（浮いた片）をどうするか（`Action::policy`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FloatingUse {
+    /// 入口が先に貼り戻す（確定する）。断られたら操作を断る
+    CommitFirst,
+    /// 操作が持ち上げた絵を自分で扱う（動かす・色を変える・選ぶ・写す・取り消しで戻すなど）。絵を書く入口の見張りが、
+    /// 持ち上げた絵の出どころには書かせない（`write_cel`）
+    Handles,
+    /// 絵に関わらない（名前・作品の設定・音のライブラリなど）
+    Untouched,
+}
+
+/// 操作が取り消しの1手になるか（`Action::policy`）。1手にするのは、入口が操作の前と後の中身を比べて、変わったときだけ
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum UndoUse {
+    /// 中身が変われば1手
+    Step,
+    /// 中身が変われば1手。同じキーが続くときは、前の1手にまとめる
+    Coalesce(CoalesceKey),
+    /// 1手にしない（選ぶ・見る場所を変える・道具・取り消しとやり直しそのもの）
+    None,
+}
+
+/// 操作ごとの表の1行（`Action::policy`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Policy {
+    pub(crate) floating: FloatingUse,
+    pub(crate) undo: UndoUse,
+    /// 再生を止めず、画面の土台も作り直さない
+    pub(crate) keeps_playback: bool,
+    /// 進行中のキャンバスのドラッグを解かない（ドラッグを終える操作は、呼ぶ側がドラッグを外してから送るので、解いても同じ）
+    pub(crate) keeps_drag: bool,
+}
+
+impl Policy {
+    const fn new(floating: FloatingUse, undo: UndoUse) -> Self {
+        Self {
+            floating,
+            undo,
+            keeps_playback: false,
+            keeps_drag: false,
+        }
+    }
+}
+
+/// 取り消しの1手にするかを決める、作品の中身と浮いた片の印（`apply` が、貼り戻したあと・操作の前に取り、操作の後と比べる）。
+/// 中身は、今のコマ・選んでいるレイヤー・タイムラインの選択を除く（`Timeline::same_content`）。変わっていないレイヤー・
+/// シンボルは番地を見るだけなので、手間は作品の大きさによらない
+struct ContentMark {
+    root: Timeline,
+    library: crate::symbol::Library,
+    sounds: crate::sound::SoundLibrary,
+    stage_size: eframe::egui::Vec2,
+    fps: u32,
+    floating: Option<std::sync::Arc<crate::floating::Floating>>,
+}
+
+impl ContentMark {
+    fn of(tab: &Tab) -> Self {
+        // 文書の項目は全部書く（項目を足すと組み立てが止まるので、取り消しで比べるかを必ず決める）。比べないもの：版・番号の
+        // 数え札（中身ではない）、壊れていた地図の知らせ先
+        let Document {
+            root,
+            library,
+            sounds,
+            stage_size,
+            fps,
+            revision: _,
+            next_symbol_id: _,
+            next_group_id: _,
+            next_sound_id: _,
+            broken_maps: _,
+        } = &tab.doc;
+        Self {
+            root: root.clone(),
+            library: library.clone(),
+            sounds: sounds.clone(),
+            stage_size: *stage_size,
+            fps: *fps,
+            floating: tab.session.shared_floating(),
+        }
+    }
+
+    /// 今の `tab` の中身と浮いた片が、この印と同じか
+    fn same_as(&self, tab: &Tab) -> bool {
+        let doc = &tab.doc;
+        doc.root.same_content(&self.root)
+            && library_same_content(&doc.library, &self.library)
+            && std::sync::Arc::ptr_eq(&doc.sounds, &self.sounds)
+            && doc.stage_size == self.stage_size
+            && doc.fps == self.fps
+            && match (&self.floating, tab.session.floating()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.same_content(b),
+                _ => false,
+            }
+    }
+}
+
+/// ライブラリ `a` と `b` の中身が同じか（シンボルごとに、同じ箱か、中身が同じ：`SymbolDef::same_content`）
+fn library_same_content(a: &crate::symbol::Library, b: &crate::symbol::Library) -> bool {
+    a.ptr_eq(b)
+        || (a.len() == b.len()
+            && a.iter().zip(b.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(x, y) || x.same_content(y)))
 }
 
 // ============================================================================
@@ -437,28 +625,6 @@ fn undo_snapshot(tab: &Tab) -> UndoEntry {
         symbols_revision: *revision,
         commit_id: tab.history.current_commit_id,
     }
-}
-
-/// 控えをしまう（`apply` の末尾で、操作ができたときだけ積む）。しまうのは、操作を始める前の状態（`UndoHistory::before`。
-/// `apply` の外（テストが中の関数を直接呼ぶとき）は、今の状態）
-fn push_undo_entry_from_doc(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
-    if tab.history.pending.is_some() {
-        return;
-    }
-    let entry = match tab.history.before.take() {
-        Some(entry) => entry,
-        None => undo_snapshot(tab),
-    };
-    tab.history.pending = Some((entry, coalesce));
-}
-
-fn push_undo(tab: &mut Tab, coalesce: Option<CoalesceKey>) {
-    if let Some(key) = coalesce {
-        if tab.history.last_coalesce_key == Some(key) {
-            return;
-        }
-    }
-    push_undo_entry_from_doc(tab, coalesce);
 }
 
 /// 音を読み込んで、今のコマの音を付けられるキーフレーム（`Timeline::active_sound_slot`）に頭から終わりまで付ける。
@@ -531,9 +697,6 @@ fn mutate_timeline_with_undo(
     tab: &mut Tab,
     mutate: impl FnOnce(&mut Timeline, &mut Document),
 ) -> bool {
-    if !commit_floating(tab) {
-        return false;
-    }
     // 中身が変わったかは、書き換えの前と後の中身を比べて決める（決めるのはこの1か所：`Timeline::same_content` と音の
     // ライブラリ。書き換える関数ごとには答えない：空のキーフレームを空のキーフレームの上に写すなど、書いても同じ中身に
     // なる場面を、書く関数からは見分けられない）。取り消しの控えは、中身が変わったときだけ積む（控えに入るのは、`apply`
@@ -548,9 +711,6 @@ fn mutate_timeline_with_undo(
     let changed = !tab.active_timeline().same_content(&before_tl)
         || !std::sync::Arc::ptr_eq(&tab.doc.sounds, &before_sounds);
     let moved = at(tab.active_timeline()) != at(&before_tl);
-    if changed {
-        push_undo(tab, None);
-    }
     if changed || moved {
         reset_session_after_timeline_change(tab);
     }
@@ -561,35 +721,49 @@ fn mutate_timeline_with_undo(
 // 3. 単一エントリポイント `apply`
 // ============================================================================
 
-/// すべての文書変更・編集操作の唯一の入口。
-/// 再生停止・Undo記録・連続操作のCoalesce・タイムライン同期・Dirty更新を一元管理する。
+/// すべての文書変更・編集操作の唯一の入口。前置きと後始末は、操作ごとの表（`Action::policy`）のとおりに、ここだけで
+/// する（設計 claude/約束を入口で守る設計_5616fcc.md の 1.2）：
+/// 1. ドラッグを解く・再生を止めて画面の土台を最新にする
+/// 2. 操作の前の写し（取り消しの控え）を取る
+/// 3. 持ち上げた絵を先に貼り戻す（表の `CommitFirst`。断られたら操作を断る）
+/// 4. 貼り戻したあとの中身の印を取り、操作をし、印と比べて「変わったか」を決める
+/// 5. 断った・途中で止まった操作は、操作の前に戻す（`restore_state_before_action`）
+/// 6. 変わったら中身の世代を進め、表が取り消しの1手にする操作なら、2. の控えを積む（同じまとめのキーが続けば積まない）
 pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
-    debug_assert!(host.tab().history.pending.is_none());
-    if !matches!(action, Action::SetFps { .. } | Action::EndCoalesce { .. }) {
+    assert!(
+        host.tab().history.before.is_none(),
+        "apply の中から apply を呼んだ（控えは1つしか持てない）"
+    );
+    let policy = action.policy(host.tab());
+    if !policy.keeps_drag {
+        cancel_active_drag(host.tab_mut());
+    }
+    if !policy.keeps_playback {
         host.stop_playback();
         // 画面の土台を最新にする（ここ1か所。`apply` の中で土台を読む所（浮いた片の確定 `plan_commit` など）は作り直さ
         // ない。文書を変えた所は、後始末（`finish_cel_writes`・`with_active_timeline_mut` など）でその場で作り直す）
         host.tab_mut().refresh_scene_base();
     }
-    // 操作を始める前の状態（控えにしまうのはこれ：`UndoHistory::before`）
     let before = undo_snapshot(host.tab());
     host.tab_mut().history.before = Some(before);
-    let check_symbol_nest = matches!(
-        action,
-        Action::ConvertToSymbol
-            | Action::Paste { .. }
-            | Action::PlaceSymbol { .. }
-            | Action::SwapSymbol { .. }
-    );
+    let prev_library = host.tab().doc.library.clone();
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
     let prev_imported_map =
         matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
     // 操作の途中で止まったら（panic）、その操作を無かったことにする（`restore_after_panic`）
-    let mut res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(host, action))) {
-        Ok(res) => res,
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if policy.floating == FloatingUse::CommitFirst && !commit_floating(host.tab_mut()) {
+            return (false, false);
+        }
+        let mark = ContentMark::of(host.tab());
+        let res = dispatch(host, action);
+        (res, !mark.same_as(host.tab()))
+    }));
+    let (mut res, changed) = match run {
+        Ok(r) => r,
         Err(_) => {
             restore_after_panic(host);
-            false
+            (false, false)
         }
     };
     let (tab, _, clipboard, toast) = host.parts_mut();
@@ -603,20 +777,27 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         }
         show_notice(toast, NoticeKind::Warning, refusal.message());
     }
-    tab.history.before = None;
-    if check_symbol_nest && res && tab.doc.symbol_nest_exceeded() {
+    // シンボルの入れ子の深さは、ライブラリが変わったときだけ確かめる（深さはライブラリの中だけで決まる）
+    if res && !library_same_content(&tab.doc.library, &prev_library) && tab.doc.symbol_nest_exceeded() {
         restore_state_before_action(tab);
         tab.ensure_valid_library_selection();
         show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
         res = false;
     }
-    if res {
-        if let Some((entry, coalesce)) = tab.history.pending.take() {
+    let before = tab.history.before.take();
+    if res && changed {
+        tab.history.content_gen += 1;
+        let push = match policy.undo {
+            UndoUse::Step => Some(None),
+            UndoUse::Coalesce(key) => (tab.history.last_coalesce_key != Some(key)).then_some(Some(key)),
+            UndoUse::None => None,
+        };
+        if let (Some(coalesce), Some(entry)) = (push, before) {
             tab.history.push(entry);
             tab.history.last_coalesce_key = coalesce;
         }
-    } else {
-        tab.history.pending = None;
+    }
+    if !res {
         (tab.doc.next_symbol_id, tab.doc.next_group_id) = prev_ids;
         if let Some(map) = prev_imported_map {
             clipboard.imported_map = map;
@@ -626,13 +807,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
 }
 
 /// 操作を無かったことにする（戻し方はこれ1つ：断った操作・入れ子の深すぎるシンボル・途中で止まった操作）：文書・選択・
-/// 浮いた片を、操作を始める前の状態にする（控えにしまう前なら `UndoHistory::before`、しまったあとなら控えの候補
-/// `pending`。どちらも `apply` が操作の前に1回だけ写したもの。取り消しと同じ戻し方 `restore_state_snapshot`）。控えは
-/// 積まない。戻す途中で記された知らせ（戻した浮いた片の確定など）は捨てる（次の操作の知らせにしない）
+/// 浮いた片を、操作を始める前の状態にする（`apply` が操作の前に1回だけ写した `UndoHistory::before`。取り消しと同じ戻し方
+/// `restore_state_snapshot`）。控えは積まない。戻す途中で記された知らせ（戻した浮いた片の確定など）は捨てる（次の操作の知らせにしない）
 fn restore_state_before_action(tab: &mut Tab) {
-    let before = tab.history.before.take().or_else(|| tab.history.pending.take().map(|(e, _)| e));
-    tab.history.pending = None;
-    if let Some(before) = before {
+    if let Some(before) = tab.history.before.take() {
         tab.restore_state_snapshot(before);
     }
     tab.refresh_scene_base();
@@ -657,7 +835,6 @@ fn restore_after_panic(host: &mut impl ActionHost) {
 
 fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
     let (tab, tool, clipboard, toast) = host.parts_mut();
-    let coalesce = action.coalesce_key(tab);
 
     match action {
         Action::PaintStroke {
@@ -724,8 +901,8 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         #[cfg(test)]
         Action::CommitFloating => commit_floating(tab),
         #[cfg(test)]
-        Action::MoveSelected { delta } => apply_move_selected(tab, delta, None),
-        Action::NudgeSelection { delta } => apply_move_selected(tab, delta, coalesce),
+        Action::MoveSelected { delta } => apply_move_selected(tab, delta),
+        Action::NudgeSelection { delta } => apply_move_selected(tab, delta),
         Action::FinishMoveSelectionDrag {
             total_delta,
             alt_duplicate,
@@ -734,13 +911,13 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             tab.session.drop_ahead_done();
             done
         }
-        Action::DeleteSelection => prepare_delete_selected_shapes(tab, |tab| push_undo(tab, None)),
+        Action::DeleteSelection => prepare_delete_selected_shapes(tab),
         Action::ClearActiveFrame => {
-            prepare_clear_active_frame_shapes(tab, |tab| push_undo(tab, None))
+            prepare_clear_active_frame_shapes(tab)
         }
-        Action::Group => prepare_group_selected_shapes(tab, |tab| push_undo(tab, None)),
-        Action::Ungroup => prepare_ungroup_selected_shapes(tab, |tab| push_undo(tab, None)),
-        Action::Arrange { mode } => prepare_arrange_selected(tab, mode, |tab| push_undo(tab, None)),
+        Action::Group => prepare_group_selected_shapes(tab),
+        Action::Ungroup => prepare_ungroup_selected_shapes(tab),
+        Action::Arrange { mode } => prepare_arrange_selected(tab, mode),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
         Action::SelectConnectedAt { pt, add } => crate::select_ops::select_connected_at(tab, pt, add),
         Action::ExitGroupSteps { steps } => {
@@ -866,13 +1043,13 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             if !prepare_copy_selected_shapes(tab, clipboard) {
                 return false;
             }
-            prepare_delete_selected_shapes(tab, |tab| push_undo(tab, None))
+            prepare_delete_selected_shapes(tab)
         }
         Action::Paste { in_place } => apply_paste_clipboard(tab, tool, clipboard, toast, in_place),
 
         Action::ConvertToSymbol => {
             if let Some((sym_id, target_lid)) =
-                prepare_convert_selection_to_symbol(tab, |tab| push_undo(tab, None))
+                prepare_convert_selection_to_symbol(tab)
             {
                 tab.view.selected_library_symbol = Some(sym_id);
                 if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
@@ -888,7 +1065,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             }
         }
         Action::PlaceSymbol { sym_id } => {
-            if prepare_place_symbol_instance(tab, sym_id, |tab| push_undo(tab, None)) {
+            if prepare_place_symbol_instance(tab, sym_id) {
                 tool_for_placed(tab, tool);
                 true
             } else {
@@ -911,20 +1088,19 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             exited
         }
         Action::RenameSymbol { sym_id, new_name } => {
-            push_undo(tab, coalesce);
             tab.doc.rename_symbol(sym_id, new_name)
         }
         Action::DeleteSymbol { sym_id } => apply_delete_symbol(tab, sym_id),
         Action::DuplicateSymbol { sym_id } => apply_duplicate_symbol(tab, sym_id),
         Action::SwapSymbol { sym_id } => {
-            prepare_swap_selected_instances(tab, sym_id, |tab| push_undo(tab, None))
+            prepare_swap_selected_instances(tab, sym_id)
         }
         Action::SetSymbolPlayback {
             loop_mode,
             first_frame,
-        } => apply_set_symbol_playback(tab, loop_mode, first_frame, coalesce),
+        } => apply_set_symbol_playback(tab, loop_mode, first_frame),
         Action::SetSymbolColorEffect { effect } => {
-            update_selected_symbol_binding(tab, coalesce, |b| b.color_effect = effect)
+            update_selected_symbol_binding(tab, |b| b.color_effect = effect)
         }
         Action::ToggleTween => apply_timeline_toggle_tween(tab, toast),
         Action::SetTweenRotate { rotate } => apply_set_tween_rotate(tab, rotate),
@@ -948,11 +1124,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::ImportSound { name, bytes } => apply_import_sound(tab, toast, name, bytes),
         Action::SetKeyframeSound { sound } => apply_set_keyframe_sound(tab, sound),
         Action::RenameSound { sound_id, new_name } => {
-            push_undo(tab, coalesce);
             tab.doc.rename_sound(sound_id, new_name)
         }
         Action::DeleteSound { sound_id } => {
-            push_undo(tab, None);
             tab.doc.remove_sound(sound_id)
         }
         Action::TrimSound {
@@ -991,11 +1165,10 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_set_layer_flag(tab, layer_idx, locked, |l| l.locked, |l| &mut l.locked)
         }
         Action::RenameLayer { layer_id, new_name } => {
-            push_undo(tab, coalesce);
             tab.with_active_timeline_mut(|tl, _| tl.rename_layer(layer_id, new_name))
         }
-        Action::SetFps { fps } => apply_set_fps(tab, fps, coalesce),
-        Action::SetStageSize { size } => apply_set_stage_size(tab, size, coalesce),
+        Action::SetFps { fps } => apply_set_fps(tab, fps),
+        Action::SetStageSize { size } => apply_set_stage_size(tab, size),
 
         Action::SetTool { tool: target_tool } => {
             set_tool(tab, tool, target_tool);
@@ -1065,7 +1238,6 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     }
     // 絵が変わらなければ（同じ色で塗られた所の中をなぞった・何も消えないなど）write_local が false を返し、
     // apply が Undo の控えを捨てる
-    push_undo(tab, None);
     let rule = MapRule::Paint(is_brush.then_some(brush_color));
     // 地図は文書の座標なので、線の形も文書の座標へ写す。格子に置けない所（±65,536px の外）の線は描かない
     let world = tab.session.edit_path.world_xform();
@@ -1179,7 +1351,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             if !any_color_diff {
                 return false;
             }
-            push_undo(tab, None);
             let editable_lids: HashSet<u64> = editable_layer_ids(tab).into_iter().collect();
             if !tab.session.lift_selected_raw_shapes_to_floating() {
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
@@ -1237,7 +1408,6 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
 fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) -> bool {
     // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、write_local
     // が false を返し、apply が Undo の控えを捨てる
-    push_undo(tab, None);
     // 地図は文書の座標なので、点も文書の座標へ写す
     let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
     let at = editing_target(tab, target_lid);
@@ -1256,7 +1426,6 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
     if !clear_selection(tab) {
         return false;
     }
-    push_undo(tab, None);
     // 地図は文書の座標なので、線も文書の座標へ写す
     let to_doc = tab.session.edit_path.world_xform().inverse();
     let segs: Vec<crate::planar_map::LineSeg> = segs
@@ -1285,7 +1454,6 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
         return false;
     }
     // 線が替わらないときは、write_local が false を返し、apply が Undo の控えを捨てる
-    push_undo(tab, None);
     let to_stage = tab.session.edit_path.world_xform();
     let doc_pt = to_stage.inverse() * pt;
     // 辺に合う距離は、選択ツールと同じ画面の px（文書の座標の長さにする）
@@ -1415,19 +1583,17 @@ fn apply_finish_move_selection_drag(
         }
         return false;
     }
-    push_undo(tab, None);
     if alt_duplicate {
         return duplicate_selected_in_working_copy(tab, total_delta);
     }
     transform_selected_shapes(tab, Affine::translate(total_delta), false)
 }
 
-fn apply_move_selected(tab: &mut Tab, delta: KVec2, coalesce: Option<CoalesceKey>) -> bool {
+fn apply_move_selected(tab: &mut Tab, delta: KVec2) -> bool {
     cancel_active_drag(tab);
     if delta == KVec2::ZERO || !has_editable_selection(tab) {
         return false;
     }
-    push_undo(tab, coalesce);
     let moved = transform_selected_shapes(tab, Affine::translate(delta), false);
     if let Some(piv) = &mut tab.session.transform_pivot {
         *piv += delta;
@@ -1470,12 +1636,7 @@ fn apply_map_edit(
     if !editable_layer_ids(tab).contains(&layer_id) {
         return false;
     }
-    // 輪郭の変形は、始めるときに選択を解除して `Floating` を確定している。`Floating` があるときは何もしない
-    if tab.session.floating().is_some() {
-        return false;
-    }
     // 形が変わらないとき・編集できないとき（消せない頂点など）は、write_local が false を返し、apply が Undo の控えを捨てる
-    push_undo(tab, None);
     let at = editing_target(tab, layer_id);
     let changed = write_local(tab, &at, edit);
     if changed {
@@ -1597,13 +1758,12 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
 /// 動かして浮いている片のうち、レイヤー `layer_id` の組 `group` の片の地図（アンカーのカーソル合わせと同じ地図）を `edit` で
 /// 編集する（境目なら両側の片が変わる。選択も入れ替える）
 fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: AnchorEdit) -> bool {
-    let Some(mut fl) = tab.session.floating().filter(|fl| fl.modified).cloned() else {
+    let Some(mut fl) = tab.session.floating().filter(|fl| fl.modified()).cloned() else {
         return false;
     };
     if !fl.edit_group(layer_id, group, |m| edit.apply(m)) {
         return false;
     }
-    push_undo(tab, None);
     tab.session.set_floating(Some(fl));
     true
 }
@@ -1628,7 +1788,6 @@ fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Poin
         return true;
     }
     // 変形の確定（apply_affine_to_selected_inner）から呼ぶときは、もう控えがあるので何もしない
-    push_undo(tab, None);
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
     update_instances(
@@ -1644,7 +1803,6 @@ fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
     if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
-    push_undo(tab, None);
     // 置けない変換は、中心点も書かずに断る（`transform_selected_shapes` が置けると決めてから中心点を書く）
     transform_selected_shapes(tab, affine, true)
 }
@@ -1704,7 +1862,6 @@ fn apply_paste_clipboard(
     if !clear_selection(tab) {
         return false;
     }
-    push_undo(tab, None);
     let sym_map = import_clipboard_symbols(tab, clipboard, &content);
     put_placements(tab, vec![placement], |sym| {
         sym_map.get(&sym).copied().unwrap_or(sym)
@@ -1743,7 +1900,6 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     if !clear_selection(tab) {
         return false;
     }
-    push_undo(tab, None);
 
     tab.doc.remove_symbol_and_instances(sym_id);
     if tab.view.selected_library_symbol == Some(sym_id) {
@@ -1766,7 +1922,6 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     let Some(i) = tab.doc.library.iter().position(|s| s.id == sym_id) else {
         return false;
     };
-    push_undo(tab, None);
 
     let mut copy = (**tab.doc.library.get(i).expect("見つけた所")).clone();
     let base = std::mem::take(&mut copy.name);
@@ -1866,7 +2021,6 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
 /// 選ばれている1つのシンボルインスタンスの設定を `update` で書き換える（取り消し1回分）
 fn update_selected_symbol_binding(
     tab: &mut Tab,
-    coalesce: Option<CoalesceKey>,
     update: impl Fn(&mut SymbolInstanceBinding),
 ) -> bool {
     let Some((binding, _, _)) = selected_single_symbol_info(tab) else {
@@ -1894,7 +2048,6 @@ fn update_selected_symbol_binding(
     if !commit_floating(tab) {
         return false;
     }
-    push_undo(tab, coalesce);
 
     let updated = update_instances(tab, &layer_ids, |gid| gid == inst_gid, &update);
     if updated {
@@ -1907,7 +2060,6 @@ fn apply_set_symbol_playback(
     tab: &mut Tab,
     loop_mode: Option<SymbolLoopMode>,
     first_frame: Option<usize>,
-    coalesce: Option<CoalesceKey>,
 ) -> bool {
     let Some((binding, _, total_frames)) = selected_single_symbol_info(tab) else {
         return false;
@@ -1916,7 +2068,7 @@ fn apply_set_symbol_playback(
     let clamped_first = first_frame
         .unwrap_or(binding.first_frame)
         .min(total_frames.saturating_sub(1));
-    update_selected_symbol_binding(tab, coalesce, |b| {
+    update_selected_symbol_binding(tab, |b| {
         b.loop_mode = next_mode;
         b.first_frame = clamped_first;
     })
@@ -2120,7 +2272,7 @@ fn apply_set_layer_flag(
     })
 }
 
-fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<CoalesceKey>) -> bool {
+fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2) -> bool {
     // 文書に入れる大きさは1つの決まり（範囲にそろえ、有限でなければ断る）
     let Some(next_size) = crate::symbol::stage_size_of(next_size) else {
         return false;
@@ -2130,15 +2282,13 @@ fn apply_set_stage_size(tab: &mut Tab, next_size: Vec2, coalesce: Option<Coalesc
     {
         return false;
     }
-    push_undo(tab, coalesce);
     tab.doc.stage_size = next_size;
     true
 }
 
-fn apply_set_fps(tab: &mut Tab, next_fps: u32, coalesce: Option<CoalesceKey>) -> bool {
+fn apply_set_fps(tab: &mut Tab, next_fps: u32) -> bool {
     let next_fps = next_fps.clamp(1, crate::symbol::MAX_FPS);
     if next_fps != tab.doc.fps {
-        push_undo(tab, coalesce);
         tab.doc.fps = next_fps;
         return true;
     }
