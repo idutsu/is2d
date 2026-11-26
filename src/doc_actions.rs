@@ -554,7 +554,14 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
     let prev_imported_map =
         matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
-    let mut res = dispatch(host, action);
+    // 操作の途中で止まったら（panic）、その操作を無かったことにする（`restore_after_panic`）
+    let mut res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(host, action))) {
+        Ok(res) => res,
+        Err(_) => {
+            restore_after_panic(host);
+            false
+        }
+    };
     let (tab, _, clipboard, toast) = host.parts_mut();
     tab.history.before = None;
     // 地図にできない形を作る編集は、文書を変える前に断ってある（どの入口も同じ決まり）。ここで知らせる
@@ -582,6 +589,29 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         }
     }
     res
+}
+
+/// 操作の途中で止まった（panic：計算の前提が破れた）ときの最後の砦（設計審査 de92ceb の D-2）：文書・選択・浮いた片を、
+/// 操作を始める前の状態に戻し（控えにしまう前なら `UndoHistory::before`、しまったあとなら控えの候補 `pending`。どちらも
+/// `apply` が操作の前に1回だけ写したもの）、途中まで作り直したかもしれない画面の土台を捨てて作り直し、知らせる。別の
+/// やり方へ逃げるのではなく、その操作を無かったことにするだけ（取り消しと同じ戻し方 `restore_state_snapshot`）。文書は
+/// 共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は操作の前のまま。前は止まるとアプリが落ち、全部の
+/// タブの保存していない作業が消えた
+fn restore_after_panic(host: &mut impl ActionHost) {
+    let (tab, _, _, toast) = host.parts_mut();
+    let before = tab.history.before.take().or_else(|| tab.history.pending.take().map(|(e, _)| e));
+    tab.history.pending = None;
+    tab.session.refusal = None;
+    tab.session.base_cache = Default::default();
+    if let Some(before) = before {
+        tab.restore_state_snapshot(before);
+    }
+    tab.refresh_scene_base();
+    show_notice(
+        toast,
+        NoticeKind::Error,
+        "内部の不具合でこの操作を続けられなかったので、操作の前に戻しました",
+    );
 }
 
 fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {

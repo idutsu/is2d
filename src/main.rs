@@ -1254,7 +1254,13 @@ fn plus_minus_pressed(events: &[egui::Event]) -> Option<PlusMinus> {
 
 impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_ui(ctx);
+        // 画面の処理の途中で止まったら（panic。文書を変える操作の中で止まったときは `apply` が操作の前に戻すので、ここへ来る
+        // のはそのほかの所）、落ちる前に、確認なしに終わるときと同じ復旧ファイルを書く（設計審査 de92ceb の D-2。書き方は
+        // `on_exit` と同じ `write_unsaved_tabs` の1つ）。前は止まると、全部のタブの保存していない作業が消えた
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_ui(ctx))) {
+            self.recovery.write_unsaved_tabs(&self.tabs);
+            std::panic::resume_unwind(e);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -21439,6 +21439,41 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
 }
 
+/// 操作の途中で止まって（panic）も、アプリは落ちず、その操作を無かったことにして、操作の前の文書・選択・取り消しの控えに
+/// 戻り、知らせて、続けて使える（設計審査 de92ceb の D-2：落ちたときの最後の砦）。止まる操作には、今ある本物の道を使う：
+/// ブラシの点が格子のはるか外（1e300）にあると、ブラシの形を作る所（i_overlay）が止まる。この道を直したら（点を断る）、
+/// この確かめには、別の止まる道が要る（知らせの文で、守りが働いたことを確かめているので、そのときはこのテストが落ちて
+/// 知らせる）
+#[test]
+fn a_panic_inside_an_operation_restores_the_state_before_it() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::PaintStroke { points: vec![Point::new(400.0, 400.0), Point::new(450.0, 420.0)], radius: 10.0, color: Color32::BLUE }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(350.0, 350.0), additive: false }));
+    let doc_before = app.doc.clone();
+    let shapes_before: Vec<(u64, Color32)> = app.scene().iter().map(|s| (s.shape_id, s.color)).collect();
+    let selected_before: Vec<u64> = app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).map(|s| s.shape_id).collect();
+    let floating_before = app.session.floating().is_some();
+    let (undo_before, redo_before) = (app.history.undo_stack.len(), app.history.redo_stack.len());
+    app.toast = None;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        apply(&mut app, Action::PaintStroke { points: vec![Point::new(1e300, 1.0), Point::new(5.0, 5.0)], radius: 5.0, color: Color32::GREEN })
+    }));
+    assert_eq!(r.ok(), Some(false), "止まった操作が apply の外まで落ちた、または成功とみなされた");
+    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
+    assert!(app.doc.root.layers.iter().zip(doc_before.root.layers.iter()).all(|(a, b)| a.keyframes.iter().zip(b.keyframes.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(&x.cel.maps, &y.cel.maps))), "文書が操作の前と違う");
+    assert_eq!(app.scene().iter().map(|s| (s.shape_id, s.color)).collect::<Vec<_>>(), shapes_before);
+    assert_eq!(app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).map(|s| s.shape_id).collect::<Vec<_>>(), selected_before);
+    assert_eq!(app.session.floating().is_some(), floating_before);
+    assert_eq!((app.history.undo_stack.len(), app.history.redo_stack.len()), (undo_before, redo_before), "取り消しの控えが変わった");
+    // 続けて使える（選んだものを動かし、取り消すと戻る）
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(10.0, 0.0) }));
+    assert!(apply(&mut app, Action::Undo));
+    assert_eq!(app.scene().iter().map(|s| (s.shape_id, s.color)).collect::<Vec<_>>(), shapes_before);
+}
+
 /// 線を1本動かしたあと、元の所に同じ色・太さでインクボトルをかけ直しても付く（新しい線の番号は、塗りの番号と同じく、
 /// 書き戻しで新しく取る。前は形・線・側の番号から計算で振ったので、動かした線が持ち続ける元の所の番号と、かけ直した線の
 /// 番号が同じになり、重なりの確かめが書き込みを断った：レビュー de92ceb の N-1002）
@@ -41381,3 +41416,4 @@ mod strokes {
         assert!(app.scene().iter().any(|s| s.line.is_some() && s.contains_point(Point::new(200.0, 100.0))));
     }
 }
+
