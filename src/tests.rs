@@ -21404,6 +21404,41 @@ fn selected_raw_art_stays_under_groups() {
     assert_eq!(top_at(&app, on_brow + KVec2::new(10.0, 10.0)), Some(brow), "離した後に、眉が顔の塗りに隠れた");
 }
 
+/// シンボルの中で生の絵を動かすと、選んだままでも、同じシンボルのほかのインスタンス（薄く見える親の背景）に映る（グループを
+/// 動かしたときと同じ。利用者の指摘：生の絵は選択を外すまで映らなかった。動かした生の絵は、選んでいる間は浮いた片で、
+/// 文書のシンボルの中身にはまだ書いていないため）
+#[test]
+fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 160.0, 160.0, Color32::from_rgb(200, 60, 60))]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let a = *app.session.selection.instances.iter().next().expect("インスタンス");
+    // 右へ Alt で複製して、同じシンボルのインスタンスをもう1つ置く
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(300.0, 0.0), alt_duplicate: true }));
+    assert!(apply(&mut app, Action::Deselect));
+    // 左のインスタンスの中に入り、生の絵を下へ動かす（選んだまま）
+    assert!(apply(&mut app, Action::EnterSymbolTimeline { instance_gid: a }));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 80.0), alt_duplicate: false }));
+    // 薄く見える右のインスタンスの、いちばん下の所
+    let sibling_bottom = |app: &mut Is2dApp| -> f32 {
+        app.tabs[app.active].start_draw_pass();
+        app.tabs[app.active]
+            .cached_backdrop_screen_meshes(1.0, Vec2::ZERO, WHOLE_VIEW)
+            .iter()
+            .flat_map(|m| m.vertices.iter().map(|v| v.pos))
+            .filter(|p| p.x > 300.0)
+            .map(|p| p.y)
+            .fold(f32::MIN, f32::max)
+    };
+    assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選んだまま、ほかのインスタンスに映らない：{}", sibling_bottom(&mut app));
+    assert!(apply(&mut app, Action::Deselect));
+    assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
+}
+
 /// 線の漏れの洗い出し：線と塗りとグループの混ざった絵で、選び方と、新しい中身ができる操作（グループ化・解除・重ね順・
 /// シンボル化・移動・Alt の複製・貼り付け・拡大・回転・反転・取り消し・やり直し）をでたらめな順に重ね、そのたびに確かめる：
 /// - グループのまとまり：グループの図形は、塗りも線も、みな選ばれているか、みな選ばれていないか

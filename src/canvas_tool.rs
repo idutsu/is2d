@@ -1362,6 +1362,9 @@ impl<'a> Scene<'a> {
 pub(crate) use crate::floating::Floating;
 use crate::floating::Stage;
 
+/// 親の背景を描く文書の写し：（鍵, 浮いた片を確定した後の文書。確定できなければ `None`）
+type BackdropDoc = ((u64, u64), Option<Arc<Document>>);
+
 /// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
 pub(crate) struct Session {
@@ -1369,6 +1372,12 @@ pub(crate) struct Session {
     pub(crate) edit_path: EditPath,
     /// シンボル編集中の親の背景（薄く描く）のセル画の結合メッシュの写し
     pub(crate) backdrop_cache: SyncCache<CelMeshCache>,
+    /// 親の背景を描く、浮いた片を確定した後の文書（鍵（`floating_rev`, `Document::revision`）と文書。確定できなければ
+    /// `None`：`Tab::backdrop_document`）
+    backdrop_doc: SyncCache<Option<BackdropDoc>>,
+    /// 浮いた片が変わるたびに増える番号（浮いた片の書き換えは `set_floating`・`take_floating`・`update_floating`・
+    /// `with_floating` だけを通り、みな `sync_floating` か `take_floating` で数える）
+    pub(crate) floating_rev: u64,
     /// オニオンスキンで描くセル画の結合メッシュの写し
     pub(crate) onion_cache: SyncCache<CelMeshCache>,
     /// ロック中・再生中のレイヤーのセル画の結合メッシュの写し
@@ -1447,6 +1456,7 @@ impl Session {
 
     /// `Floating` を取り出し、`overlay` を同期再構築する
     pub(crate) fn take_floating(&mut self) -> Option<Floating> {
+        self.floating_rev += 1;
         let fl = self.floating.take();
         self.rebuild_overlay_from_floating();
         fl
@@ -1469,6 +1479,7 @@ impl Session {
 
     /// 浮いた片の写しを作り直し（片も残りも無ければ外す）、`overlay` を同期再構築する
     fn sync_floating(&mut self) {
+        self.floating_rev += 1;
         let world = self.edit_path.world_xform();
         if let Some(fl) = &mut self.floating {
             fl.refresh(
@@ -2458,14 +2469,17 @@ impl Tab {
         let edit_path = &self.session.edit_path;
         let mut meshes = Vec::new();
         let mut cache = self.session.backdrop_cache.lock();
-        self.with_symbol_eval(|ctx| {
+        // 動かした浮いた片があれば、それを確定した後の文書から描く（同じシンボルのほかのインスタンスにも、確定した後の形が
+        // 映る。グループを動かしたときは文書に書くので映る：`Session::backdrop_document`）
+        let committed = self.backdrop_document();
+        let mut draw = |doc: &Document, ctx: SymbolEvalCtx<'_>| {
             for lvl_idx in edit_path.first_level_showing_parent()..edit_path.levels.len() {
                 let lvl = &edit_path.levels[lvl_idx];
                 let (timeline, parent_tl) = if lvl_idx == 0 {
-                    (None, &self.doc.root)
+                    (None, &doc.root)
                 } else {
                     let sym_id = edit_path.levels[lvl_idx - 1].symbol_id;
-                    let Some(sym) = self.doc.find_symbol(sym_id) else {
+                    let Some(sym) = doc.find_symbol(sym_id) else {
                         continue;
                     };
                     (Some(sym_id), &sym.timeline)
@@ -2498,8 +2512,40 @@ impl Tab {
                     ));
                 }
             }
-        });
+        };
+        match &committed {
+            Some(doc) => draw(doc, SymbolEvalCtx::new(&doc.library)),
+            None => self.with_symbol_eval(|ctx| draw(&self.doc, ctx)),
+        }
         meshes
+    }
+
+    /// 親の背景を描く文書：シンボルの中を編集していて、動かした浮いた片（`modified`）があれば、それを確定した後の文書
+    /// （`committed_document`）。それ以外は `None`（今の文書から描く）。確定した後の文書は、浮いた片か文書が変わったとき
+    /// だけ作り直す（`Session::floating_rev`・`Document::revision` を鍵に持つ）。浮いた片を確定できないとき（置けない）は、
+    /// 確定する前の今の文書のまま
+    fn backdrop_document(&self) -> Option<Arc<Document>> {
+        let fl = self.session.floating().filter(|fl| fl.modified)?;
+        if self.session.edit_path.levels.is_empty() {
+            return None;
+        }
+        let key = (self.session.floating_rev, self.doc.revision);
+        let mut slot = self.session.backdrop_doc.lock();
+        if let Some((k, doc)) = &*slot {
+            if *k == key {
+                return doc.clone();
+            }
+        }
+        let doc = committed_document(
+            (self.id, self.untitled_number),
+            &self.doc,
+            &self.session.edit_path,
+            &self.session.editing_group_path,
+            Some(fl),
+        )
+        .map(Arc::new);
+        *slot = Some((key, doc.clone()));
+        doc
     }
 
     /// オニオンスキンの結合メッシュキャッシュを破棄する
