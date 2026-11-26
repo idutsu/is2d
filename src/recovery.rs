@@ -56,8 +56,8 @@ impl UnsavedTab {
             #[cfg(any(target_os = "windows", test))]
             content_gen: tab.history.content_gen,
             doc: tab.doc.clone(),
-            edit_path: tab.session.edit_path.clone(),
-            editing_group_path: tab.session.editing_group_path.clone(),
+            edit_path: tab.session.edit_path().clone(),
+            editing_group_path: tab.session.editing_group_path().to_vec(),
             floating: tab.session.shared_floating(),
         })
     }

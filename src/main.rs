@@ -684,7 +684,7 @@ impl Is2dApp {
     }
 
     fn handle_single_key_shortcuts(&mut self, i: &egui::InputState, shift: bool) {
-        if !self.tab().session.selection.is_empty() {
+        if !self.tab().session.selection().is_empty() {
             let step = if shift { 10.0 } else { 1.0 };
             let mut delta = kurbo::Vec2::ZERO;
             let mut any_non_repeat = false;
@@ -764,7 +764,7 @@ impl Is2dApp {
             apply(self, Action::SetTool { tool });
         } else if key_pressed_no_repeat(i, Key::Escape) {
             canvas_tool::cancel_active_drag(self.tab_mut());
-            if !self.tab().session.selection.is_empty() {
+            if !self.tab().session.selection().is_empty() {
                 apply(self, Action::Deselect);
             } else {
                 apply(self, Action::ExitGroupSteps { steps: 1 });
@@ -1091,15 +1091,20 @@ impl Is2dApp {
                 let mouse_pt = pointer_pos.map(|p| self.tab().view.screen_to_world(p));
                 let tool_allowed = !modal_open && self.is_current_tool_allowed();
 
-                // 1. ツール別のマウス入力ハンドリング（パン操作開始時・モーダル表示時は進行中のドラッグをキャンセルしてスキップ）
+                // 1. ツール別のマウス入力ハンドリング（パン操作開始時・モーダル表示時は進行中のドラッグをキャンセルしてスキップ。
+                //    道具が使えない（コマが無い・ロックなど）ときも、進行中のドラッグを取り消す（スポイトは使えるので入力は渡す）。
+                //    前は道具が使えなくなってもドラッグが残り、描きかけの形が画面に残った：約束の棚卸し 5616fcc の C の C3）
                 if is_panning || modal_open {
                     canvas_tool::cancel_active_drag(self.tab_mut());
                 } else {
+                    if !tool_allowed {
+                        canvas_tool::cancel_active_drag(self.tab_mut());
+                    }
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
                 let stage_size = self.tab().doc.stage_size;
-                let shows_stage = self.tab().session.edit_path.shows_stage();
+                let shows_stage = self.tab().session.edit_path().shows_stage();
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形。ライブラリから入ったシンボルの編集では全面を白）の描画
                 self.tab().view.draw_stage_background(

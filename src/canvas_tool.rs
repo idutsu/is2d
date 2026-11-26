@@ -1388,8 +1388,9 @@ type BackdropDoc = ((u64, u64), Option<Arc<Document>>);
 /// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
 pub(crate) struct Session {
-    /// シンボルインプレイス編集の経路（空ならルート）
-    pub(crate) edit_path: EditPath,
+    /// シンボルインプレイス編集の経路（空ならルート）。書くのは `Tab::move_view`（と、取り消しで状態をまるごと戻す
+    /// `Tab::restore_state_snapshot`）だけ
+    edit_path: EditPath,
     /// シンボル編集中の親の背景（薄く描く）のセル画の結合メッシュの写し
     pub(crate) backdrop_cache: SyncCache<CelMeshCache>,
     /// 親の背景を描く、浮いた片を確定した後の文書（鍵（`floating_rev`, `Document::revision`）と文書。確定できなければ
@@ -1416,13 +1417,14 @@ pub(crate) struct Session {
     pub(crate) scene_order: std::sync::OnceLock<Vec<SceneEntry>>,
     /// キャンバス上で進行中のドラッグ操作（ブラシ/消しゴム・選択・自由変形の排他的状態マシン）
     pub(crate) drag: ActiveCanvasDrag,
-    pub(crate) selection: Selection,
+    /// 選択（書くのは `Session` の選ぶ・外す関数だけ：設計 claude/約束を入口で守る設計_5616fcc.md の 5.）
+    selection: Selection,
     /// 浮いた片の中身（分け合える箱。取り消しの控えは箱を分け合う：`shared_floating`）と、その見た目
     floating: Option<Arc<Floating>>,
     floating_view: FloatingView,
     pub(crate) hover_target: HoverTarget,
-    /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
-    pub(crate) editing_group_path: Vec<u64>,
+    /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）。書くのは `edit_path` と同じ所だけ
+    editing_group_path: Vec<u64>,
     pub(crate) transform_pivot: Option<Point>,
     pub(crate) transform_hover: TransformHoverTarget,
     /// 輪郭の変形のカーソル合わせに使う、境目の線で持つ地図（生の図形が変わるまで使い回す）
@@ -1487,6 +1489,18 @@ impl Session {
     #[inline]
     pub(crate) fn invalidate_scene_order(&mut self) {
         let _ = self.scene_order.take();
+    }
+
+    /// シンボルインプレイス編集の経路（空ならルート）
+    #[inline]
+    pub(crate) fn edit_path(&self) -> &EditPath {
+        &self.edit_path
+    }
+
+    /// 編集中のグループの階層（空ならその段の生の図形）
+    #[inline]
+    pub(crate) fn editing_group_path(&self) -> &[u64] {
+        &self.editing_group_path
     }
 
     /// 現在の `Floating` への読み取り専用参照を返す
@@ -2097,6 +2111,54 @@ impl Session {
             .is_some_and(|idx| self.is_selected_at(idx))
     }
 
+    /// 選択
+    #[inline]
+    pub(crate) fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// 選ぶ・外す操作で選択を `f` で変える（選択を変える所はみなここを通る）。選択が変わったら、自由変形の中心点を外す
+    /// （中心点は前の選択に合わせて置いたもの。新しい選択の真ん中に戻る：持ち主が決めた 2026-11-27。前は選び足す道ごとに
+    /// 決めたので、Shift クリックでは外し、Shift ダブルクリックでは残した：約束の棚卸し 5616fcc の B の G1）。浮いた片の片を
+    /// みな選ぶのは、浮いた片を書き換える入口（`put_floating`）：選択の一部を外すときは、外した片を確定してから浮いた片を
+    /// 書き換えるので、ここで選び直すと外せなくなる
+    fn change_selection(&mut self, f: impl FnOnce(&mut Self)) {
+        let before = self.selection.clone();
+        f(self);
+        if self.selection != before {
+            self.transform_pivot = None;
+        }
+    }
+
+    /// 選択を `sel` に入れ替える（選ぶ・外す操作）
+    pub(crate) fn replace_selection(&mut self, sel: Selection) {
+        self.change_selection(|s| s.selection = sel);
+    }
+
+    /// 選択を取り出し、選択を空にする（選んだものを消すとき）
+    pub(crate) fn take_selection(&mut self) -> Selection {
+        let mut out = Selection::default();
+        self.change_selection(|s| out = std::mem::take(&mut s.selection));
+        out
+    }
+
+    /// 図形 `shapes`・インスタンス `instances` を選択に足す（貼り付けた中身を選ぶとき）
+    pub(crate) fn add_to_selection(
+        &mut self,
+        shapes: impl IntoIterator<Item = ShapeId>,
+        instances: impl IntoIterator<Item = InstanceGid>,
+    ) {
+        self.change_selection(|s| {
+            s.selection.shapes.extend(shapes);
+            s.selection.instances.extend(instances);
+        });
+    }
+
+    /// 断った操作で、選択を前のまま `sel` に戻す（選ぶ操作ではないので、中心点は変えない）
+    fn restore_selection(&mut self, sel: Selection) {
+        self.selection = sel;
+    }
+
     fn insert_selection_keys(
         &mut self,
         keys: impl IntoIterator<Item = (Option<InstanceGid>, ShapeId)>,
@@ -2112,9 +2174,11 @@ impl Session {
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
     pub(crate) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
-        self.selection.clear();
-        self.select_shape_indices(indices);
-        self.drop_unmodified_slice_if_unselected();
+        self.change_selection(|s| {
+            s.selection.clear();
+            s.select_shape_indices(indices);
+            s.drop_unmodified_slice_if_unselected();
+        });
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
@@ -2128,8 +2192,10 @@ impl Session {
                     .map(|s| (s.symbol_instance.map(|b| b.instance_gid), s.shape_id))
             })
             .collect();
-        self.insert_selection_keys(keys);
-        self.promote_selected_remainder_to_pieces();
+        self.change_selection(|s| {
+            s.insert_selection_keys(keys);
+            s.promote_selected_remainder_to_pieces();
+        });
     }
 
     /// 現在の `self.selection` に対応する `Scene` 選択マスク（`Vec<bool>`）と有効な選択が1つ以上あるかを返す
@@ -2154,7 +2220,9 @@ impl Session {
                 self.hover_target = HoverTarget::None;
             }
         }
-        while !self.editing_group_path.is_empty() {
+        // 浮いた片があるときは階層を変えない（浮いた片の片は今の階層にあるので、空にはならない。見る場所を変えるのは
+        // 貼り戻してから：`Tab::move_view`）
+        while self.floating.is_none() && !self.editing_group_path.is_empty() {
             if self
                 .scene()
                 .iter()
@@ -2176,9 +2244,10 @@ impl Session {
             })
             .map(|s| (s.symbol_instance.map(|b| b.instance_gid), s.shape_id))
             .collect();
-        self.selection.clear();
-        self.insert_selection_keys(keys);
-        self.transform_pivot = None;
+        self.change_selection(|s| {
+            s.selection.clear();
+            s.insert_selection_keys(keys);
+        });
     }
 
     /// 指定レイヤーID集合 `layer_ids` に属する図形・シンボルインスタンスの選択のみを残し、それ以外を選択から外す
@@ -2215,14 +2284,16 @@ impl Session {
 
     /// 指定した `instance_gid` に属するキャンバス上の図形をすべて選択状態にする
     pub(crate) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
-        self.selection.clear();
-        if self.base_cache.shapes().iter().any(|s| {
+        let present = self.base_cache.shapes().iter().any(|s| {
             s.symbol_instance
                 .is_some_and(|b| b.instance_gid == instance_gid)
-        }) {
-            self.selection.instances.insert(instance_gid);
-        }
-        self.transform_pivot = None;
+        });
+        self.change_selection(|s| {
+            s.selection.clear();
+            if present {
+                s.selection.instances.insert(instance_gid);
+            }
+        });
     }
 
     /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断して仮表示 `Overlay` を破棄する（ブラシのストローク状態には干渉しない）
@@ -2259,6 +2330,8 @@ impl Session {
             | ActiveCanvasDrag::PaintStroke { .. }
             | ActiveCanvasDrag::None => {}
         }
+        // ドラッグをやめたら、仮表示と、離したときのために作った答えを捨てる
+        self.drop_ahead = None;
         self.clear_overlay();
     }
 }
@@ -2479,8 +2552,12 @@ pub(crate) fn committed_document(
     };
     let mut temp_tab = Tab::new_empty(id, untitled_number);
     temp_tab.doc = doc.clone();
-    temp_tab.session.edit_path = edit_path.clone();
-    temp_tab.session.editing_group_path = editing_group_path.to_vec();
+    // 浮いた片はまだ入れていないので、貼り戻すものは無い
+    let moved = temp_tab.move_view(|e, g| {
+        *e = edit_path.clone();
+        *g = editing_group_path.to_vec();
+    });
+    debug_assert!(moved);
     temp_tab.session.set_floating(Some(fl.clone()));
     temp_tab.refresh_scene_base();
     commit_floating(&mut temp_tab).then_some(temp_tab.doc)
@@ -2559,10 +2636,31 @@ impl Tab {
         }
     }
 
-    /// 編集中タイムラインの再生ヘッド（`current_frame`）のみを変更し、リビジョンは上げずに土台キャッシュを更新する
-    pub(crate) fn set_active_frame(&mut self, frame: usize) {
+    /// 編集中タイムラインの再生ヘッド（`current_frame`）を変え、画面の土台を作り直す（版は上げない）。コマを変える入口は
+    /// これ1つ（再生中に進める `advance_playback_frame` は、再生を始める入口が先に貼り戻してある）：先に持ち上げた絵を貼り
+    /// 戻し（持ち上げた絵は今のコマのセル画から持ち上げたもの）、断られたら変えずに `false`（設計
+    /// claude/約束を入口で守る設計_5616fcc.md の 3.）
+    #[must_use]
+    pub(crate) fn set_active_frame(&mut self, frame: usize) -> bool {
+        if !commit_floating(self) {
+            return false;
+        }
         self.active_timeline_raw_mut().current_frame = frame;
         self.refresh_scene_base();
+        true
+    }
+
+    /// 見る場所（シンボルの中の位置 `Session::edit_path`・グループの階層 `Session::editing_group_path`）を `f` で変える。見る
+    /// 場所を変える入口はこれ1つ（取り消しで状態をまるごと戻す `restore_state_snapshot` を除く）：先に持ち上げた絵を貼り戻し
+    /// （持ち上げた絵は、今の見る場所の地図から持ち上げたもの）、断られたら変えずに `false`（設計
+    /// claude/約束を入口で守る設計_5616fcc.md の 3.）
+    #[must_use]
+    pub(crate) fn move_view(&mut self, f: impl FnOnce(&mut EditPath, &mut Vec<u64>)) -> bool {
+        if !commit_floating(self) {
+            return false;
+        }
+        f(&mut self.session.edit_path, &mut self.session.editing_group_path);
+        true
     }
 
     /// 再生中のフレーム進行用に、土台キャッシュを再構築せず編集中タイムラインの再生ヘッド（`current_frame`）のみを進める

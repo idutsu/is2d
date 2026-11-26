@@ -76,7 +76,6 @@ pub(crate) fn start_transform_drag(
     alt_held: bool,
 ) {
     let sub_mode = host.tool().select_sub_mode;
-    host.tab_mut().view.inspect_timeline_frame = false;
     let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     if shift_held && hover == TransformHoverTarget::None {
@@ -325,7 +324,6 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
 }
 
 fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
-    host.tab_mut().view.inspect_timeline_frame = false;
     let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     // ピボットのクリックでは選択を変えない。変形枠の中の空白では選択を外さない
@@ -381,7 +379,7 @@ pub(crate) fn compute_transform_hover(
     if bbox.contains(mouse_pt)
         || scene
             .iter()
-            .any(|s| session.selection.contains_shape(s) && s.contains_point(mouse_pt))
+            .any(|s| session.selection().contains_shape(s) && s.contains_point(mouse_pt))
     {
         return TransformHoverTarget::Move;
     }
@@ -391,7 +389,7 @@ pub(crate) fn compute_transform_hover(
 
 /// 自由変形ツール（`Tool::Transform`）のバウンディングボックス・8ハンドル・基準点（ピボット）を描画（`Scene` を読み取る）
 pub(crate) fn draw_free_transform_box(session: &Session, painter: &egui::Painter, view: &View) {
-    if session.selection.is_empty() {
+    if session.selection().is_empty() {
         return;
     }
 

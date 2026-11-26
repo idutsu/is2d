@@ -171,8 +171,8 @@ type TimelineKey = (u64, usize, Option<u64>);
 fn timeline_key(tab: &Tab) -> TimelineKey {
     (
         tab.id,
-        tab.session.edit_path.len(),
-        tab.session.edit_path.last().map(|s| s.symbol_id),
+        tab.session.edit_path().len(),
+        tab.session.edit_path().last().map(|s| s.symbol_id),
     )
 }
 
@@ -2446,8 +2446,9 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
             (tl.current_frame, tl.total_frames)
         };
         let last_f = total_f.saturating_sub(1);
-        if curr_f >= total_f || (!loop_pb && curr_f >= last_f) {
-            tab.set_active_frame(0);
+        // 浮いた片は上で貼り戻してある（`Action::Deselect`）ので、コマを変える入口は断らない
+        if (curr_f >= total_f || (!loop_pb && curr_f >= last_f)) && !tab.set_active_frame(0) {
+            return;
         }
         timeline_ui.start_playback(tab);
     }

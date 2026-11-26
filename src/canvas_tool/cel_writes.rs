@@ -178,7 +178,6 @@ pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u
 
 /// 指定した `shape_id` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
 pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
-    tab.view.inspect_timeline_frame = false;
     if let Some(lid) = tab.scene().shape_by_id(shape_id).map(|s| s.layer_id) {
         focus_active_layer_by_id(tab, lid);
     }
@@ -186,7 +185,6 @@ pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId
 
 /// レイヤー `lid` へ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
 pub(crate) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
-    tab.view.inspect_timeline_frame = false;
     let info = {
         let tl = tab.active_timeline();
         tl.layer_index_by_id(lid)
@@ -200,7 +198,6 @@ pub(crate) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
 
 /// キャンバス上で選択されたシェイプ群（`tab.session.selection`）が所属するレイヤーをタイムライン上で選択状態にする
 pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
-    tab.view.inspect_timeline_frame = false;
     let mut min_l: Option<usize> = None;
     let mut max_l: Option<usize> = None;
     let mut last_l: Option<usize> = None;
@@ -230,11 +227,17 @@ pub(crate) fn cancel_active_drag(tab: &mut Tab) {
     tab.session.transform_hover = TransformHoverTarget::None;
 }
 
-pub(crate) fn reset_session_after_timeline_change(tab: &mut Tab) {
-    cancel_active_drag(tab);
-    tab.session.set_floating(None);
+/// タイムラインを変えたあとの後片付け（選択・浮いた片・中心点はコマごとのもの）。浮いた片は捨てずに貼り戻し（前は捨てた
+/// ので、呼ぶ前に貼り戻すのを忘れると、動かした絵が黙って消えた：約束の棚卸し 5616fcc の B の B4）、断られたら `false`
+/// （浮いた片はそのまま。入口 `apply` は、表のとおりに操作の前に貼り戻してあるので、ふつうは貼り戻すものが無い）
+#[must_use]
+pub(crate) fn reset_session_after_timeline_change(tab: &mut Tab) -> bool {
+    if !commit_floating(tab) {
+        return false;
+    }
     tab.session.transform_pivot = None;
     tab.session.sanitize_editing_scope();
+    true
 }
 
 pub(crate) fn set_tool(tab: &mut Tab, tool_settings: &mut ToolSettings, tool: Tool) {
@@ -273,7 +276,6 @@ pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
         .map(|l| l.id)
         .collect();
     tab.session.select_shapes_in_layers(&selected_lids);
-    tab.view.inspect_timeline_frame = true;
 }
 
 /// シンボル基準点（Registration Point `+`）をスクリーン座標 `center` に描画する共通ヘルパー
@@ -456,7 +458,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             let whole = fl.clone();
             if !fl.return_pieces(tab.session.stage(), &keep) {
                 tab.session.set_floating(Some(whole));
-                tab.session.selection = before;
+                tab.session.restore_selection(before);
                 tab.session.refusal = Some(Refusal::Unplaceable);
                 return false;
             }
@@ -477,7 +479,7 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
         Ok(to_commit) => to_commit,
         Err(_) => {
             tab.session.set_floating(whole);
-            tab.session.selection = before;
+            tab.session.restore_selection(before);
             tab.session.refusal = Some(Refusal::Unplaceable);
             return false;
         }
@@ -485,13 +487,13 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     if let Some(to_commit) = &to_commit {
         if commit_floating_layers(tab, to_commit).is_none() {
             tab.session.set_floating(whole);
-            tab.session.selection = before;
+            tab.session.restore_selection(before);
             return false;
         }
         // 持ったまま残る置かない組の残りを、書いたあとのセル画に合わせて作り直す
         if !keep.is_empty() && !fl.rebase_after_commit(tab.session.stage(), to_commit) {
             tab.session.set_floating(whole);
-            tab.session.selection = before;
+            tab.session.restore_selection(before);
             tab.session.refusal = Some(Refusal::Unplaceable);
             return false;
         }
@@ -515,13 +517,10 @@ pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
 /// 選択を外す（浮いた片は確定する）。`false`：確定を断った（浮いた片と選択は前のまま。呼ぶ側は断る）
 #[must_use]
 pub(crate) fn clear_selection(tab: &mut Tab) -> bool {
-    tab.history.end_coalesce();
     tab.session.rollback_shape_drag();
     if !commit_floating_except(tab, &[]) {
         return false;
     }
-    tab.session.selection.clear();
-    tab.session.transform_pivot = None;
-    tab.view.inspect_timeline_frame = false;
+    tab.session.replace_selection(Selection::default());
     true
 }

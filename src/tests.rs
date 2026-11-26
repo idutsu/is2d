@@ -301,7 +301,7 @@ fn put_cel_shapes(app: &mut Is2dApp, layer_idx: usize, frame: usize, mut shapes:
     };
     // 下ごしらえなので、図形から地図を作ってセル画にする（本番の書き込みは、地図の面か浮いた片しか書かない）。ステージの
     // 座標の図形を、今の階層の文書の座標へ戻す
-    let world = app.session.edit_path.world_xform();
+    let world = app.session.edit_path().world_xform();
     for s in &mut shapes {
         s.layer_id = lid;
         if world != kurbo::Affine::IDENTITY {
@@ -1425,7 +1425,7 @@ fn test_marquee_select_partial_slice_and_shift_multi_select() {
         1,
         "未編集で選択解除すると元の1つのシェイプに復元されること"
     );
-    assert!(app.session.selection.is_empty());
+    assert!(app.session.selection().is_empty());
 
     // 3. 左端 (x: 70..140) を矩形選択し、続いて Shift キー押下（additive = true）で右端 (x: 260..330) も連続矩形選択
     select_ops::apply_marquee_selection(
@@ -1799,11 +1799,11 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
         &mut app,
         Point::new(200.0, 200.0)
     ));
-    assert_eq!(app.session.editing_group_path, vec![head_gid]);
+    assert_eq!(app.session.editing_group_path(), vec![head_gid]);
     let s = scene_summary(&app);
-    assert!(s.shapes[0].is_raw_at_scope(&app.session.editing_group_path));
+    assert!(s.shapes[0].is_raw_at_scope(app.session.editing_group_path()));
     assert_eq!(
-        s.shapes[1].active_group_id_at_scope(&app.session.editing_group_path),
+        s.shapes[1].active_group_id_at_scope(app.session.editing_group_path()),
         Some(eye_gid)
     );
 
@@ -1811,13 +1811,13 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
         &mut app,
         Point::new(100.0, 200.0)
     ));
-    assert_eq!(app.session.editing_group_path, vec![head_gid, eye_gid]);
-    assert!(scene_summary(&app).shapes[1].is_raw_at_scope(&app.session.editing_group_path));
+    assert_eq!(app.session.editing_group_path(), vec![head_gid, eye_gid]);
+    assert!(scene_summary(&app).shapes[1].is_raw_at_scope(app.session.editing_group_path()));
 
     assert!(select_ops::exit_current_group(&mut app));
-    assert_eq!(app.session.editing_group_path, vec![head_gid]);
+    assert_eq!(app.session.editing_group_path(), vec![head_gid]);
     assert!(select_ops::exit_current_group(&mut app));
-    assert!(app.session.editing_group_path.is_empty());
+    assert!(app.session.editing_group_path().is_empty());
     assert_eq!(app.session.selected_indices().len(), 3);
 
     assert!(doc_actions::ungroup_selected_shapes(&mut app));
@@ -2718,7 +2718,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
         &mut app,
         Point::new(150.0, 150.0)
     ));
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(app.active_timeline().total_frames, 1);
 
     assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
@@ -2737,7 +2737,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     put_cel_shapes(&mut app, 0, 1, shapes);
 
     assert!(select_ops::exit_current_group(&mut app));
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.library[0].timeline.total_frames, 2);
 
     assert!(timeline_ui::timeline_extend_frame(&mut app));
@@ -2879,11 +2879,11 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     app.session.set_selected_indices(vec![0]);
     let bbox_f4 = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     assert!(
         (app.scene().active_transform_pivot(
-            &app.session.selection,
+            app.session.selection(),
             app.session.transform_pivot,
             bbox_f4
         ) - joint_world)
@@ -3109,7 +3109,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     assert_eq!(app.session.selected_indices(), vec![0]);
     assert!(app
         .scene()
-        .selected_single_symbol_binding(&app.session.selection)
+        .selected_single_symbol_binding(app.session.selection())
         .is_some());
     assert!(canvas_tool::clear_selection(&mut app));
     assert!(app
@@ -3418,11 +3418,11 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     ));
     put_cel_shapes(&mut sym_app, 0, 0, two_shapes);
     sym_app.session.set_selected_indices(vec![0, 1]);
-    assert_eq!(sym_app.session.selection.shapes.len(), 2);
-    assert!(sym_app.session.selection.instances.is_empty());
+    assert_eq!(sym_app.session.selection().shapes.len(), 2);
+    assert!(sym_app.session.selection().instances.is_empty());
     let empty_test_sym_id = doc_actions::convert_selection_to_symbol(&mut sym_app).unwrap();
-    assert!(sym_app.session.selection.shapes.is_empty());
-    assert_eq!(sym_app.session.selection.instances.len(), 1);
+    assert!(sym_app.session.selection().shapes.is_empty());
+    assert_eq!(sym_app.session.selection().instances.len(), 1);
     assert_eq!(scene_summary(&sym_app).len, 2);
     assert!(sym_app.doc.root.layers[0].keyframes[0]
         .cel
@@ -3573,10 +3573,10 @@ fn entering_a_symbol_uses_the_instance_binding_of_the_current_frame() {
         !symbol_ops::enter_symbol_timeline(&mut app, gid + 1000),
         "今のコマに無いインスタンスには入らない"
     );
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert!(symbol_ops::enter_symbol_timeline(&mut app, gid));
     assert_eq!(
-        app.session.edit_path.levels[0].xform_in_parent, xform,
+        app.session.edit_path().levels[0].xform_in_parent, xform,
         "結び付けの変換そのまま"
     );
 }
@@ -3866,7 +3866,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     {
         let sel = grp_sym_app
             .scene()
-            .expand_to_group_unit(0, &grp_sym_app.session.editing_group_path);
+            .expand_to_group_unit(0, grp_sym_app.session.editing_group_path());
         grp_sym_app.session.set_selected_indices(sel);
     }
     assert_eq!(grp_sym_app.session.selected_indices(), vec![0, 1]);
@@ -3929,7 +3929,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     {
         let sel = grp_sym_app
             .scene()
-            .expand_to_group_unit(0, &grp_sym_app.session.editing_group_path);
+            .expand_to_group_unit(0, grp_sym_app.session.editing_group_path());
         grp_sym_app.session.set_selected_indices(sel);
     }
     assert!(doc_actions::rotate_selected_shapes(
@@ -3957,7 +3957,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     {
         let sel = grp_sym_app
             .scene()
-            .expand_to_group_unit(0, &grp_sym_app.session.editing_group_path);
+            .expand_to_group_unit(0, grp_sym_app.session.editing_group_path());
         grp_sym_app.session.set_selected_indices(sel);
     }
     assert!(doc_actions::delete_selected_shapes(&mut grp_sym_app));
@@ -4220,11 +4220,11 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert_ne!(top_shape_id, shape_bottom.shape_id);
     put_cel_shapes(&mut sort_app, 1, 0, vec![shape_top]);
     sort_app.session.set_selected_indices(vec![0]);
-    assert!(sort_app.session.selection.shapes.contains(&top_shape_id));
+    assert!(sort_app.session.selection().shapes.contains(&top_shape_id));
     put_cel_shapes(&mut sort_app, 0, 0, vec![shape_bottom]);
     assert_eq!(scene_summary(&sort_app).shapes[0].layer_id, lid_bottom);
     assert_eq!(scene_summary(&sort_app).shapes[1].layer_id, lid_top);
-    assert!(sort_app.session.selection.shapes.contains(&top_shape_id));
+    assert!(sort_app.session.selection().shapes.contains(&top_shape_id));
     assert_eq!(
         sort_app.session.selected_indices(),
         vec![1],
@@ -4279,7 +4279,7 @@ fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
     );
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     let before = app.doc.root.layers[0].keyframes[0].cel.shapes();
     // 右の辺のつまみを、左の辺（拡大の基準）まで引く：横の倍率が 0
@@ -5019,13 +5019,13 @@ fn test_multitab_open_switch_symbol_copy_paste_and_close() {
         .collect();
     loaded_app.session.set_selected_indices(sym_indices);
     loaded_app.session.transform_pivot = Some(Point::new(111.0, 222.0));
-    assert!(!loaded_app.session.selection.is_empty());
+    assert!(!loaded_app.session.selection().is_empty());
     assert!(doc_actions::copy_selected_shapes(&mut loaded_app));
 
     // Cmd+S（save_project_to_path）を実行しても現在の選択状態とカスタムピボットが強制解除されないこと
     crate::project_io::save_project_to_path(&mut loaded_app, &tmp_path)
         .expect("選択維持のまま上書き保存に成功すること");
-    assert!(!loaded_app.session.selection.is_empty());
+    assert!(!loaded_app.session.selection().is_empty());
     assert_eq!(
         loaded_app.session.transform_pivot,
         Some(Point::new(111.0, 222.0))
@@ -5397,7 +5397,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     );
     assert!(canvas_tool::clear_selection(&mut union_save_app));
     assert_eq!(union_save_app.scene().len(), 1);
-    assert!(union_save_app.session.selection.is_empty());
+    assert!(union_save_app.session.selection().is_empty());
 
     let mut self_union_app = Is2dApp::default();
     let mut self_union_strokes = make_stroke(
@@ -6012,20 +6012,20 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
         &mut app,
         Point::new(150.0, 100.0)
     ));
-    assert_eq!(app.session.editing_group_path, vec![gid]);
+    assert_eq!(app.session.editing_group_path(), vec![gid]);
 
     // グループ内部の生シェイプ上の座標 (150, 100) をダブルクリックしても exit_current_group が呼ばれずグループ編集スコープに留まること
     let pt_on_raw = Point::new(150.0, 100.0);
     tool_select::handle_canvas_double_click(&mut app, pt_on_raw, false);
     assert_eq!(
-        app.session.editing_group_path,
+        app.session.editing_group_path(),
         vec![gid],
         "グループ内の生シェイプ上のダブルクリックでは親階層へ退出しないこと"
     );
     // 空白背景 (400, 400) をダブルクリックすると exit_current_group で親階層へ戻れること
     let pt_empty = Point::new(400.0, 400.0);
     tool_select::handle_canvas_double_click(&mut app, pt_empty, false);
-    assert!(app.session.editing_group_path.is_empty());
+    assert!(app.session.editing_group_path().is_empty());
 }
 
 #[test]
@@ -6081,7 +6081,7 @@ fn test_marquee_shift_deselect_restores_for_bucket_fill() {
     assert_eq!(app.session.selected_indices().len(), 1);
     let sel_idx = app.session.selected_indices()[0];
     select_ops::toggle_shape_selection(&mut app, sel_idx);
-    assert!(app.session.selection.is_empty());
+    assert!(app.session.selection().is_empty());
     assert!(
         app.session.floating().is_none(),
         "Shift+クリックで選択が空になった時点で未編集のマーキースライスは即座に復元されること"
@@ -7221,7 +7221,7 @@ fn test_egui_shortcuts_clipboard_sync_and_cmd0_preserves_ui_zoom_factor() {
             app.update_ui(ctx);
         },
     );
-    assert!(app.session.selection.is_empty());
+    assert!(app.session.selection().is_empty());
     assert_eq!(
         app.tool.tool,
         Tool::Transform,
@@ -8195,10 +8195,10 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
     );
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     let current_pivot = app.scene().active_transform_pivot(
-        &app.session.selection,
+        app.session.selection(),
         app.session.transform_pivot,
         bbox,
     );
@@ -8504,7 +8504,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
     app.session.set_selected_indices(vec![0]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     tool_transform::start_transform_drag(
         &mut app,
@@ -8954,7 +8954,7 @@ fn test_transform_rotate_zone_only_near_four_corners_and_paste_staircase_across_
     app.session.set_selected_indices(vec![0]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
 
     // 1. 四隅の少し外側 (+10px, -10px) は Rotate になるが、上辺中央の少し外側 (四隅から100px以上離れた位置) は Rotate にならないこと (#17)
@@ -9560,7 +9560,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     app.session.set_selected_indices(vec![0]);
     let bbox_before = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     let br_world = canvas_tool::ScaleHandle::BottomRight.position(bbox_before);
     let br_screen = app.view.world_to_screen(br_world);
@@ -9610,7 +9610,7 @@ fn test_raw_input_transform_handles_vertex_move_wheel_zoom_pan_and_save_on_close
     );
     let bbox_scaled = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     assert!(
         bbox_scaled.width() > bbox_before.width() + 40.0,
@@ -9952,7 +9952,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
     app.session.set_selected_indices(vec![0]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, 1.0)
+        .selection_bounding_box(app.session.selection(), 1.0)
         .unwrap();
     let top_left = tool_transform::ScaleHandle::TopLeft.position(bbox);
     let hover = tool_transform::compute_transform_hover(app.scene(), &app.session, top_left, 1.0);
@@ -11029,9 +11029,9 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
             },
         ],
     );
-    assert_eq!(app.session.selection.shapes.len(), 1);
-    assert!(app.session.selection.instances.is_empty());
-    let shape_id = *app.session.selection.shapes.iter().next().unwrap();
+    assert_eq!(app.session.selection().shapes.len(), 1);
+    assert!(app.session.selection().instances.is_empty());
+    let shape_id = *app.session.selection().shapes.iter().next().unwrap();
     assert_eq!(app.session.selected_indices(), vec![0]);
 
     // 移動してから Undo / Redo しても同じ ShapeId の選択が維持されること
@@ -11041,18 +11041,18 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
             delta: KVec2::new(30.0, 15.0),
         }],
     );
-    assert!(app.session.selection.shapes.contains(&shape_id));
+    assert!(app.session.selection().shapes.contains(&shape_id));
 
     run(&mut app, &[Action::Undo]);
     assert!(
-        app.session.selection.shapes.contains(&shape_id),
+        app.session.selection().shapes.contains(&shape_id),
         "Undo 後も存在する ShapeId の選択が保たれること"
     );
     assert_eq!(app.session.selected_indices(), vec![0]);
 
     run(&mut app, &[Action::Redo]);
     assert!(
-        app.session.selection.shapes.contains(&shape_id),
+        app.session.selection().shapes.contains(&shape_id),
         "Redo 後も存在する ShapeId の選択が保たれること"
     );
     assert_eq!(app.session.selected_indices(), vec![0]);
@@ -11060,7 +11060,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     // タイムラインからの再評価（refresh_scene_base）や同じキーフレーム内のホールドフレーム移動でも選択が保たれること
     app.session.base_cache = Default::default();
     app.refresh_scene_base();
-    assert!(app.session.selection.shapes.contains(&shape_id));
+    assert!(app.session.selection().shapes.contains(&shape_id));
 
     run(
         &mut app,
@@ -11068,7 +11068,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     );
     assert_eq!(app.doc.root.current_frame, 1);
     assert!(
-        app.session.selection.shapes.contains(&shape_id),
+        app.session.selection().shapes.contains(&shape_id),
         "同じキーフレームのホールドフレーム間の移動（ScrubRulerToFrame）後も同じ ShapeId の選択が保たれること"
     );
 
@@ -11093,7 +11093,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
             },
         ],
     );
-    assert!(app.session.selection.shapes.contains(&shape_id));
+    assert!(app.session.selection().shapes.contains(&shape_id));
     run(
         &mut app,
         &[Action::SwitchLayerAndFrame {
@@ -11102,7 +11102,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
         }],
     );
     assert!(
-        app.session.selection.shapes.contains(&shape_id),
+        app.session.selection().shapes.contains(&shape_id),
         "同じキーフレーム内のコマ送り移動（frame 0 -> 1）では選択が残ること"
     );
     run(
@@ -11113,7 +11113,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
         }],
     );
     assert!(
-        app.session.selection.is_empty(),
+        app.session.selection().is_empty(),
         "F6 で複製した別のキーフレーム（frame 1 -> 2）へ移動したときは選択が解除されること"
     );
 
@@ -11129,9 +11129,9 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
             Action::ConvertToSymbol,
         ],
     );
-    assert!(app.session.selection.shapes.is_empty());
-    assert_eq!(app.session.selection.instances.len(), 1);
-    let inst_gid = *app.session.selection.instances.iter().next().unwrap();
+    assert!(app.session.selection().shapes.is_empty());
+    assert_eq!(app.session.selection().instances.len(), 1);
+    let inst_gid = *app.session.selection().instances.iter().next().unwrap();
     let eval_shape_id_before = scene_summary(&app).shapes[0].shape_id;
 
     app.session.base_cache = Default::default();
@@ -11142,7 +11142,7 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
         "シンボル再展開のたびに展開後 FillShape の shape_id は新しく割り当てられること"
     );
     assert!(
-        app.session.selection.instances.contains(&inst_gid),
+        app.session.selection().instances.contains(&inst_gid),
         "展開後 FillShape の shape_id が変わっても InstanceGid による選択が保たれること"
     );
     assert_eq!(app.session.selected_indices(), vec![0]);
@@ -11155,12 +11155,12 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     );
     run(&mut app, &[Action::Undo]);
     assert!(
-        app.session.selection.instances.contains(&inst_gid),
+        app.session.selection().instances.contains(&inst_gid),
         "シンボル移動の Undo 後も InstanceGid 選択が保たれること"
     );
     run(&mut app, &[Action::Redo]);
     assert!(
-        app.session.selection.instances.contains(&inst_gid),
+        app.session.selection().instances.contains(&inst_gid),
         "シンボル移動の Redo 後も InstanceGid 選択が保たれること"
     );
 
@@ -11168,13 +11168,13 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
     //    古い選択が残らないこと
     run(&mut app, &[Action::Undo, Action::Undo]);
     assert!(
-        !app.session.selection.instances.contains(&inst_gid),
+        !app.session.selection().instances.contains(&inst_gid),
         "Undo で消滅した InstanceGid が古い選択として残らないこと"
     );
 
     // 新規図形を描画して選択した状態から描画自体を Undo すると、消滅した ShapeId が選択から除去され、描画する前の選択に
     // 戻ること（取り消しは、絵と一緒にその時の選択も戻す）
-    let before_stroke = app.session.selection.clone();
+    let before_stroke = app.session.selection().clone();
     run(
         &mut app,
         &[
@@ -11188,13 +11188,13 @@ fn test_stage3_selection_preserved_across_undo_redo_frame_scrub_and_reexpansion(
             },
         ],
     );
-    let transient_shape_id = *app.session.selection.shapes.iter().next().unwrap();
+    let transient_shape_id = *app.session.selection().shapes.iter().next().unwrap();
     run(&mut app, &[Action::Undo]);
     assert!(
-        !app.session.selection.shapes.contains(&transient_shape_id),
+        !app.session.selection().shapes.contains(&transient_shape_id),
         "Undo で消滅した ShapeId が古い選択として残らないこと"
     );
-    assert_eq!(app.session.selection, before_stroke, "描画する前の選択に戻る");
+    assert_eq!(app.session.selection(), &before_stroke, "描画する前の選択に戻る");
 }
 
 #[test]
@@ -11217,7 +11217,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
     assert_eq!(app.scene().len(), 1);
     assert_eq!(
         app.scene()
-            .topmost_shape_at(Point::new(140.0, 100.0), &app.session.editing_group_path),
+            .topmost_shape_at(Point::new(140.0, 100.0), app.session.editing_group_path()),
         Some(0),
         "Scene::topmost_shape_at で現在フレームの図形がヒットすること"
     );
@@ -11250,12 +11250,12 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
             pt: Point::new(140.0, 100.0),
         }],
     );
-    let (mask, any_sel) = app.scene().selected_shape_mask(&app.session.selection);
+    let (mask, any_sel) = app.scene().selected_shape_mask(app.session.selection());
     assert!(any_sel);
     assert_eq!(mask, vec![true]);
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
     let tl_handle = canvas_tool::ScaleHandle::TopLeft.position(bbox);
     assert_eq!(
@@ -11291,7 +11291,7 @@ fn test_stage4_scene_resolve_and_hit_testing_via_scene() {
     );
     assert_eq!(
         app.scene()
-            .topmost_shape_at(Point::new(140.0, 160.0), &app.session.editing_group_path),
+            .topmost_shape_at(Point::new(140.0, 160.0), app.session.editing_group_path()),
         Some(1)
     );
 
@@ -11340,8 +11340,8 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     // 1つの図形（先頭図形: (25.0, 20.0)）を選択してドラッグ移動を開始・複数回マウス移動・確定する
     let target_pt = Point::new(25.0, 20.0);
     run(&mut app, &[Action::SelectSingleAt { pt: target_pt }]);
-    assert_eq!(app.session.selection.shapes.len(), 1);
-    let moved_shape_id = *app.session.selection.shapes.iter().next().unwrap();
+    assert_eq!(app.session.selection().shapes.len(), 1);
+    let moved_shape_id = *app.session.selection().shapes.iter().next().unwrap();
 
     let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, target_pt, false);
     app.session.drag = canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
@@ -11677,7 +11677,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
             instance_gid: binding.instance_gid,
         }],
     );
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     for i in 0..50 {
         let y = 260.0 + (i as f64) * 2.5;
         run(
@@ -11690,7 +11690,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
         );
     }
     run(&mut app, &[Action::ExitSymbolTimeline]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
 
     let sym_shapes = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
@@ -11761,14 +11761,14 @@ fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_r
             instance_gid: outer_binding.instance_gid,
         }],
     );
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     run(
         &mut app,
         &[Action::EnterGroupAt {
             pt: Point::new(140.0, 100.0),
         }],
     );
-    assert_eq!(app.session.edit_path.len(), 2);
+    assert_eq!(app.session.edit_path().len(), 2);
 
     // 2段目の中でストロークを追加
     run(
@@ -11786,11 +11786,11 @@ fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_r
 
     // 2段ネストに入ったまま保存
     project_io::save_project_to_path(&mut app, &path_nested).unwrap();
-    assert_eq!(app.session.edit_path.len(), 2);
+    assert_eq!(app.session.edit_path().len(), 2);
 
     // ルートに出てから保存
     run(&mut app, &[Action::ExitSymbolToDepth { depth: 0 }]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     project_io::save_project_to_path(&mut app, &path_root).unwrap();
 
     let file_nested = std::fs::read(&path_nested).unwrap();
@@ -11834,7 +11834,7 @@ fn test_stage6b_timeline_ops_f6_f7_add_layer_inside_symbol_modify_library_symbol
             instance_gid: binding.instance_gid,
         }],
     );
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(app.doc.root.total_frames, 1);
     assert_eq!(app.doc.root.layers.len(), 1);
 
@@ -11905,7 +11905,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
             Action::InsertKeyframe { copy_prev: true },
         ],
     );
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
         2
@@ -11923,18 +11923,18 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
             },
         ],
     );
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
 
     // Undo 1: ルートの青ストロークを取り消す（まだルート階層）
     run(&mut app, &[Action::Undo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert!(app.doc.root.layers[0].keyframes[0].cel.shapes().is_empty());
 
     // Undo 2: シンボル内の F6 キーフレーム挿入を取り消す（EditPath がシンボル内深さ1へ戻る）
     run(&mut app, &[Action::Undo]);
-    assert_eq!(app.session.edit_path.len(), 1);
-    assert_eq!(app.session.edit_path.last().unwrap().symbol_id, sym_id);
+    assert_eq!(app.session.edit_path().len(), 1);
+    assert_eq!(app.session.edit_path().last().unwrap().symbol_id, sym_id);
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
         1
@@ -11949,7 +11949,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
 
     // Undo 3: シンボル内の緑ストローク描画を取り消す（EditPath はシンボル内深さ1のまま、内部図形が1個へ戻る）
     run(&mut app, &[Action::Undo]);
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
@@ -11960,22 +11960,22 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
 
     // Undo 4: シンボルに入る前の MoveSelected を取り消す（EditPath がルートへ戻る）
     run(&mut app, &[Action::Undo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.library.len(), 1);
 
     // Undo 5: シンボル化（ConvertToSymbol）自体を取り消す（ルート、ライブラリ空）
     run(&mut app, &[Action::Undo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert!(app.doc.library.is_empty());
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
 
     // Redo 1..5 で順番にすべて復元されること
     run(&mut app, &[Action::Redo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.library.len(), 1);
 
     run(&mut app, &[Action::Redo]);
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
@@ -11985,7 +11985,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     );
 
     run(&mut app, &[Action::Redo]);
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
             .cel
@@ -11995,14 +11995,14 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     );
 
     run(&mut app, &[Action::Redo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(
         app.doc.find_symbol(sym_id).unwrap().timeline.total_frames,
         2
     );
 
     run(&mut app, &[Action::Redo]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
 }
 
@@ -12033,7 +12033,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     let red_id = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].shape_id;
     {
         let s0 = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
-        app.session.selection.insert_shape(&s0);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&s0); app.session.replace_selection(sel); }
     }
     tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, false);
     tool_select::update_reshape_drag(&mut app, Point::new(120.0, 140.0));
@@ -12057,7 +12057,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     // 2. Alt 複製ドラッグ中は文書のセルが増えず、Scene の Overlay に複製プレビューが追加される
     {
         let s0 = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
-        app.session.selection.insert_shape(&s0);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&s0); app.session.replace_selection(sel); }
     }
     tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, true);
     tool_select::update_reshape_drag(&mut app, Point::new(120.0, 150.0));
@@ -12079,11 +12079,11 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     // 3. 自由変形（拡大・回転）ドラッグ中は文書のセルが変わらず、Scene に変形プレビューが出る
     {
         let s0 = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
-        app.session.selection.insert_shape(&s0);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&s0); app.session.replace_selection(sel); }
     }
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, 1.0)
+        .selection_bounding_box(app.session.selection(), 1.0)
         .unwrap();
     let tr_corner = Point::new(bbox.x1, bbox.y0);
     tool_transform::start_transform_drag(&mut app, tr_corner, false, false);
@@ -12100,7 +12100,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     );
     let preview_bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, 1.0)
+        .selection_bounding_box(app.session.selection(), 1.0)
         .unwrap();
     assert!(preview_bbox.width() > orig_red_bbox.width() + 20.0);
     tool_transform::finish_transform_drag(
@@ -12382,8 +12382,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let red_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&red_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Group]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
         assert_eq!(
@@ -12407,8 +12407,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let red_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&red_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::ConvertToSymbol]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
         assert_eq!(
@@ -12433,8 +12433,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             .find(|s| s.symbol_instance.is_some())
             .unwrap()
             .clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&sym_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&sym_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Ungroup]);
         let colors_after_break: Vec<_> = app.scene().iter().map(|s| s.color).collect();
         assert_eq!(
@@ -12458,8 +12458,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let red_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&red_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Group]);
         let grouped_shape = app.scene().get(1).unwrap().clone();
         // さらに青の図形を上に追加してグループを中間（背面側）にする
@@ -12471,8 +12471,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
                 color: blue,
             }],
         );
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&grouped_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&grouped_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Ungroup]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
         assert_eq!(
@@ -12496,8 +12496,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let red_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&red_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Copy, Action::Paste { in_place: false }]);
         let colors: Vec<_> = app.scene().iter().map(|s| s.color).collect();
         assert_eq!(
@@ -12519,8 +12519,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let first_red = app_alt.scene().get(0).unwrap().clone();
-        app_alt.session.selection.clear();
-        app_alt.session.selection.insert_shape(&first_red);
+        app_alt.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app_alt.session.selection().clone(); sel.insert_shape(&first_red); app_alt.session.replace_selection(sel); }
         run(
             &mut app_alt,
             &[Action::FinishMoveSelectionDrag {
@@ -12549,13 +12549,13 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
             ],
         );
         let red_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&red_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::ConvertToSymbol]);
         // 変換で BottomSym が最前面に来たので、残りの blue もシンボル化して TopSym を最前面にする
         let blue_shape = app.scene().get(0).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&blue_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&blue_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::ConvertToSymbol]);
         let bottom_sym = app.scene().get(0).unwrap().clone();
         let bottom_gid = bottom_sym.symbol_instance.as_ref().unwrap().instance_gid;
@@ -12571,8 +12571,8 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         assert_eq!(app.scene().get(1).unwrap().color, blue);
 
         // 下側のシンボル (BottomSym) を TopSym とさらに重なる位置へ移動
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&bottom_sym);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&bottom_sym); app.session.replace_selection(sel); }
         app.session.begin_move_overlay(false, None, Vec::new());
         app.session.translate_move_overlay(KVec2::new(10.0, 10.0));
         assert_eq!(
@@ -12630,14 +12630,14 @@ fn test_stage7_z_order_group_symbol_ungroup_paste_alt_duplicate_and_move() {
         );
         let orig_red_area = app.scene().get(0).unwrap().exterior.signed_area().abs();
         let green_shape = app.scene().get(1).unwrap().clone();
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&green_shape);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&green_shape); app.session.replace_selection(sel); }
         run(&mut app, &[Action::Group]);
         let grouped_green = app.scene().get(1).unwrap().clone();
 
         // グループを生の図形 (red) の上に重ねて移動し、選択解除する
-        app.session.selection.clear();
-        app.session.selection.insert_shape(&grouped_green);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&grouped_green); app.session.replace_selection(sel); }
         run(
             &mut app,
             &[
@@ -12711,14 +12711,14 @@ fn test_stage7_cel_writes_preserve_mesh_cache_without_rebuilding_from_doc() {
 
     // 2. 回転したシンボル内部でも同様に描画キャッシュがそのまま引き継がれること
     let all_shapes: Vec<_> = app.scene().iter().cloned().collect();
-    app.session.selection.clear();
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
     for s in &all_shapes {
-        app.session.selection.insert_shape(s);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(s); app.session.replace_selection(sel); }
     }
     run(&mut app, &[Action::ConvertToSymbol]);
     let sym_shape = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&sym_shape);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&sym_shape); app.session.replace_selection(sel); }
     run(&mut app, &[Action::RotateSelection { angle_rad: 0.35 }]);
     let binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
     assert!(symbol_ops::enter_symbol_timeline(
@@ -12939,14 +12939,14 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
 
     // グループ化・グループ解除・シンボル変換・コピー・ペースト・タイムライン操作・Undo/Redo
     let first_shape = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&first_shape);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&first_shape); app.session.replace_selection(sel); }
     run_and_verify_scene_cache_consistency(&mut app, Action::Group, "Group");
     run_and_verify_scene_cache_consistency(&mut app, Action::Ungroup, "Ungroup group");
 
     let sym_target = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&sym_target);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&sym_target); app.session.replace_selection(sel); }
     run_and_verify_scene_cache_consistency(&mut app, Action::ConvertToSymbol, "ConvertToSymbol");
     run_and_verify_scene_cache_consistency(&mut app, Action::Copy, "Copy symbol");
     run_and_verify_scene_cache_consistency(
@@ -12982,8 +12982,8 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
         .find(|s| s.symbol_instance.is_some())
         .unwrap()
         .clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&sym_inst_shape);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&sym_inst_shape); app.session.replace_selection(sel); }
     run_and_verify_scene_cache_consistency(
         &mut app,
         Action::ScaleSelection { sx: 1.35, sy: 0.72 },
@@ -13041,8 +13041,8 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
         "Deselect inside rotated+scaled symbol",
     );
     let inner_first = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&inner_first);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&inner_first); app.session.replace_selection(sel); }
     run_and_verify_scene_cache_consistency(
         &mut app,
         Action::Group,
@@ -13098,8 +13098,8 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         ],
     );
     let red_shape = app.scene().iter().next_back().unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&red_shape);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&red_shape); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
     let sym_binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
     // 同じレイヤーにもう1つ同じシンボルのインスタンスを配置しておく（背景に兄弟インスタンスが映る状態）
@@ -13127,9 +13127,9 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     // 1. シンボルの中で set_active_frame / set_active_layer / set_active_cell_selection を呼んでも doc.revision が変わらないこと
     let doc_rev_before = app.doc.revision;
     let sym_rev_before = app.doc.library[0].revision;
-    app.tabs[app.active].set_active_frame(0);
-    app.tabs[app.active].set_active_frame(1);
-    app.tabs[app.active].set_active_frame(2);
+    assert!(app.tabs[app.active].set_active_frame(0));
+    assert!(app.tabs[app.active].set_active_frame(1));
+    assert!(app.tabs[app.active].set_active_frame(2));
     app.tabs[app.active].set_active_layer(0);
     app.tabs[app.active].set_active_cell_selection(None);
     assert_eq!(
@@ -13160,7 +13160,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         "親シーン背景（2000図形のレイヤーと、兄弟インスタンスのレイヤー）が存在すること"
     );
     let t_play = std::time::Instant::now();
-    app.tabs[app.active].set_active_frame(1);
+    assert!(app.tabs[app.active].set_active_frame(1));
     app.tabs[app.active].refresh_scene_base();
     let bd_after_step = {
         // アプリと同じく、描く前に写しとシンボルのメモの古いものを捨ててから（`draw_canvas_contents`）
@@ -13179,7 +13179,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
     // 3. シンボルの中で（親シーンが参照している先頭フレーム 0 に戻って）1本描いても、
     //    編集中のシンボルのインスタンスを含まない親レイヤー（2000図形）は作り直されず、
     //    兄弟インスタンスを含むレイヤーのみ更新されて背景メッシュに反映されること
-    app.tabs[app.active].set_active_frame(0);
+    assert!(app.tabs[app.active].set_active_frame(0));
     app.tabs[app.active].refresh_scene_base();
     let initial_vert_count = vertices(&bd_initial);
     let t_draw = std::time::Instant::now();
@@ -13237,8 +13237,8 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
         }],
     );
     let first = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&first);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&first); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
 
     let normal_binding = app.scene().get(0).unwrap().symbol_instance.unwrap();
@@ -13255,7 +13255,7 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
         !symbol_ops::enter_symbol_timeline(&mut app.tabs[app.active], normal_binding.instance_gid),
         "行列式が0の潰れたインスタンスには入れないこと"
     );
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     set_xform(&mut app, normal_binding.xform);
 
     // 2. 通常のインスタンスに入り、with_active_timeline_mut を呼ぶと必ずリビジョンが上がること
@@ -13263,7 +13263,7 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision()
         &mut app.tabs[app.active],
         normal_binding.instance_gid
     ));
-    assert_eq!(app.session.edit_path.levels.len(), 1);
+    assert_eq!(app.session.edit_path().levels.len(), 1);
     let sym_rev_before = app.doc.library[0].revision;
     let doc_rev_before = app.doc.revision;
     app.tabs[app.active].with_active_timeline_mut(|_tl, _| {});
@@ -13293,8 +13293,8 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
         }],
     );
     let first = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&first);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&first); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
     let outer_id = app.doc.library[0].id;
     let local_box = |app: &Is2dApp, sym_id: u64| {
@@ -13325,8 +13325,8 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     let stage_box_before = app.scene().get(0).unwrap().bounding_box();
 
     let inner = app.scene().get(0).unwrap().clone();
-    app.session.selection.clear();
-    app.session.selection.insert_shape(&inner);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&inner); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
     let new_id = app.doc.library.last().unwrap().id;
     assert_ne!(new_id, outer_id);
@@ -13559,7 +13559,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             sym_id: host_sym_id,
         },
     );
-    assert_eq!(app.session.edit_path.len(), 1);
+    assert_eq!(app.session.edit_path().len(), 1);
 
     // 3a. シンボル編集中のペーストで9段になる場合
     let undo_before_paste = app.history.undo_stack.len();
@@ -14249,7 +14249,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
             pt: Point::new(350.0, 300.0),
         },
     );
-    assert!(!app.session.selection.is_empty());
+    assert!(!app.session.selection().is_empty());
 
     // 初期レイアウトの確定
     let _ = ctx.run(
@@ -14264,7 +14264,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
 
     let bbox = app
         .scene()
-        .selection_bounding_box(&app.session.selection, app.view.zoom())
+        .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
 
     // 1. 四隅の回転ゾーン（図形外・境界枠の左上コーナー外側）の座標を確認し、クリックしても選択が外れないこと
@@ -14317,7 +14317,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
         },
     );
     assert!(
-        !app.session.selection.is_empty(),
+        !app.session.selection().is_empty(),
         "自由変形ツールで回転ゾーンをクリックしたとき選択が外れないこと"
     );
 
@@ -14371,7 +14371,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
         },
     );
     assert!(
-        !app.session.selection.is_empty(),
+        !app.session.selection().is_empty(),
         "自由変形ツールで拡縮ハンドルの上をクリックしたとき選択が外れないこと"
     );
 
@@ -14421,7 +14421,7 @@ fn test_g9_1_transform_click_on_rotate_or_scale_handle_preserves_selection() {
         },
     );
     assert!(
-        app.session.selection.is_empty(),
+        app.session.selection().is_empty(),
         "何もない場所をクリックしたときは選択が外れること"
     );
 }
@@ -14579,7 +14579,7 @@ fn test_g3_5_document_single_fps_inside_symbol_undo_redo_and_save() {
 
     // シンボルの中に入る
     assert!(symbol_ops::enter_symbol_from_library(&mut app, sym_id));
-    assert!(!app.session.edit_path.is_empty());
+    assert!(!app.session.edit_path().is_empty());
 
     // シンボル内で FPS を 30 に変更
     let _ = apply(&mut app, Action::SetFps { fps: 30 });
@@ -15369,7 +15369,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     }
     let all_ids: Vec<_> = app.scene().iter().cloned().collect();
     for s in &all_ids {
-        app.session.selection.insert_shape(s);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(s); app.session.replace_selection(sel); }
     }
     let _ = apply(&mut app, Action::Group);
     for s in app.scene().iter() {
@@ -15638,7 +15638,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
             delta: kurbo::Vec2::new(0.0, 40.0),
         },
     );
-    assert!(!app.session.selection.is_empty());
+    assert!(!app.session.selection().is_empty());
     let _ = apply(
         &mut app,
         Action::SwitchLayerAndFrame {
@@ -15647,7 +15647,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
         },
     );
     assert!(
-        app.session.selection.is_empty(),
+        app.session.selection().is_empty(),
         "トゥイーン途中のコマへ移るとそのレイヤーの選択が外れること"
     );
     assert!(
@@ -15722,9 +15722,9 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
             pt: Point::new(230.0, 120.0),
         },
     );
-    assert!(app.session.selection.is_empty());
+    assert!(app.session.selection().is_empty());
     let _ = apply(&mut app, Action::SelectAll);
-    assert!(app.session.selection.is_empty());
+    assert!(app.session.selection().is_empty());
     app.session.set_selected_indices(vec![0]);
     let _ = apply(
         &mut app,
@@ -16741,7 +16741,7 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
         },
     );
     assert!(
-        app.session.selection.is_empty(),
+        app.session.selection().is_empty(),
         "Shift+クリックでトゥイーン途中のシンボルが選択に入らないこと"
     );
     let _ = apply(
@@ -16751,7 +16751,7 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
         },
     );
     assert!(
-        !app.session.selection.is_empty(),
+        !app.session.selection().is_empty(),
         "Shift+クリックで作画レイヤーの図形は選べること"
     );
 
@@ -16766,7 +16766,7 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
         },
     );
     assert!(
-        app.session.selection.is_empty(),
+        app.session.selection().is_empty(),
         "タイムラインのセル選択でトゥイーン途中のシンボルが選択に入らないこと"
     );
     let _ = apply(
@@ -16790,7 +16790,7 @@ fn test_m3_2_tween_midframe_cannot_be_selected_by_any_entry_or_deleted() {
     app.history.mark_saved();
     let undo_before = app.history.undo_stack.len();
     let tween_shape = app.scene().get(tween_scene_idx).unwrap().clone();
-    app.session.selection.insert_shape(&tween_shape);
+    { let mut sel = app.session.selection().clone(); sel.insert_shape(&tween_shape); app.session.replace_selection(sel); }
     let deleted = apply(&mut app, Action::DeleteSelection);
     assert!(!deleted, "消せる図形が無ければ false が返ること");
     assert_eq!(
@@ -17521,7 +17521,7 @@ fn test_arrange_groups_and_symbols_z_order() {
     let select_by_color = |app: &mut Is2dApp, target_colors: &[Color32]| {
         apply(app, Action::Deselect);
         let mut sel = crate::canvas_tool::Selection::default();
-        let depth = app.tab().session.editing_group_path.len();
+        let depth = app.tab().session.editing_group_path().len();
         for s in app.tab().scene().iter() {
             if target_colors.contains(&s.color) {
                 if let Some(b) = s
@@ -17534,7 +17534,7 @@ fn test_arrange_groups_and_symbols_z_order() {
                 }
             }
         }
-        app.tab_mut().session.selection = sel;
+        app.tab_mut().session.replace_selection(sel);
     };
 
     // 1. 生の図形・グループA・シンボルB・グループC の6ケース
@@ -17682,7 +17682,7 @@ fn test_arrange_groups_and_symbols_z_order() {
                 pt: Point::new(200.0, 100.0)
             }
         ));
-        assert_eq!(app.tab().session.editing_group_path.len(), 1);
+        assert_eq!(app.tab().session.editing_group_path().len(), 1);
         select_by_color(&mut app, &[c_a]);
         assert!(apply(
             &mut app,
@@ -18369,7 +18369,7 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
         }
         "EnterSymbolFromLibrary" => Action::EnterSymbolFromLibrary { sym_id: sym_id(rng) },
         "ExitSymbolTimeline" => Action::ExitSymbolTimeline,
-        "ExitSymbolToDepth" => Action::ExitSymbolToDepth { depth: rng.range(tab.session.edit_path.levels.len() + 1) },
+        "ExitSymbolToDepth" => Action::ExitSymbolToDepth { depth: rng.range(tab.session.edit_path().levels.len() + 1) },
         "RenameSymbol" => Action::RenameSymbol { sym_id: sym_id(rng), new_name: format!("S{}", rng.range(5)) },
         "DeleteSymbol" => Action::DeleteSymbol { sym_id: sym_id(rng) },
         "DuplicateSymbol" => Action::DuplicateSymbol { sym_id: sym_id(rng) },
@@ -18513,7 +18513,11 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
         content_json(&pd)
     };
     let mut used: BTreeMap<String, usize> = BTreeMap::new();
-    for &seed in &[0x1234_5678_9abc_def0u64, 0xfedc_ba98_7654_3210, 0x2026_1103_cafe_babe] {
+    // 種の数は環境変数 `IS2D_RANDOM_SEEDS` で増やせる（ふだんは3つ）
+    let extra: u64 = std::env::var("IS2D_RANDOM_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3).max(3) - 3;
+    let mut seeds = vec![0x1234_5678_9abc_def0u64, 0xfedc_ba98_7654_3210, 0x2026_1103_cafe_babe];
+    seeds.extend((1..=extra).map(|i| 0x1234_5678_9abc_def0u64.wrapping_add(i * 0x9e37_79b9_7f4a_7c15)));
+    for &seed in &seeds {
         let mut rng = OpRng(seed);
         let mut app = Is2dApp::default();
         for step in 0..1500 {
@@ -18534,6 +18538,12 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             let was_coalesced = coalesce.is_some() && app.tab().history.last_coalesce_key == coalesce;
             let is_history = matches!(action, Action::Undo | Action::Redo);
             let not_a_step = action.policy(app.tab()).undo == crate::doc_actions::UndoUse::None;
+            // 動かした絵があるときに選択の一部を外す（その部分だけ確定する）と、外した線が持ったままの塗りの下に入り、あとで
+            // 塗りを確定すると覆われて消えることがある（一度に全部を確定したときと絵が違う）。持ち主が、今は今のままにして、
+            // あとで直し方を設計すると決めた（2026-11-27。設計 claude/約束を入口で守る設計_5616fcc.md の 14）。この操作は、
+            // 選択を外す確定と同じく、絵が変わることがある
+            let commits_part = matches!(action, Action::ToggleSelectionAt { .. } | Action::RetainSelection { .. })
+                && app.session.floating().is_some_and(|f| f.modified());
             let picture_before = app.tab().committed_document_copy().map(|d| picture_summary(&d));
             let res = apply(&mut app, action);
             assert!(app.tab().history.before.is_none(), "{ctx}: 操作の前の写しが残った");
@@ -18561,7 +18571,9 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                 // 同じ絵を書く。一部だけ確定すると、図形の番号の振り方と、絵の精度より細かい座標が、一度に確定したときと違う
                 // ことがあるので、絵として比べる：`picture_summary`）
                 let picture_after = app.tab().committed_document_copy().map(|d| picture_summary(&d));
-                assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
+                if !commits_part {
+                    assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
+                }
                 assert_eq!(after_undo, before_undo, "{ctx}: 取り消しの1手にしない操作が取り消しを積んだ");
                 continue;
             }
@@ -19392,10 +19404,10 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         }
         assert!(app
             .session
-            .selection
+            .selection()
             .instances
             .contains(&b_inst.binding.instance_gid));
-        assert!(!app.session.selection.shapes.is_empty());
+        assert!(!app.session.selection().shapes.is_empty());
 
         assert!(canvas_tool::clear_selection(&mut app));
         let cel_after = &app.doc.root.layers[0].keyframes[0].cel;
@@ -19728,8 +19740,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .last()
             .unwrap()
             .shape_id;
-        app.session.selection.clear();
-        app.session.selection.shapes.insert(c_stroke_id);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        app.session.add_to_selection([c_stroke_id], std::iter::empty());
         assert!(apply(&mut app, Action::ConvertToSymbol));
         let sym_c_id = app.doc.library.last().unwrap().id;
         assert_ne!(sym_c_id, sym_a_id);
@@ -19752,8 +19764,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         app.doc.revision = crate::vector_engine::next_mesh_revision();
         app.refresh_scene_base();
 
-        app.session.selection.clear();
-        app.session.selection.instances.insert(a_gid);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        app.session.add_to_selection(std::iter::empty(), [a_gid]);
         assert!(apply(&mut app, Action::Ungroup));
 
         let instances_after = &app.doc.root.layers[0].keyframes[0].cel.instances;
@@ -19826,8 +19838,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             .instances[0]
             .binding
             .instance_gid;
-        app.session.selection.clear();
-        app.session.selection.instances.insert(b_gid_in_a);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        app.session.add_to_selection(std::iter::empty(), [b_gid_in_a]);
         assert!(apply(&mut app, Action::Group));
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::Group));
@@ -19937,8 +19949,8 @@ fn test_failed_paste_due_to_nest_limit_rolls_back_clipboard_imported_map() {
         .last()
         .unwrap()
         .shape_id;
-    app.session.selection.clear();
-    app.session.selection.shapes.insert(blue_stroke_id);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    app.session.add_to_selection([blue_stroke_id], std::iter::empty());
     assert!(apply(&mut app, Action::ConvertToSymbol));
     assert_eq!(app.doc.library.len(), 2);
 
@@ -19949,7 +19961,7 @@ fn test_failed_paste_due_to_nest_limit_rolls_back_clipboard_imported_map() {
         10,
         "8段の赤いシンボル群がタブ Y のライブラリに新しくインポートされること"
     );
-    let pasted_inst_gid = *app.session.selection.instances.iter().next().unwrap();
+    let pasted_inst_gid = *app.session.selection().instances.iter().next().unwrap();
     let pasted_shapes: Vec<_> = app
         .scene()
         .iter()
@@ -20150,8 +20162,8 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
         assert_eq!(before_centers.len(), 3);
 
         let target_id = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].shape_id;
-        app.session.selection.clear();
-        app.session.selection.shapes.insert(target_id);
+        app.session.replace_selection(crate::canvas_tool::Selection::default());
+        app.session.add_to_selection([target_id], std::iter::empty());
         assert!(apply(
             &mut app,
             Action::NudgeSelection {
@@ -20205,14 +20217,14 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
                     .iter()
                     .map(|s| s.shape_id)
                     .collect();
-                app.session.selection.clear();
+                app.session.replace_selection(crate::canvas_tool::Selection::default());
                 for &sid in &shape_ids {
                     if rng.bool() {
-                        app.session.selection.shapes.insert(sid);
+                        app.session.add_to_selection([sid], std::iter::empty());
                     }
                 }
-                if app.session.selection.shapes.is_empty() {
-                    app.session.selection.shapes.insert(shape_ids[0]);
+                if app.session.selection().shapes.is_empty() {
+                    app.session.add_to_selection([shape_ids[0]], std::iter::empty());
                 }
                 let dx = (rng.i32(-2..=2) as f64) * 11.0;
                 let dy = (rng.i32(-2..=2) as f64) * 11.0;
@@ -20458,8 +20470,8 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
         .last()
         .unwrap()
         .shape_id;
-    app.session.selection.clear();
-    app.session.selection.shapes.insert(raw_id);
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
+    app.session.add_to_selection([raw_id], std::iter::empty());
     assert!(apply(&mut app, Action::Copy));
 
     // タブ A（idx 0）に戻ってシンボル S をもう一度コピーし、タブ B（idx 1）に戻って貼り付ける
@@ -20526,7 +20538,7 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
         Point::new(200.0, 250.0),
         false,
     );
-    assert_eq!(app.session.selection.shapes.len(), 1);
+    assert_eq!(app.session.selection().shapes.len(), 1);
 
     // 2. Shift+クリックで右の残りも選択に足す → つながっているので選択は1つになる
     let right_idx = app
@@ -20540,7 +20552,7 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
             scene_idx: right_idx
         }
     ));
-    assert_eq!(app.session.selection.shapes.len(), 1);
+    assert_eq!(app.session.selection().shapes.len(), 1);
 
     // 今のコマの Scene の中に同じ番号の図形が無いこと
     let scene_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
@@ -20563,7 +20575,7 @@ fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
             scene_idx: left_idx
         }
     ));
-    assert!(app.session.selection.shapes.is_empty());
+    assert!(app.session.selection().shapes.is_empty());
     assert!(app.session.floating().is_none());
     assert_eq!(app.scene().len(), 1);
     assert_eq!(app.scene().get(0).unwrap().shape_id, orig_id);
@@ -20905,7 +20917,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     assert!(app.session.floating().is_some());
     // 置く先のレイヤーの1つを編集できなくする（置けない場面の代わり）
     app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[1].locked = true);
-    let before = app.session.selection.clone();
+    let before = app.session.selection().clone();
     // 輪郭の頂点・辺、塗り（レビュー 41766f9 の N-3003）、Alt で塗り（複製）を選択ツールでつかむ
     let grabs = [
         (Point::new(500.0, 500.0), false),
@@ -20919,7 +20931,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
         assert!(app.toast.is_some(), "{grab:?}：置けないことを知らせない");
         assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}（Alt {alt}）：断られたのにドラッグを始めた");
         assert!(app.session.floating().is_some());
-        assert_eq!(app.session.selection, before, "{grab:?}（Alt {alt}）：浮いた片の選択が変わった");
+        assert_eq!(app.session.selection(), &before, "{grab:?}（Alt {alt}）：浮いた片の選択が変わった");
     }
     // 自由変形ツールで、選んでいない図形をつかむ（N-3003）
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
@@ -20927,7 +20939,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     tool_transform::start_transform_drag(&mut app, Point::new(550.0, 550.0), false, false);
     assert!(app.toast.is_some(), "自由変形：置けないことを知らせない");
     assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "自由変形：断られたのにドラッグを始めた");
-    assert_eq!(app.session.selection, before);
+    assert_eq!(app.session.selection(), &before);
     // 再生を押す（レビュー 41766f9 の N-5001：前は断られても再生を始め、止めたあとの確定で、止まったコマの絵が消えた）
     let frame = app.tab().active_timeline().current_frame;
     app.toast = None;
@@ -20936,7 +20948,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     assert!(app.toast.is_some(), "再生：置けないことを知らせない");
     assert_eq!(app.tab().active_timeline().current_frame, frame);
     assert!(app.session.floating().is_some());
-    assert_eq!(app.session.selection, before);
+    assert_eq!(app.session.selection(), &before);
 }
 
 /// レビュー d91cd4c の N-3001：スポイトは、ロックの有無によらず、点でいちばん手前に見えているものを吸う。見えているのが
@@ -21017,7 +21029,7 @@ fn the_selection_tint_is_drawn_above_every_shape() {
         q.eval(0.9)
     };
     assert!(apply(&mut app, Action::SelectSingleAt { pt: pick }));
-    assert!(app.session.selection.contains_shape(app.scene().iter().find(|s| s.shape_id == low.shape_id).unwrap()));
+    assert!(app.session.selection().contains_shape(app.scene().iter().find(|s| s.shape_id == low.shape_id).unwrap()));
     let ctx = egui::Context::default();
     let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
     let out = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
@@ -21207,7 +21219,7 @@ fn shift_double_click_adds_connected_lines() {
     let (a, b) = (lines_of(&app, true), lines_of(&app, false));
     assert!(a.len() >= 2 && b.len() >= 2, "つなぎ目のある線にならなかった");
     let on = |y: f64| Point::new(400.0, y + 40.0 * (400.0f64 / 50.0).sin());
-    let selected = |app: &Is2dApp, ids: &[u64]| ids.iter().filter(|id| app.session.selection.shapes.contains(id)).count();
+    let selected = |app: &Is2dApp, ids: &[u64]| ids.iter().filter(|id| app.session.selection().shapes.contains(id)).count();
     tool_select::handle_canvas_double_click(&mut app, on(200.0), false);
     assert_eq!(selected(&app, &a), a.len(), "1本目がまとめて選ばれていない");
     tool_select::handle_canvas_double_click(&mut app, on(500.0), true);
@@ -21234,12 +21246,12 @@ fn grouping_moved_duplicates_selects_the_whole_group() {
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(300.0, 0.0), alt_duplicate: true }));
     assert!(apply(&mut app, Action::Group));
-    let scope = app.session.editing_group_path.clone();
+    let scope = app.session.editing_group_path().to_vec();
     let group: Vec<(bool, bool)> = app
         .scene()
         .iter()
         .filter(|s| s.active_group_id_at_scope(&scope).is_some())
-        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .map(|s| (s.line.is_some(), app.session.selection().contains_shape(s)))
         .collect();
     assert_eq!(group.iter().filter(|g| g.0).count(), 4, "新しいグループに線が4本ある");
     assert!(group.iter().all(|g| g.1), "新しいグループの中に、選ばれていない図形がある：{group:?}");
@@ -21271,12 +21283,12 @@ fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
     crate::select_ops::grab_and_move(&mut app, grab, true, true);
     crate::select_ops::update_selection_drag(app.tab_mut(), grab + KVec2::new(300.0, 0.0));
     crate::select_ops::finish_selection_drag(&mut app, None);
-    let scope = app.session.editing_group_path.clone();
+    let scope = app.session.editing_group_path().to_vec();
     let dup: Vec<(bool, bool)> = app
         .scene()
         .iter()
         .filter(|s| s.bounding_box().x0 > 400.0)
-        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .map(|s| (s.line.is_some(), app.session.selection().contains_shape(s)))
         .collect();
     assert!(dup.iter().any(|d| d.0) && dup.iter().any(|d| !d.0), "複製に塗りと線がある：{dup:?}");
     assert!(dup.iter().all(|d| d.1), "複製の中に選ばれていない図形がある：{dup:?}");
@@ -21300,7 +21312,7 @@ fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
         .scene()
         .iter()
         .filter(|s| !before.contains(&s.shape_id))
-        .map(|s| (s.line.is_some(), app.session.selection.contains_shape(s)))
+        .map(|s| (s.line.is_some(), app.session.selection().contains_shape(s)))
         .collect();
     assert!(pasted.iter().any(|d| d.0) && pasted.iter().any(|d| !d.0), "貼り付けに塗りと線がある：{pasted:?}");
     assert!(pasted.iter().all(|d| d.1), "貼り付けた中に選ばれていない図形がある：{pasted:?}");
@@ -21323,7 +21335,7 @@ fn pasting_a_fill_in_place_keeps_the_ink_under_its_edge() {
     assert_eq!(lines(&app), 4);
     // 塗りだけを選んで、コピーして、その場に貼り付けて、確定する
     assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 250.0) }));
-    assert!(app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).all(|s| s.line.is_none()));
+    assert!(app.scene().iter().filter(|s| app.session.selection().contains_shape(s)).all(|s| s.line.is_none()));
     assert!(apply(&mut app, Action::Copy));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert!(apply(&mut app, Action::Deselect));
@@ -21351,9 +21363,9 @@ fn undo_and_redo_keep_the_lines_of_selected_groups_selected() {
         assert!(apply(&mut app, Action::Group));
         assert!(apply(&mut app, Action::Deselect));
     }
-    let scope = app.session.editing_group_path.clone();
+    let scope = app.session.editing_group_path().to_vec();
     let all_selected = |app: &Is2dApp| -> bool {
-        app.scene().iter().filter(|s| s.active_group_id_at_scope(&scope).is_some()).all(|s| app.session.selection.contains_shape(s))
+        app.scene().iter().filter(|s| s.active_group_id_at_scope(&scope).is_some()).all(|s| app.session.selection().contains_shape(s))
     };
     assert!(apply(&mut app, Action::SelectAll));
     assert!(all_selected(&app));
@@ -21397,7 +21409,7 @@ fn selected_raw_art_stays_under_groups() {
     assert_eq!(top_at(&app, on_brow), Some(brow), "選ぶ前から眉が見えていない");
     // 矩形で両方を選ぶ（顔の塗りは浮いた片になる）
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(500.0, 500.0), additive: false }));
-    assert!(app.scene().iter().any(|s| s.color == skin && app.session.selection.contains_shape(s)));
+    assert!(app.scene().iter().any(|s| s.color == skin && app.session.selection().contains_shape(s)));
     assert_eq!(top_at(&app, on_brow), Some(brow), "選ぶと、眉が顔の塗りに隠れた");
     // 選んだまま動かしている間も、離した後も
     let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(260.0, 300.0), false);
@@ -21419,7 +21431,7 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let a = *app.session.selection.instances.iter().next().expect("インスタンス");
+    let a = *app.session.selection().instances.iter().next().expect("インスタンス");
     // 右へ Alt で複製して、同じシンボルのインスタンスをもう1つ置く
     assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(300.0, 0.0), alt_duplicate: true }));
     assert!(apply(&mut app, Action::Deselect));
@@ -21483,7 +21495,7 @@ fn floating_pieces_stay_selected_after_deselecting_a_dividing_line() {
     // 塗りを分ける線を Shift クリックで外す
     crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 200.0), true, true);
     app.session.floating().expect("塗りは浮いたまま");
-    let unselected: Vec<u64> = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).map(|p| p.shape_id).collect();
+    let unselected: Vec<u64> = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection().contains_shape(p)).map(|p| p.shape_id).collect();
     assert!(unselected.is_empty(), "浮いているのに選ばれていない片がある: {unselected:?}");
 }
 
@@ -21567,7 +21579,7 @@ fn a_panic_inside_an_operation_restores_the_state_before_it() {
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(350.0, 350.0), additive: false }));
     let doc_before = app.doc.clone();
     let shapes_before: Vec<(u64, Color32)> = app.scene().iter().map(|s| (s.shape_id, s.color)).collect();
-    let selected_before: Vec<u64> = app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).map(|s| s.shape_id).collect();
+    let selected_before: Vec<u64> = app.scene().iter().filter(|s| app.session.selection().contains_shape(s)).map(|s| s.shape_id).collect();
     let floating_before = app.session.floating().is_some();
     let (undo_before, redo_before) = (app.history.undo_stack.len(), app.history.redo_stack.len());
     app.toast = None;
@@ -21578,7 +21590,7 @@ fn a_panic_inside_an_operation_restores_the_state_before_it() {
     assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
     assert!(app.doc.root.layers.iter().zip(doc_before.root.layers.iter()).all(|(a, b)| a.keyframes.iter().zip(b.keyframes.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(&x.cel.maps, &y.cel.maps))), "文書が操作の前と違う");
     assert_eq!(app.scene().iter().map(|s| (s.shape_id, s.color)).collect::<Vec<_>>(), shapes_before);
-    assert_eq!(app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).map(|s| s.shape_id).collect::<Vec<_>>(), selected_before);
+    assert_eq!(app.scene().iter().filter(|s| app.session.selection().contains_shape(s)).map(|s| s.shape_id).collect::<Vec<_>>(), selected_before);
     assert_eq!(app.session.floating().is_some(), floating_before);
     assert_eq!((app.history.undo_stack.len(), app.history.redo_stack.len()), (undo_before, redo_before), "取り消しの控えが変わった");
     // 続けて使える（選んだものを動かし、取り消すと戻る）
@@ -21599,7 +21611,7 @@ fn ink_bottle_again_where_a_line_was_moved_away() {
     assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }));
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 100.0), false, true);
-    assert!(app.scene().iter().any(|s| s.line.is_some() && app.session.selection.contains_shape(s)), "上の辺の線を選んだ");
+    assert!(app.scene().iter().any(|s| s.line.is_some() && app.session.selection().contains_shape(s)), "上の辺の線を選んだ");
     assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, -50.0) }));
     assert!(apply(&mut app, Action::Deselect));
     assert!(app.session.floating().is_none());
@@ -21674,7 +21686,7 @@ fn copying_frames_to_another_layer_gives_lines_new_ids() {
     let (layer, id) = lines[0];
     let other_before = lines.iter().filter(|l| l.0 != layer).count();
     assert!(apply(&mut app, Action::Deselect));
-    app.session.selection.shapes.insert(id);
+    app.session.add_to_selection([id], std::iter::empty());
     assert!(apply(&mut app, Action::DeleteSelection));
     let other_after = app.scene().iter().filter(|s| s.line.is_some() && s.layer_id != layer).count();
     assert_eq!(other_after, other_before, "もう片方のレイヤーの線まで消えた");
@@ -21776,7 +21788,7 @@ fn selections_keep_their_lines_through_operations() {
     let line = |a: Point, b: Point| -> Vec<Point> { (0..=40).map(|i| a.lerp(b, i as f64 / 40.0)).collect() };
     // 選んでいる絵
     let selected = |app: &Is2dApp| -> Vec<FillShape> {
-        app.scene().iter().filter(|s| app.session.selection.contains_shape(s)).cloned().collect()
+        app.scene().iter().filter(|s| app.session.selection().contains_shape(s)).cloned().collect()
     };
     // 格子の点が、絵 `sel` を `shift` だけずらしたものに覆われているか
     let covered = |sel: &[FillShape], shift: KVec2| -> Vec<bool> {
@@ -21912,20 +21924,20 @@ fn selections_keep_their_lines_through_operations() {
             ops.push(name.to_string());
             // 浮いた片の片は、いつもみな選ばれている（`Session::sync_floating`）
             if app.session.floating().is_some() {
-                let n = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).count();
+                let n = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection().contains_shape(p)).count();
                 if n > 0 {
                     bad.push(format!("{case}（{}）：浮いているのに選ばれていない片が {n} 個", ops.join("・")));
                     break;
                 }
             }
             // グループのまとまり（今の階層の子グループ・インスタンスごとに、みな選ばれているか、みな選ばれていないか）
-            let scope_now = app.session.editing_group_path.clone();
+            let scope_now = app.session.editing_group_path().to_vec();
             let mut units: std::collections::HashMap<u64, (usize, usize, usize)> = std::collections::HashMap::new();
             for sh in app.scene().iter() {
                 if let Some(g) = sh.active_group_id_at_scope(&scope_now) {
                     let e = units.entry(g).or_default();
                     e.0 += 1;
-                    if app.session.selection.contains_shape(sh) {
+                    if app.session.selection().contains_shape(sh) {
                         e.1 += 1;
                     }
                     if sh.line.is_some() {
@@ -21956,7 +21968,7 @@ fn selections_keep_their_lines_through_operations() {
             }
         }
         // 続けてドラッグしたとき、ドラッグ中の見た目と離した後が同じ
-        if !app.session.selection.is_empty() && !bad.iter().any(|b| b.starts_with(&format!("{case}（"))) {
+        if !app.session.selection().is_empty() && !bad.iter().any(|b| b.starts_with(&format!("{case}（"))) {
             let from = Point::new(300.0, 300.0);
             let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, false);
             app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
@@ -22583,7 +22595,7 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
         app.session.floating().expect("Floating が存在すること");
         assert_eq!(app.session.floating_view().pieces().len(), 1);
         assert_eq!(app.session.floating_view().remainder().count(), 0);
-        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert_eq!(app.session.selection().shapes.len(), 1);
 
         let left_idx = app
             .scene()
@@ -22596,7 +22608,7 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
                 scene_idx: left_idx
             }
         ));
-        assert_eq!(app.session.selection.shapes.len(), 0);
+        assert_eq!(app.session.selection().shapes.len(), 0);
         assert!(app.session.floating().is_none());
         let restored = &app.doc.root.layers[0].keyframes[0].cel.shapes()[0];
         assert_eq!(restored.shape_id, orig_shape.shape_id);
@@ -22792,7 +22804,7 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
         app.session.floating().unwrap();
         assert_eq!(app.session.floating_view().pieces().len(), 1);
         assert_eq!(app.session.floating_view().remainder().count(), 0);
-        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert_eq!(app.session.selection().shapes.len(), 1);
     }
 
     // 3. 1 のあと、動かさずに選択を外す → 図形は1つで、元の番号のまま。Undo の履歴は増えない
@@ -25170,7 +25182,7 @@ fn dragging_after_mixed_selections_matches_the_drop() {
                 }
             }
         }
-        if app.session.selection.is_empty() {
+        if app.session.selection().is_empty() {
             continue;
         }
         let from = Point::new(300.0, 300.0);
@@ -25457,12 +25469,12 @@ fn drag_previews_match_the_drop() {
             }
         };
         select(&mut app, &mut rng, &mut ops, true);
-        if rng.bool() && !app.session.selection.is_empty() {
+        if rng.bool() && !app.session.selection().is_empty() {
             ops.push("移動".into());
             apply(&mut app, Action::MoveSelected { delta: KVec2::new(rng.f64() * 120.0 - 60.0, rng.f64() * 120.0 - 60.0) });
             select(&mut app, &mut rng, &mut ops, false);
         }
-        if app.session.selection.is_empty() {
+        if app.session.selection().is_empty() {
             continue;
         }
         let kind = rng.usize(0..4);
@@ -27910,7 +27922,7 @@ mod map_overlay {
                 Point::new(200.0, 250.0),
                 false,
             );
-            assert!(!app.session.selection.is_empty(), "{k}");
+            assert!(!app.session.selection().is_empty(), "{k}");
             assert!(doc_actions::apply(&mut app, action));
             assert!(canvas_tool::clear_selection(&mut app));
             assert!(layer_map_valid(&app, 0), "{k}");
@@ -28132,7 +28144,7 @@ mod map_overlay {
                     let a = rp(&mut r);
                     let b = a + KVec2::new(20.0 + r.f() * 80.0, 20.0 + r.f() * 80.0);
                     select_ops::apply_marquee_selection(&mut app, a, b, false);
-                    if !app.session.selection.is_empty() {
+                    if !app.session.selection().is_empty() {
                         let action = match kind {
                             3 => Action::MoveSelected {
                                 delta: KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0),
@@ -28183,7 +28195,7 @@ mod map_overlay {
         assert!(symbol_ops::exit_symbol_timeline(&mut app));
         place_instance(&mut app, -1.1, 0.6, 1.4);
         enter(&mut app);
-        let corner = app.session.edit_path.world_xform() * Point::new(-2000.0, -2000.0);
+        let corner = app.session.edit_path().world_xform() * Point::new(-2000.0, -2000.0);
         stroke(&mut app, &[corner, corner + KVec2::new(10.0, 0.0)], 3.0);
         let after: Vec<(u64, u64)> = local(&app)
             .iter()
@@ -28261,7 +28273,7 @@ mod map_overlay {
                         let a = rp(&mut r);
                         let b = a + KVec2::new(20.0 + r.f() * 120.0, 20.0 + r.f() * 120.0);
                         select_ops::apply_marquee_selection(&mut app, a, b, false);
-                        if !app.session.selection.is_empty() {
+                        if !app.session.selection().is_empty() {
                             let action = if kind == 3 {
                                 let o =
                                     [0.0, 0.01, 0.051, 0.2, 1.0, 15.0][(r.f() * 6.0) as usize % 6];
@@ -29198,7 +29210,7 @@ mod map_overlay {
         );
         // 編集中の階層の生の図形（ステージの座標）から作った地図
         let map_of = |app: &Is2dApp| {
-            let scope = app.session.editing_group_path.clone();
+            let scope = app.session.editing_group_path().to_vec();
             let shapes: Vec<FillShape> = app
                 .scene()
                 .iter()
@@ -30175,7 +30187,7 @@ mod map_overlay {
         let inside_bbox = crate::vector_engine::union_bounding_boxes(
             &app.scene()
                 .iter()
-                .filter(|s| app.session.selection.contains_shape(s))
+                .filter(|s| app.session.selection().contains_shape(s))
                 .cloned()
                 .collect::<Vec<_>>(),
         );
@@ -30951,7 +30963,7 @@ mod map_overlay {
             .find(|s| s.color == Color32::BLUE)
             .unwrap()
             .clone();
-        app.session.selection.insert_shape(&blue_shape);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(&blue_shape); app.session.replace_selection(sel); }
         doc_actions::group_selected_shapes(&mut app).expect("グループ化");
         doc_actions::apply(&mut app, doc_actions::Action::Deselect);
         let all = |app: &Is2dApp, c: Color32| -> f64 {
@@ -31359,7 +31371,7 @@ mod map_overlay {
                             false,
                         );
                         // インスタンスを含む所はシンボルにしない（入れ子が掛け算で増え、試しが絵の量で止まるため）
-                        let ok = app.session.selection.instances.is_empty()
+                        let ok = app.session.selection().instances.is_empty()
                             && doc_actions::convert_selection_to_symbol(&mut app).is_some();
                         if ok && r.f() < 0.7 {
                             let _ = doc_actions::rotate_selected_shapes(&mut app, r.f() - 0.5);
@@ -31413,7 +31425,7 @@ mod map_overlay {
                                     && doc_actions::paste_clipboard(&mut app, true)
                             });
                         assert!(canvas_tool::clear_selection(&mut app));
-                        while !app.session.edit_path.is_empty() {
+                        while !app.session.edit_path().is_empty() {
                             symbol_ops::exit_symbol_timeline(&mut app);
                         }
                         ok
@@ -32404,7 +32416,7 @@ fn refused_commit_keeps_the_floating_pieces() {
         Some(canvas_tool::Refusal::Unplaceable)
     );
     assert!(app.session.floating().is_some());
-    assert!(!app.session.selection.is_empty());
+    assert!(!app.session.selection().is_empty());
     for (a, b) in doc_before.layers.iter().zip(&app.tab().doc.root.layers) {
         assert!(std::sync::Arc::ptr_eq(&a.keyframes[0], &b.keyframes[0]));
     }
@@ -33176,7 +33188,7 @@ fn failing_to_return_unselected_pieces_keeps_the_selection() {
     assert!(app.session.floating_view()
         .pieces()
         .iter()
-        .all(|p| app.session.selection.contains_shape(p)));
+        .all(|p| app.session.selection().contains_shape(p)));
 }
 
 /// A-7：選択ツールの「アンカーの追加・削除」の副モードで貼り付けると、貼った図形を動かせる形の変形に戻る
@@ -33214,7 +33226,7 @@ fn pasting_returns_the_select_tool_to_reshape() {
     );
     assert_eq!(app.tool.select_sub_mode, SelectSubMode::AddAnchor);
     assert!(doc_actions::paste_clipboard(&mut app, false));
-    assert!(!app.session.selection.is_empty());
+    assert!(!app.session.selection().is_empty());
     assert_eq!(app.tool.select_sub_mode, SelectSubMode::Reshape);
 }
 
@@ -33312,6 +33324,39 @@ fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
         after.x0
     );
     assert!((after.x1 - (bbox.x1 + 50.0)).abs() < 0.5);
+}
+
+/// 選択を足すと、自由変形の中心点は新しい選択の真ん中に戻る（Shift クリックでも Shift ダブルクリックでも同じ：持ち主が
+/// 決めた 2026-11-27。直す前は Shift ダブルクリックで選び足すと、前の選択に合わせて置いた中心点が残った：約束の棚卸し
+/// 5616fcc の B の G1）
+#[test]
+fn adding_to_the_selection_resets_the_transform_pivot() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![
+        map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED),
+        map_overlay::rect_shape(300.0, 100.0, 400.0, 200.0, Color32::BLUE),
+    ]);
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(150.0, 150.0) }));
+    app.session.transform_pivot = Some(Point::new(120.0, 120.0));
+    assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(350.0, 150.0), add: true }));
+    assert_eq!(app.session.transform_pivot, None, "選び足しても前の中心点が残った");
+}
+
+/// 矢印で動かす → 選び足す → また矢印で動かすと、取り消しは2手（選択が変わったら続けた編集のまとめを区切る。直す前は
+/// Shift ダブルクリックで選び足す道が区切らず、2回の移動が1手にまとまった：約束の棚卸し 5616fcc の A の P-15）
+#[test]
+fn changing_the_selection_ends_a_run_of_nudges() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![
+        map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED),
+        map_overlay::rect_shape(300.0, 100.0, 400.0, 200.0, Color32::BLUE),
+    ]);
+    assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(150.0, 150.0) }));
+    let before = app.history.undo_stack.len();
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(1.0, 0.0) }));
+    assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(350.0, 150.0), add: true }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(1.0, 0.0) }));
+    assert_eq!(app.history.undo_stack.len(), before + 2, "選び足しのあとの移動が、前の移動と1手にまとまった");
 }
 
 /// 絵の一部を選んで動かし、選んだまま（持ち上げた絵を持ったまま）インクボトルで線を付けても、そのあと選択を外せ、保存
@@ -34883,7 +34928,7 @@ fn measure_new_edges_after_moving_a_small_part() {
             Point::new(x + 40.0, y + 40.0),
             false,
         );
-        if app.session.selection.is_empty() {
+        if app.session.selection().is_empty() {
             continue;
         }
         assert!(apply(
@@ -35213,7 +35258,7 @@ fn group_edit_draws_shapes_outside_the_group_below_its_contents() {
             pt: Point::new(305.0, 300.0),
         }],
     );
-    assert!(!app.session.editing_group_path.is_empty(), "グループの中");
+    assert!(!app.session.editing_group_path().is_empty(), "グループの中");
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -35338,7 +35383,7 @@ fn symbol_edit_draws_the_stage_like_the_scene() {
             instance_gid: binding.instance_gid,
         }],
     );
-    assert!(!app.session.edit_path.is_empty(), "シンボルの中");
+    assert!(!app.session.edit_path().is_empty(), "シンボルの中");
     let (sym_stage, sym_rects, sym_clips) = draw(&mut app);
     assert_eq!(sym_stage, stage, "入っても表示の位置は変わらない");
     assert_eq!(
@@ -35426,7 +35471,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
         &mut app,
         &[Action::EnterSymbolFromLibrary { sym_id: sym_a }],
     );
-    let path = &app.session.edit_path;
+    let path = app.session.edit_path();
     assert_eq!(path.len(), 1);
     assert_eq!(
         path.levels[0].instance_gid, 0,
@@ -35467,7 +35512,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     );
     let sym_b = app.doc.library.iter().map(|s| s.id).max().unwrap();
     assert_ne!(sym_b, sym_a);
-    let path = &app.session.edit_path;
+    let path = app.session.edit_path();
     assert_eq!(path.len(), 2, "子のシンボルの中");
     assert_eq!(path.levels[1].symbol_id, sym_b);
     assert_ne!(path.levels[1].instance_gid, 0, "子にはその場で入る");
@@ -35491,7 +35536,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
         &mut app,
         &[Action::EnterSymbolFromLibrary { sym_id: sym_a }],
     );
-    let path = &app.session.edit_path;
+    let path = app.session.edit_path();
     assert_eq!(path.len(), 1);
     assert_eq!(
         (path.levels[0].symbol_id, path.levels[0].instance_gid),
@@ -35500,7 +35545,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
 
     // 4. 出るとシーンに戻り、ステージをまた描く
     run(&mut app, &[Action::ExitSymbolTimeline]);
-    assert!(app.session.edit_path.is_empty());
+    assert!(app.session.edit_path().is_empty());
     assert!(stage_rects(&mut app) > 0);
 }
 
@@ -35573,8 +35618,8 @@ fn double_click_needs_both_clicks_at_the_same_place() {
             }
             assert_eq!(
                 (
-                    app.session.editing_group_path.len(),
-                    !app.session.selection.is_empty()
+                    app.session.editing_group_path().len(),
+                    !app.session.selection().is_empty()
                 ),
                 (want_depth, want_selected),
                 "{tool:?} {clicks:?}"
@@ -36313,7 +36358,7 @@ fn measure_work() {
         let Some(fl) = tab.session.take_floating() else {
             break;
         };
-        let scope = tab.session.editing_group_path.clone();
+        let scope = tab.session.editing_group_path().to_vec();
         let mut per_layer = Vec::new();
         for l in fl.layers() {
             let Some(cel) = tab.session.base_cache.cel(l.layer_id) else {
@@ -37207,7 +37252,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
     let (a_gids, b_gids) = (gid_of(sym_a), gid_of(sym_b));
     assert_eq!((a_gids.len(), b_gids.len()), (2, 1));
     // 2つの A と生の青い線を選ぶ（B のインスタンスは選ばない）
-    app.session.selection.clear();
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
     let picked: Vec<FillShape> = app
         .scene()
         .iter()
@@ -37215,7 +37260,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
         .cloned()
         .collect();
     for s in &picked {
-        app.session.selection.insert_shape(s);
+        { let mut sel = app.session.selection().clone(); sel.insert_shape(s); app.session.replace_selection(sel); }
     }
     let raw_before = app.scene().iter().filter(|s| s.color == blue).count();
     assert_eq!(
@@ -37255,7 +37300,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
     assert!(
         a_gids
             .iter()
-            .all(|g| app.session.selection.instances.contains(g)),
+            .all(|g| app.session.selection().instances.contains(g)),
         "選択はそのまま"
     );
 
@@ -37268,7 +37313,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
     assert_eq!(bindings(&app), before);
 
     // 3. 何も選んでいなければ断る
-    app.session.selection.clear();
+    app.session.replace_selection(crate::canvas_tool::Selection::default());
     assert!(symbol_ops::swap_targets(&app.tabs[app.active], sym_b).is_empty());
     assert!(!doc_actions::apply(
         &mut app,
@@ -37285,7 +37330,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
         ],
     );
     assert_eq!(
-        app.session.selection.instances.len(),
+        app.session.selection().instances.len(),
         1,
         "置いた A を選んでいる"
     );
@@ -41352,7 +41397,7 @@ mod strokes {
         // 塗りをクリックして消す：線は残る（Animate と同じ）
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 200.0) }));
-        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert_eq!(app.session.selection().shapes.len(), 1);
         assert!(apply(&mut app, Action::DeleteSelection));
         assert_eq!(counts(&app), (0, 4));
         let m = cel_map(&app);
@@ -41360,7 +41405,7 @@ mod strokes {
         // 線（上の辺）をクリックして消す：塗りと、ほかの3辺の線は残る
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
-        let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+        let picked: Vec<_> = app.session.selection().shapes.iter().copied().collect();
         assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
         assert!(apply(&mut app, Action::DeleteSelection));
         assert_eq!(counts(&app), (1, 3));
@@ -41373,11 +41418,11 @@ mod strokes {
         // 線をダブルクリック：角でつながった4辺をまとめて選ぶ
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 100.5), add: false }));
-        assert_eq!(app.session.selection.shapes.len(), 4);
+        assert_eq!(app.session.selection().shapes.len(), 4);
         // ダブルクリックで塗りと輪郭の線を選んで消す：何も残らない
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(200.0, 200.0), add: false }));
-        assert_eq!(app.session.selection.shapes.len(), 5);
+        assert_eq!(app.session.selection().shapes.len(), 5);
         assert!(apply(&mut app, Action::DeleteSelection));
         assert_eq!(counts(&app), (0, 0));
         // 塗りだけを選んで動かす：線は元の場所に残り、塗りだけが動く
@@ -41451,10 +41496,10 @@ mod strokes {
         assert!(apply(&mut app, Action::DrawLines { segs: vec![line(Point::new(600.0, 300.0), Point::new(700.0, 300.0), INK)] }));
         assert_eq!(counts(&app).1, 5);
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5), add: false }));
-        assert_eq!(app.session.selection.shapes.len(), 3);
+        assert_eq!(app.session.selection().shapes.len(), 3);
         // クリックは、辺1本だけ
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(250.0, 300.5) }));
-        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert_eq!(app.session.selection().shapes.len(), 1);
     }
 
     #[test]
@@ -41470,7 +41515,7 @@ mod strokes {
         assert_ne!(lines[0].1, lines[1].1);
         // 上のレイヤーの線をクリックしても、下のレイヤーの線は選ばれない
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 125.5) }));
-        assert_eq!(app.session.selection.shapes.len(), 1);
+        assert_eq!(app.session.selection().shapes.len(), 1);
     }
 
     /// 画面の図形のうち、線がみな塗りより上（あとに描く）にある
@@ -41569,7 +41614,7 @@ mod strokes {
             assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
             app.tab_mut().view.set_zoom(zoom);
             let _ = apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, y) });
-            let ids: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+            let ids: Vec<_> = app.session.selection().shapes.iter().copied().collect();
             match ids.as_slice() {
                 [] => "なし",
                 [id] if crate::planar_map::is_line_id(*id) => "線",
@@ -41598,7 +41643,7 @@ mod strokes {
         assert!(apply(&mut app, Action::DrawLines { segs: vec![whisker] }));
         assert!(lines_above_fills(&app));
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(70.0, 80.0) }));
-        let picked: Vec<_> = app.session.selection.shapes.iter().copied().collect();
+        let picked: Vec<_> = app.session.selection().shapes.iter().copied().collect();
         assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
         assert!(app.session.lift_selected_raw_shapes_to_floating());
         app.session.begin_move_overlay(false, None, Vec::new());

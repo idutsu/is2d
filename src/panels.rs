@@ -475,7 +475,7 @@ pub(crate) fn draw_stage_header_bar(tab: &Tab, actions: &mut Vec<UiAction>, ctx:
 
 fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let mut items: Vec<String> = vec![format!("{} シーン 1", icons::SCENE_MOVIE)];
-    for lvl in &tab.session.edit_path.levels {
+    for lvl in &tab.session.edit_path().levels {
         for &gid in &lvl.parent_group_path {
             items.push(format!("{} Group #{gid}", icons::GROUP));
         }
@@ -488,7 +488,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
             .unwrap_or("Symbol");
         items.push(format!("{} {sym_name}", icons::SYMBOL));
     }
-    for &gid in &tab.session.editing_group_path {
+    for &gid in tab.session.editing_group_path() {
         items.push(format!("{} Group #{gid}", icons::GROUP));
     }
 
@@ -728,7 +728,7 @@ fn draw_select_tool_properties(
 
     draw_panel_section_label(ui, "消去アクション", 4.0);
 
-    let has_sel = !tab.session.selection.is_empty();
+    let has_sel = !tab.session.selection().is_empty();
     equal_width_row(ui, 2, |ui, cell_w| {
         if ui
             .add_enabled(
@@ -747,7 +747,7 @@ fn draw_select_tool_properties(
         let has_any = tab
             .scene()
             .iter()
-            .any(|s| s.is_in_editing_scope(&tab.session.editing_group_path));
+            .any(|s| s.is_in_editing_scope(tab.session.editing_group_path()));
         if ui
             .add_enabled(
                 has_any,
@@ -767,7 +767,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 
     let has_group = tab
         .scene()
-        .selection_has_group(&tab.session.selection, &tab.session.editing_group_path);
+        .selection_has_group(tab.session.selection(), tab.session.editing_group_path());
     equal_width_row(ui, 3, |ui, cell_w| {
         if ui
             .add_enabled(
@@ -839,7 +839,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
 
 /// 自由変形ツール (`Tool::Transform`) のプロパティ設定項目
 fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    let has_sel = !tab.session.selection.is_empty();
+    let has_sel = !tab.session.selection().is_empty();
 
     draw_panel_section_label(ui, "変形アクション", 4.0);
 
@@ -909,7 +909,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
         .add_enabled(
             has_sel
                 && tab.scene().has_custom_transform_pivot(
-                    &tab.session.selection,
+                    tab.session.selection(),
                     tab.session.transform_pivot,
                 ),
             egui::Button::new(format!(
@@ -1830,11 +1830,11 @@ pub(crate) fn draw_canvas_contents(
     timeline_ui: &TimelineUiState,
     painter: &egui::Painter,
 ) {
-    let in_group_edit = !tab.session.editing_group_path.is_empty();
+    let in_group_edit = !tab.session.editing_group_path().is_empty();
     let zoom = tab.view.zoom();
     let pan = tab.view.pan;
     let stage_size = tab.doc.stage_size;
-    let shows_stage = tab.session.edit_path.shows_stage();
+    let shows_stage = tab.session.edit_path().shows_stage();
     let artwork_painter =
         tab.view
             .artwork_painter(painter, painter.clip_rect(), stage_size, shows_stage);
@@ -1859,7 +1859,7 @@ pub(crate) fn draw_canvas_contents(
     let tl = tab.active_timeline();
     let num_layers = tl.layers.len();
     let mut selected_group_boxes: Vec<SelectedBox> = Vec::new();
-    let (is_sel, has_sel) = tab.scene().selected_shape_mask(&tab.session.selection);
+    let (is_sel, has_sel) = tab.scene().selected_shape_mask(tab.session.selection());
     let curr_f = tl.current_frame;
     let scene = tab.scene();
     let scene_len = scene.len();
@@ -1969,7 +1969,7 @@ fn draw_shapes_outside_group(
         let Some(shape) = tab.scene().get(idx) else {
             continue;
         };
-        if shape.is_in_editing_scope(&tab.session.editing_group_path) {
+        if shape.is_in_editing_scope(tab.session.editing_group_path()) {
             continue;
         }
         if shape
@@ -2017,7 +2017,7 @@ fn draw_editable_layer_shapes(
         let Some(shape) = tab.scene().get(idx) else {
             continue;
         };
-        if !shape.is_in_editing_scope(&tab.session.editing_group_path) {
+        if !shape.is_in_editing_scope(tab.session.editing_group_path()) {
             continue;
         }
         let here = selection_tier(shape);
@@ -2026,7 +2026,7 @@ fn draw_editable_layer_shapes(
             tinted.clear();
             tier = Some(here);
         }
-        let raw = shape.is_raw_at_scope(&tab.session.editing_group_path);
+        let raw = shape.is_raw_at_scope(tab.session.editing_group_path());
         let run = raw.then_some((shape.layer_id, shape.group_path.as_slice()));
         if run != wire_run {
             wire.draw(tab, gizmo_painter);
@@ -2034,7 +2034,7 @@ fn draw_editable_layer_shapes(
         }
         let shape_sel = has_sel && !active_affine_drag && is_sel.get(idx).copied().unwrap_or(false);
         let sel_gid = if shape_sel {
-            let gid = shape.active_group_id_at_scope(&tab.session.editing_group_path);
+            let gid = shape.active_group_id_at_scope(tab.session.editing_group_path());
             if let Some(gid) = gid {
                 let geom_bbox = shape.geometry_bounding_box();
                 let fallback_bbox = shape.bounding_box();
@@ -2111,8 +2111,8 @@ fn draw_selected_group_and_symbol_boxes(
         }
     }
 
-    if !tab.session.edit_path.is_empty() {
-        let origin = tab.session.edit_path.world_xform() * Point::ZERO;
+    if !tab.session.edit_path().is_empty() {
+        let origin = tab.session.edit_path().world_xform() * Point::ZERO;
         draw_registration_cross(painter, tab.view.world_to_screen(origin), 5.5, true);
     }
 }

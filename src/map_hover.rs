@@ -52,8 +52,8 @@ pub(crate) struct ScopeMaps {
 /// 浮いた片を持ち上げたレイヤーは、その残りの地図。場面の生の図形が前回と同じなら、前回の並びをそのまま返す
 pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> {
     use std::hash::{Hash, Hasher};
-    let scope = &session.editing_group_path;
-    let xform = session.edit_path.world_xform();
+    let scope = session.editing_group_path();
+    let xform = session.edit_path().world_xform();
     // 動かしていない浮いた片は、どの操作でも先に戻してから地図を編集する（`apply_anchor_edit_at`）ので、カーソル合わせも
     // 戻した後の地図（セル画の地図）で行う。動かした浮いた片は、残りの地図と片の地図（`floating_maps`）で行う
     let floating = session.floating().filter(|fl| fl.modified());
@@ -104,7 +104,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
         };
         Some(LayerMap {
             layer_id: *layer_id,
-            group_path: scope.clone(),
+            group_path: scope.to_vec(),
             base,
             xform,
             first_idx: *first_idx,
@@ -141,7 +141,7 @@ fn hidden_by_front(scene: Scene<'_>, session: &Session, lm: &LayerMap, p: Point)
     (lm.first_idx + 1..scene.len()).any(|i| {
         scene.get(i).is_some_and(|s| {
             !(s.layer_id == lm.layer_id && s.is_raw_at_scope(&lm.group_path))
-                && s.is_in_editing_scope(&session.editing_group_path)
+                && s.is_in_editing_scope(session.editing_group_path())
                 && s.contains_point(p)
         })
     })
@@ -240,7 +240,7 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
     let Some(fl) = session.floating().filter(|fl| fl.modified()) else {
         return Vec::new();
     };
-    let world = session.edit_path.world_xform();
+    let world = session.edit_path().world_xform();
     let mut out = Vec::new();
     for l in fl.layers() {
         for (gi, g) in l.groups.iter().enumerate() {
@@ -249,7 +249,7 @@ fn floating_maps(scene: Scene<'_>, session: &Session) -> Vec<LayerMap> {
             };
             out.push(LayerMap {
                 layer_id: l.layer_id,
-                group_path: session.editing_group_path.clone(),
+                group_path: session.editing_group_path().to_vec(),
                 base: g.base(),
                 xform: world * g.xform,
                 first_idx,

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, clear_selection, commit_floating,
+    active_scope_layer_id, clear_selection,
     editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, update_instances,
     write_cel, write_cels, Tab, View,
 };
@@ -19,15 +19,14 @@ use crate::vector_engine::{invertible, union_bounding_boxes};
 pub(crate) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
 ) -> Option<(u64, u64)> {
-    cancel_active_drag(tab);
-    if tab.session.selection.is_empty() {
+    if tab.session.selection().is_empty() {
         return None;
     }
     let sel_scene_indices = tab.session.selected_indices();
     if sel_scene_indices.is_empty()
         || !tab
             .scene()
-            .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+            .selected_has_any_in_scope(tab.session.selection(), tab.session.editing_group_path())
     {
         return None;
     }
@@ -37,8 +36,8 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     if !editable_layer_ids(tab).contains(&target_lid) {
         return None;
     }
-    let scope = tab.session.editing_group_path.clone();
-    let selection = tab.session.selection.clone();
+    let scope = tab.session.editing_group_path().to_vec();
+    let selection = tab.session.selection().clone();
     // シンボルの中身は、文書を変える前に、選んでいるものの中身（地図とインスタンス：`selected_content`。浮いた片は
     // 確定と同じ重ね方）から作る：そのレイヤーの中身の、外接矩形の中心を原点へ寄せる（`Cel::transformed`）。地図に
     // できなければ断る。インスタンスは、そのレイヤーに置く
@@ -77,7 +76,7 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         Some(mut fl) => {
             // シンボルの中身に入れる片は、元の所から取り出す（元の所は切り抜いたまま書く：`Floating::place_all`）
             fl.place_all();
-            let Ok(rest) = fl.split_off(&keep, &tab.session.editing_group_path) else {
+            let Ok(rest) = fl.split_off(&keep, tab.session.editing_group_path()) else {
                 tab.session.set_floating(before);
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return None;
@@ -121,8 +120,9 @@ pub(crate) fn prepare_convert_selection_to_symbol(
         crate::canvas_tool::write_commit(tab, plan);
     }
 
-    tab.session.selection.clear();
-    tab.session.selection.instances.insert(inst_gid);
+    let mut placed = crate::canvas_tool::Selection::default();
+    placed.instances.insert(inst_gid);
+    tab.session.replace_selection(placed);
 
     Some((sym_id, target_lid))
 }
@@ -156,11 +156,11 @@ fn content_center(tab: &Tab, content: &Content) -> Point {
 /// うち、編集できるレイヤーにあって、まだ別のシンボルのもの（一緒に選んだ図形・グループは入れない。何も選んでいなければ
 /// 空）。今の階層に `symbol_id` を置くと入れ子が回るとき（「配置」と同じ決まり）も空
 pub(crate) fn swap_targets(tab: &Tab, symbol_id: u64) -> HashSet<u64> {
-    let selected = &tab.session.selection.instances;
+    let selected = &tab.session.selection().instances;
     if selected.is_empty()
         || !tab
             .doc
-            .can_place_symbol_in_current_context(&tab.session.edit_path, symbol_id)
+            .can_place_symbol_in_current_context(tab.session.edit_path(), symbol_id)
     {
         return HashSet::new();
     }
@@ -180,10 +180,7 @@ pub(crate) fn prepare_swap_selected_instances(
     tab: &mut Tab,
     symbol_id: u64,
 ) -> bool {
-    if swap_targets(tab, symbol_id).is_empty() || !commit_floating(tab) {
-        return false;
-    }
-    // 浮いた片を確定したあとで決め直す（インスタンスの番号は確定しても変わらない）
+    // 浮いた片は入口が先に貼り戻してある（操作ごとの表 `Action::policy`）
     let targets = swap_targets(tab, symbol_id);
     if targets.is_empty() {
         return false;
@@ -195,10 +192,7 @@ pub(crate) fn prepare_swap_selected_instances(
         |gid| targets.contains(&gid),
         |b| b.symbol_id = symbol_id,
     );
-    if updated {
-        reset_session_after_timeline_change(tab);
-    }
-    updated
+    updated && reset_session_after_timeline_change(tab)
 }
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
@@ -209,7 +203,7 @@ pub(crate) fn prepare_place_symbol_instance(
     let target_lid = active_scope_layer_id(&tab.session, tab.active_timeline());
     if !tab
         .doc
-        .can_place_symbol_in_current_context(&tab.session.edit_path, symbol_id)
+        .can_place_symbol_in_current_context(tab.session.edit_path(), symbol_id)
         || !tab.active_timeline().is_layer_editable_by_id(target_lid)
     {
         return false;
@@ -242,7 +236,7 @@ pub(crate) fn prepare_place_symbol_instance(
     };
     let xform = content_xform(
         content.world,
-        tab.session.edit_path.world_xform(),
+        tab.session.edit_path().world_xform(),
         KVec2::ZERO,
     );
     let Some(placement) = prepare_placement(tab, &content, xform, false, None) else {
@@ -263,14 +257,14 @@ pub(crate) fn selected_single_symbol_info(
     let tl = tab.active_timeline();
     let binding = tab
         .scene()
-        .selected_single_symbol_binding(&tab.session.selection)
+        .selected_single_symbol_binding(tab.session.selection())
         .or_else(|| {
             let layer = tl.layers.get(tl.active_layer)?;
             if !layer.is_editable_at(tl.current_frame) {
                 return None;
             }
             let mut b = layer.cel_at(tl.current_frame)?.single_symbol_instance()?;
-            b.xform = tab.session.edit_path.world_xform() * b.xform;
+            b.xform = tab.session.edit_path().world_xform() * b.xform;
             Some(b)
         })?;
     let sym = tab.doc.find_symbol(binding.symbol_id)?;
@@ -324,26 +318,26 @@ fn enter_symbol_level(
         (tl.current_frame, tl.active_layer)
     };
 
-    let next_world = tab.session.edit_path.world_xform() * xform_in_parent;
+    let next_world = tab.session.edit_path().world_xform() * xform_in_parent;
     if !invertible(xform_in_parent) || !invertible(next_world) {
         return false;
     }
 
-    if !commit_floating(tab) {
+    // シンボルの段に入る（見る場所を変える入口：先に持ち上げた絵を貼り戻す）
+    if !tab.move_view(|edit_path, group_path| {
+        edit_path.levels.push(EditLevel {
+            instance_gid,
+            symbol_id,
+            xform_in_parent,
+            parent_frame,
+            parent_active_layer,
+            parent_group_path: std::mem::take(group_path),
+        });
+    }) {
         return false;
     }
-    tab.session.selection.clear();
-
+    tab.session.replace_selection(crate::canvas_tool::Selection::default());
     tab.view.selected_library_symbol = Some(symbol_id);
-    let parent_group_path = std::mem::take(&mut tab.session.editing_group_path);
-    tab.session.edit_path.levels.push(EditLevel {
-        instance_gid,
-        symbol_id,
-        xform_in_parent,
-        parent_frame,
-        parent_active_layer,
-        parent_group_path,
-    });
 
     let (act_l, act_f) = {
         let tl = tab.active_timeline();
@@ -353,11 +347,11 @@ fn enter_symbol_level(
         )
     };
     tab.set_active_layer(act_l);
-    tab.set_active_frame(act_f);
+    // 持ち上げた絵は段に入るときに貼り戻してあるので、コマを変える入口は断らない
+    let moved = tab.set_active_frame(act_f);
+    debug_assert!(moved);
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
-
-    reset_session_after_timeline_change(tab);
-    true
+    reset_session_after_timeline_change(tab)
 }
 
 /// ライブラリのシンボル `symbol_id` を、どのインスタンスにも結び付けずに編集する（Adobe Animate の「シンボル編集」）。
@@ -367,7 +361,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
     if tab.doc.find_symbol(symbol_id).is_none() {
         return false;
     }
-    while !tab.session.edit_path.is_empty() {
+    while !tab.session.edit_path().is_empty() {
         if !exit_symbol_timeline(tab) {
             return false;
         }
@@ -383,15 +377,17 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
 
 /// 現在入っているシンボル内部タイムライン編集モードから1段階上の親シーン（または親シンボル）タイムラインへ戻る
 pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
-    if tab.session.edit_path.is_empty() {
+    if tab.session.edit_path().is_empty() {
         return false;
     }
-    if !commit_floating(tab) {
+    // シンボルの段から出る（見る場所を変える入口：先に持ち上げた絵を貼り戻す）。親のグループの階層は、コマを親に戻して
+    // から入れる
+    let mut popped = None;
+    if !tab.move_view(|edit_path, _| popped = edit_path.levels.pop()) {
         return false;
     }
-    tab.session.selection.clear();
-
-    let Some(lvl) = tab.session.edit_path.levels.pop() else {
+    tab.session.replace_selection(crate::canvas_tool::Selection::default());
+    let Some(lvl) = popped else {
         return false;
     };
     let (act_l, act_f) = {
@@ -403,11 +399,13 @@ pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
         )
     };
     tab.set_active_layer(act_l);
-    tab.set_active_frame(act_f);
+    let moved = tab.set_active_frame(act_f)
+        && tab.move_view(|_, group_path| *group_path = lvl.parent_group_path);
+    debug_assert!(moved);
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(act_l, act_f)));
-    tab.session.editing_group_path = lvl.parent_group_path;
-
-    reset_session_after_timeline_change(tab);
+    if !reset_session_after_timeline_change(tab) {
+        return false;
+    }
 
     tab.session.select_symbol_instance_by_gid(lvl.instance_gid);
     true

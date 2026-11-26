@@ -88,7 +88,7 @@ impl Wireframe {
         let pad = f64::from(ANCHOR_RADIUS + ANCHOR_RING / 2.0) / tab.view.zoom() as f64;
         let view = tab
             .view
-            .visible_world_rect(painter, tab.doc.stage_size, tab.session.edit_path.shows_stage())
+            .visible_world_rect(painter, tab.doc.stage_size, tab.session.edit_path().shows_stage())
             .inflate(pad, pad);
         let stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140));
         for q in self.edges.drain(..) {
@@ -169,7 +169,6 @@ pub(crate) fn handle_select_tool_input(
                 finish_reshape_drag(host, mouse_pt);
             } else if response.clicked_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    host.tab_mut().view.inspect_timeline_frame = false;
                     apply_click_selection(host, pt, shift_held, true);
                 }
             }
@@ -224,7 +223,6 @@ pub(crate) fn start_reshape_drag(
     alt_held: bool,
 ) {
     let sub_mode = host.tool().select_sub_mode;
-    host.tab_mut().view.inspect_timeline_frame = false;
     if shift_held {
         host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, true));
         return;
@@ -246,7 +244,7 @@ pub(crate) fn start_reshape_drag(
     if matches!(
         target,
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. }
-    ) && (!host.tab().session.selection.is_empty() || host.tab().session.floating().is_some())
+    ) && (!host.tab().session.selection().is_empty() || host.tab().session.floating().is_some())
     {
         // 浮いた片の確定を断られたら、何も始めない（浮いた片はみな選ばれたまま）
         if !apply(host, Action::Deselect) {
@@ -328,7 +326,7 @@ pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
         return;
     }
     // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（ほかの頂点に吸い付かない。利用者が決めた）
-    let xform = tab.session.edit_path.world_xform();
+    let xform = tab.session.edit_path().world_xform();
     // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる
     let update = match &mut tab.session.drag {
         ActiveCanvasDrag::Select(SelectDragState::MoveVertex {
@@ -464,7 +462,7 @@ pub(crate) fn draw_select_tool_cursor(
                 let on_grid = moved
                     .iter()
                     .all(|(_, q)| crate::planar_map::on_grid([q.p0, q.p1, q.p2].into_iter()));
-                let xform = tab.session.edit_path.world_xform();
+                let xform = tab.session.edit_path().world_xform();
                 if on_grid && !moved.is_empty() {
                     for (_, q) in moved {
                         draw_highlighted_quad_segment(tab, painter, xform * q);

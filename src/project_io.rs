@@ -111,7 +111,7 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
     ws.set_active_index(target_index);
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
-    if !ws.tab().session.selection.is_empty() && ws.tool().select_sub_mode != SelectSubMode::Reshape
+    if !ws.tab().session.selection().is_empty() && ws.tool().select_sub_mode != SelectSubMode::Reshape
     {
         ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
     }

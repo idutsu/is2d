@@ -199,7 +199,7 @@ fn can_redo(tab: &Tab, _: &Clipboard) -> bool {
 }
 
 fn has_selection(tab: &Tab, _: &Clipboard) -> bool {
-    !tab.session.selection.is_empty()
+    !tab.session.selection().is_empty()
 }
 
 fn can_paste(tab: &Tab, clipboard: &Clipboard) -> bool {

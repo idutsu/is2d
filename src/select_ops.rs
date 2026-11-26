@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use kurbo::{Affine, ParamCurve, Point, QuadBez, Rect as KRect};
 
 use crate::canvas_tool::{
-    cancel_active_drag, clear_selection, commit_floating, commit_floating_except,
+    clear_selection, commit_floating_except,
     editable_layer_ids, sync_timeline_layer_from_canvas_selection, write_cels, ActiveCanvasDrag,
     HoverTarget, Scene, SelectSubMode, Session, Tab,
 };
@@ -32,20 +32,19 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
     if !commit_floating_except(tab, keep_indices) {
         return;
     }
-    tab.session.transform_pivot = None;
     sync_timeline_layer_from_canvas_selection(tab);
 }
 
 /// ダブルクリック位置 `pt` にシンボルがあればそのシンボルの独自タイムラインへ入り、グループがあればインプレイス編集モードへ移行する
 pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
     let scene = tab.scene();
-    let Some(hit_idx) = scene.topmost_shape_at(pt, &tab.session.editing_group_path) else {
+    let Some(hit_idx) = scene.topmost_shape_at(pt, tab.session.editing_group_path()) else {
         return false;
     };
     let Some(hit_shape) = scene.get(hit_idx) else {
         return false;
     };
-    let Some(gid) = hit_shape.active_group_id_at_scope(&tab.session.editing_group_path) else {
+    let Some(gid) = hit_shape.active_group_id_at_scope(tab.session.editing_group_path()) else {
         return false;
     };
     if hit_shape
@@ -57,17 +56,20 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
     if !clear_selection(tab) {
         return false;
     }
-    tab.session.editing_group_path.push(gid);
-    true
+    tab.move_view(|_, group_path| group_path.push(gid))
 }
 
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
 pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
-    if !tab.session.editing_group_path.is_empty() {
+    if !tab.session.editing_group_path().is_empty() {
         if !clear_selection(tab) {
             return false;
         }
-        let Some(exited_gid) = tab.session.editing_group_path.pop() else {
+        let mut exited = None;
+        if !tab.move_view(|_, group_path| exited = group_path.pop()) {
+            return false;
+        }
+        let Some(exited_gid) = exited else {
             return false;
         };
         let scene = tab.scene();
@@ -75,12 +77,11 @@ pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
             .filter(|&i| {
                 scene
                     .get(i)
-                    .and_then(|s| s.active_group_id_at_scope(&tab.session.editing_group_path))
+                    .and_then(|s| s.active_group_id_at_scope(tab.session.editing_group_path()))
                     == Some(exited_gid)
             })
             .collect();
         tab.session.set_selected_indices(indices);
-        tab.session.transform_pivot = None;
         return true;
     }
     exit_symbol_timeline(tab)
@@ -94,7 +95,7 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point, 
     let hit = host
         .tab()
         .scene()
-        .topmost_shape_at(pt, &host.tab().session.editing_group_path);
+        .topmost_shape_at(pt, host.tab().session.editing_group_path());
     if hit.is_some() {
         apply(host, Action::SelectConnectedAt { pt, add: shift_held });
     } else {
@@ -106,7 +107,7 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point, 
 /// （`LayerBase::connected_ids`）を選ぶ。`add`（Shift を押したダブルクリック）なら今の選択に足し、そうでなければ今の選択と
 /// 入れ替える（Shift クリックで足すのと同じ）。そういう図形が無ければ何もしない
 pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point, add: bool) -> bool {
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     let scene = tab.scene();
     let Some(hit) = scene
         .topmost_shape_at(pt, &scope)
@@ -163,7 +164,7 @@ pub(crate) fn apply_click_selection(
             let unit = host
                 .tab()
                 .scene()
-                .expand_to_group_unit(scene_idx, &host.tab().session.editing_group_path);
+                .expand_to_group_unit(scene_idx, host.tab().session.editing_group_path());
             apply(host, Action::RetainSelection { keep_indices: unit });
         }
         Some(_) => {
@@ -178,10 +179,9 @@ pub(crate) fn apply_click_selection(
 
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
 pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
-    tab.history.end_coalesce();
     let scene = tab.scene();
-    let unit = scene.expand_to_group_unit(scene_idx, &tab.session.editing_group_path);
-    let (sel_mask, _) = scene.selected_shape_mask(&tab.session.selection);
+    let unit = scene.expand_to_group_unit(scene_idx, tab.session.editing_group_path());
+    let (sel_mask, _) = scene.selected_shape_mask(tab.session.selection());
     if sel_mask.get(scene_idx).copied().unwrap_or(false) {
         let remaining: Vec<usize> = tab
             .session
@@ -195,7 +195,6 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
         .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
     {
         tab.session.select_shape_indices(unit);
-        tab.session.transform_pivot = None;
         sync_timeline_layer_from_canvas_selection(tab);
     }
 }
@@ -215,7 +214,7 @@ pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt:
                 .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
         })
     {
-        let unit = scene.expand_to_group_unit(hit_idx, &tab.session.editing_group_path);
+        let unit = scene.expand_to_group_unit(hit_idx, tab.session.editing_group_path());
         tab.session.set_selected_indices(unit);
         sync_timeline_layer_from_canvas_selection(tab);
         true
@@ -275,7 +274,6 @@ pub(crate) fn finish_selection_drag(host: &mut impl ActionHost, mouse_pt: Option
 
 /// Adobe Animate 風の矩形選択（Marquee Selection）
 pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, additive: bool) {
-    tab.history.end_coalesce();
     let min_x = p0.x.min(p1.x);
     let max_x = p0.x.max(p1.x);
     let min_y = p0.y.min(p1.y);
@@ -296,13 +294,13 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let rect = KRect::new(min_x, min_y, max_x, max_y);
     // 地図は文書の座標で持つので、切る形（矩形）は文書の座標へ写して渡す（ほかの入力と同じ：`FillShape::to_doc`）
     let clip_rect_shape = make_marquee_rect_shape(rect)
-        .to_doc(tab.session.edit_path.world_xform())
+        .to_doc(tab.session.edit_path().world_xform())
         .into_owned();
     let hit_group_ids =
-        collect_marquee_hit_groups(tab.scene(), &tab.session.editing_group_path, rect);
+        collect_marquee_hit_groups(tab.scene(), tab.session.editing_group_path(), rect);
 
     let editable_lids = editable_layer_ids(tab);
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     let floating = tab.session.floating();
     let modified = floating.is_some_and(|fl| fl.modified());
     let pieces: HashSet<ShapeId> = tab.session.floating_view().piece_ids();
@@ -322,7 +320,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
         }
     }
     for s in tab.scene().iter() {
-        if raw(s) && !pieces.contains(&s.shape_id) && tab.session.selection.contains_shape(s) {
+        if raw(s) && !pieces.contains(&s.shape_id) && tab.session.selection().contains_shape(s) {
             if let Some(x) = split.iter_mut().find(|x| x.0 == s.layer_id) {
                 x.1.insert(s.shape_id);
             }
@@ -337,7 +335,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
     // 矩形の中にあるときだけ選ぶ
     let hidden_now: HashSet<ShapeId> = tab.session.floating_view().hidden().clone();
-    let mut selection = std::mem::take(&mut tab.session.selection);
+    let mut selection = tab.session.selection().clone();
     for shape in tab.session.base_cache.shapes() {
         if selection.contains_shape(shape)
             || hidden_now.contains(&shape.shape_id)
@@ -360,10 +358,8 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
             selection.insert_shape(shape);
         }
     }
-    tab.session.selection = selection;
-
+    tab.session.replace_selection(selection);
     tab.session.drop_unmodified_slice_if_unselected();
-    tab.session.transform_pivot = None;
     sync_timeline_layer_from_canvas_selection(tab);
 }
 
@@ -474,7 +470,7 @@ pub(crate) fn compute_hover_target(
 
     if sub_mode == SelectSubMode::Reshape {
         let selected_grab_radius = 6.0 * inv_z;
-        let (is_sel, has_sel) = scene.selected_shape_mask(&session.selection);
+        let (is_sel, has_sel) = scene.selected_shape_mask(session.selection());
         if has_sel {
             for s_idx in (0..scene_len).rev() {
                 if !is_sel[s_idx] {
@@ -483,7 +479,7 @@ pub(crate) fn compute_hover_target(
                 let Some(shape) = scene.get(s_idx) else {
                     continue;
                 };
-                if !shape.is_in_editing_scope(&session.editing_group_path)
+                if !shape.is_in_editing_scope(session.editing_group_path())
                     || !shape
                         .bounding_box()
                         .inflate(selected_grab_radius, selected_grab_radius)
@@ -506,7 +502,7 @@ pub(crate) fn compute_hover_target(
             return target;
         }
         return scene
-            .topmost_shape_at(mouse_pt, &session.editing_group_path)
+            .topmost_shape_at(mouse_pt, session.editing_group_path())
             .and_then(|s_idx| scene.get(s_idx))
             .map_or(HoverTarget::None, |shape| HoverTarget::Fill {
                 shape_id: shape.shape_id,
@@ -539,13 +535,12 @@ pub(crate) fn selected_single_layer_id(tab: &Tab) -> Option<LayerId> {
 pub(crate) fn prepare_group_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
-    cancel_active_drag(tab);
     let Some(target_lid) = selected_single_layer_id(tab) else {
         return false;
     };
     if !tab
         .scene()
-        .selected_has_any_in_scope(&tab.session.selection, &tab.session.editing_group_path)
+        .selected_has_any_in_scope(tab.session.selection(), tab.session.editing_group_path())
     {
         return false;
     }
@@ -572,7 +567,7 @@ pub(crate) fn prepare_group_selected_shapes(
     };
     let new_gid = tab.doc.alloc_group_id();
     // 片の地図を、新しいグループの階層に何を書くか（1本の道の答え：`LayerBase::replace_local`）も先に決める（書けなければ、何も書かずに断る）
-    let mut group_path = tab.session.editing_group_path.clone();
+    let mut group_path = tab.session.editing_group_path().to_vec();
     group_path.push(new_gid);
     let piece_plan: Option<crate::canvas_tool::CommitPlan> = {
         let cache = &tab.session.base_cache;
@@ -599,7 +594,7 @@ pub(crate) fn prepare_group_selected_shapes(
     // 浮いた片の残りは、そのままセル画の地図にする（片は重ねない。選択は、残りを書く前のもの：片も選んでいる）。書くもの
     // を先に決め（書けなければ断る）、新しいグループを置いてから書く（今の階層の中身をみな選んでいても、今の階層の
     // 地図がまだあるうちに新しいグループを入れるので、今の階層の重なりの位置が変わらない）
-    let selection = tab.session.selection.clone();
+    let selection = tab.session.selection().clone();
     let rest_plan = match tab.session.take_floating() {
         Some(fl) => {
             let mut rest = fl.clone();
@@ -613,7 +608,7 @@ pub(crate) fn prepare_group_selected_shapes(
         None => None,
     };
     // 選んだグループ・インスタンスは、セル画の並びで新しいグループに入れる（今の階層の中身のいちばん上）
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     let layer_ids = editable_layer_ids(tab);
     write_cels(tab, &layer_ids, |_, cel, held| {
         Ok(cel.group(
@@ -643,7 +638,7 @@ pub(crate) fn prepare_group_selected_shapes(
             grouped.insert_shape(s);
         }
     }
-    tab.session.selection = grouped;
+    tab.session.replace_selection(grouped);
 
     if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
         tab.set_active_layer(l_idx);
@@ -659,17 +654,16 @@ pub(crate) fn prepare_group_selected_shapes(
 pub(crate) fn prepare_ungroup_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
-    cancel_active_drag(tab);
     if !tab
         .scene()
-        .selection_has_group(&tab.session.selection, &tab.session.editing_group_path)
+        .selection_has_group(tab.session.selection(), tab.session.editing_group_path())
     {
         return false;
     }
-    let depth = tab.session.editing_group_path.len();
-    let scope = tab.session.editing_group_path.clone();
+    let depth = tab.session.editing_group_path().len();
+    let scope = tab.session.editing_group_path().to_vec();
     let layer_ids = editable_layer_ids(tab);
-    let world = tab.session.edit_path.world_xform();
+    let world = tab.session.edit_path().world_xform();
 
     // 分解するインスタンス（今の階層の、選んだもの）の中身を置く準備をする
     let mut placements: Vec<Placement> = Vec::new();
@@ -685,7 +679,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 if inst.parent_scope != scope
                     || !tab
                         .session
-                        .selection
+                        .selection()
                         .instances
                         .contains(&inst.binding.instance_gid)
                 {
@@ -725,7 +719,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     let mut group_maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)> = Vec::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
     for s in tab.session.base_cache.shapes() {
-        if tab.session.selection.contains_shape(s)
+        if tab.session.selection().contains_shape(s)
             && s.symbol_instance.is_none()
             && s.is_in_editing_scope(&scope)
             && s.group_path.len() == depth + 1
@@ -748,7 +742,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     }
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
-    let selection = tab.session.selection.clone();
+    let selection = tab.session.selection().clone();
     write_cels(tab, &layer_ids, |lid, cel, held| {
         let lifted: Vec<Vec<u64>> = group_raw
             .iter()
@@ -795,15 +789,12 @@ pub(crate) fn prepare_arrange_selected(
     tab: &mut Tab,
     mode: ArrangeMode,
 ) -> bool {
-    if !commit_floating(tab) {
+    if tab.session.selection().is_empty() {
         return false;
     }
-    if tab.session.selection.is_empty() {
-        return false;
-    }
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     let scope = &scope;
-    let selection = &tab.session.selection;
+    let selection = tab.session.selection();
     let tl = tab.active_timeline();
     let mut layer_orders: Vec<(u64, Vec<u64>)> = Vec::new();
     for lid in editable_layer_ids(tab) {
@@ -871,15 +862,14 @@ pub(crate) fn prepare_arrange_selected(
 pub(crate) fn prepare_delete_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
-    cancel_active_drag(tab);
-    if tab.session.selection.is_empty() {
+    if tab.session.selection().is_empty() {
         return false;
     }
     let layer_ids = editable_layer_ids(tab);
     let any_valid = tab
         .scene()
         .iter()
-        .any(|s| layer_ids.contains(&s.layer_id) && tab.session.selection.contains_shape(s));
+        .any(|s| layer_ids.contains(&s.layer_id) && tab.session.selection().contains_shape(s));
     // 編集できるレイヤーに選んだものが無ければ何もしない（浮いた片も選択もそのまま。片はいつも文書か浮いた片のどちらかに
     // あり、黙って消えない）
     if !any_valid {
@@ -895,8 +885,8 @@ pub(crate) fn prepare_delete_selected_shapes(
             return false;
         }
     }
-    let selection = std::mem::take(&mut tab.session.selection);
-    let scope = tab.session.editing_group_path.clone();
+    let selection = tab.session.take_selection();
+    let scope = tab.session.editing_group_path().to_vec();
     write_cels(tab, &layer_ids, |_, cel, held| {
         Ok(cel.remove(&scope, &selection.shapes, &selection.instances, held)?)
     });
@@ -915,7 +905,7 @@ pub(crate) fn prepare_clear_active_frame_shapes(
 ) -> bool {
     let layer_ids = editable_layer_ids(tab);
     let has_any_in_scope = tab.scene().iter().any(|s| {
-        layer_ids.contains(&s.layer_id) && s.is_in_editing_scope(&tab.session.editing_group_path)
+        layer_ids.contains(&s.layer_id) && s.is_in_editing_scope(tab.session.editing_group_path())
     });
     if !has_any_in_scope {
         return false;
@@ -923,7 +913,7 @@ pub(crate) fn prepare_clear_active_frame_shapes(
     if !clear_selection(tab) {
         return false;
     }
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     write_cels(tab, &layer_ids, |_, cel, _| Ok(cel.clear(&scope)));
     true
 }

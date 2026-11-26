@@ -387,57 +387,65 @@ impl Action {
         };
         match self {
             // 絵を書く（持ち上げた絵を先に貼り戻す）
-            Self::PaintStroke { .. } | Self::EraseStroke { .. } | Self::PencilStroke { .. } | Self::InkBottle { .. } => {
-                step(CommitFirst)
+            Self::PaintStroke { .. } | Self::EraseStroke { .. } | Self::PencilStroke { .. } => {
+                step(CommitFirst).canvas()
             }
+            Self::InkBottle { .. } => step(CommitFirst),
             #[cfg(test)]
-            Self::CommitRawOutline { .. } | Self::DrawLines { .. } => step(CommitFirst),
+            Self::CommitRawOutline { .. } | Self::DrawLines { .. } => step(CommitFirst).canvas(),
             // 選んでいれば持ち上げた絵の色を変え、選んでいなければセル画を塗る（持ち上げた絵がある間は選択がある）
-            Self::BucketFill { .. } => step(Handles),
+            Self::BucketFill { .. } => step(Handles).canvas(),
             // 選ぶ・外す（持ち上げた絵の扱いは操作が決める。取り消しの1手にしない）
-            Self::SelectSingleAt { .. } | Self::Deselect | Self::ToggleSelectSubMode { .. } => none(CommitFirst),
-            Self::ToggleSelectionAt { .. } | Self::RetainSelection { .. } => none(Handles),
+            Self::SelectSingleAt { .. } | Self::Deselect | Self::ToggleSelectSubMode { .. } => {
+                none(CommitFirst).canvas()
+            }
+            Self::ToggleSelectionAt { .. } | Self::RetainSelection { .. } => none(Handles).canvas(),
             Self::SelectMarquee { additive, .. } | Self::SelectConnectedAt { add: additive, .. } => {
-                none(if *additive { Handles } else { CommitFirst })
+                none(if *additive { Handles } else { CommitFirst }).canvas()
             }
             #[cfg(test)]
-            Self::SelectAll | Self::CommitFloating => none(CommitFirst),
+            Self::SelectAll => none(CommitFirst).canvas(),
+            #[cfg(test)]
+            Self::CommitFloating => none(CommitFirst),
             // 選んだものを動かす・変形する（持ち上げた絵を動かす）
             Self::NudgeSelection { .. } => coalesce(Handles, CoalesceKey::NudgeSelection),
             #[cfg(test)]
             Self::MoveSelected { .. } | Self::ScaleSelection { .. } => step(Handles),
-            Self::FinishMoveSelectionDrag { .. }
-            | Self::FlipSelection { .. }
-            | Self::RotateSelection { .. }
-            | Self::CommitTransformDrag { .. } => step(Handles),
+            Self::FlipSelection { .. } | Self::RotateSelection { .. } => step(Handles),
+            Self::FinishMoveSelectionDrag { .. } | Self::CommitTransformDrag { .. } => step(Handles).finishing(),
             // 中心点（インスタンスの中心点を書く。持ち上げた絵は使わない）
-            Self::ResetTransformPivot | Self::CommitPivotDrag { .. } => step(Handles),
+            Self::ResetTransformPivot => step(Handles),
+            Self::CommitPivotDrag { .. } => step(Handles).finishing(),
             #[cfg(test)]
             Self::SetTransformPivot { .. } => step(Handles),
             // 選んだものを消す・まとめる・解く・重ね順（持ち上げた絵を自分で扱う。重ね順は貼り戻してから並べる）
-            Self::DeleteSelection | Self::Cut | Self::Group | Self::Ungroup | Self::ConvertToSymbol => step(Handles),
-            Self::Arrange { .. } | Self::ClearActiveFrame => step(CommitFirst),
+            Self::DeleteSelection | Self::Cut | Self::Group | Self::Ungroup => step(Handles),
+            Self::ConvertToSymbol => step(Handles).canvas(),
+            Self::Arrange { .. } => step(CommitFirst),
+            Self::ClearActiveFrame => step(CommitFirst).canvas(),
             Self::Copy => none(Handles),
-            Self::Paste { .. } | Self::PlaceSymbol { .. } => step(CommitFirst),
+            Self::Paste { .. } | Self::PlaceSymbol { .. } => step(CommitFirst).canvas(),
             // 輪郭の変形・アンカー（アンカーは、持ち上げた絵の上なら、その地図を編集する）
-            Self::ReshapeEdge { .. } | Self::MoveVertex { .. } => step(CommitFirst),
+            Self::ReshapeEdge { .. } | Self::MoveVertex { .. } => step(CommitFirst).finishing().canvas(),
             #[cfg(test)]
-            Self::PullEdgeFromTo { .. } | Self::MoveVertexFromTo { .. } => step(CommitFirst),
-            Self::AddAnchor { .. } | Self::DeleteAnchor { .. } => step(Handles),
-            // 見る場所を変える（グループ・シンボル・コマ・レイヤー）
-            Self::EnterGroupAt { .. }
-            | Self::ExitGroupSteps { .. }
-            | Self::EnterSymbolTimeline { .. }
-            | Self::EnterSymbolFromLibrary { .. }
-            | Self::SwitchLayerAndFrame { .. }
-            | Self::ScrubRulerToFrame { .. }
-            | Self::SelectTimelineCells { .. } => none(CommitFirst),
+            Self::PullEdgeFromTo { .. } | Self::MoveVertexFromTo { .. } => {
+                step(CommitFirst).finishing().canvas()
+            }
+            Self::AddAnchor { .. } | Self::DeleteAnchor { .. } => step(Handles).canvas(),
+            // 見る場所を変える（グループ・シンボル・コマ）。見る場所を変える入口（`Tab::move_view`・`Tab::set_active_frame`）
+            // が先に貼り戻す（入口は1つ：設計 claude/約束を入口で守る設計_5616fcc.md の 3.）
+            Self::EnterGroupAt { .. } | Self::ExitGroupSteps { .. } => none(Handles).canvas(),
+            Self::EnterSymbolTimeline { .. } | Self::EnterSymbolFromLibrary { .. } | Self::ScrubRulerToFrame { .. } => {
+                none(Handles)
+            }
+            Self::SwitchLayerAndFrame { .. } | Self::SelectTimelineCells { .. } => none(Handles).timeline(),
             #[cfg(test)]
-            Self::ExitSymbolTimeline | Self::ExitSymbolToDepth { .. } => none(CommitFirst),
+            Self::ExitSymbolTimeline | Self::ExitSymbolToDepth { .. } => none(Handles),
             Self::ClearTimelineCells => none(Untouched),
             // シンボル
             Self::RenameSymbol { sym_id, .. } => coalesce(Untouched, CoalesceKey::RenameSymbol(*sym_id)),
-            Self::DeleteSymbol { .. } | Self::DuplicateSymbol { .. } | Self::SwapSymbol { .. } => step(CommitFirst),
+            Self::DeleteSymbol { .. } => step(CommitFirst).canvas(),
+            Self::DuplicateSymbol { .. } | Self::SwapSymbol { .. } => step(CommitFirst),
             Self::SetSymbolPlayback { loop_mode, first_frame } => {
                 // コマ番号だけを続けて変える（同じ再生の仕方のまま）ときは1つにまとめる
                 let key = first_frame
@@ -451,16 +459,15 @@ impl Action {
                 symbol_key(CoalesceKey::SymbolColorEffect).map_or(UndoUse::Step, UndoUse::Coalesce),
             ),
             // タイムライン・トゥイーン・音・レイヤー（タイムラインの書き換えは、持ち上げた絵を先に貼り戻す）
-            Self::ToggleTween
-            | Self::SetTweenRotate { .. }
-            | Self::ImportSound { .. }
+            Self::ToggleTween | Self::SetTweenRotate { .. } | Self::InsertKeyframe { .. } | Self::MoveOrCopyFrames { .. } => {
+                step(CommitFirst).timeline()
+            }
+            Self::ImportSound { .. }
             | Self::SetKeyframeSound { .. }
             | Self::TrimSound { .. }
-            | Self::InsertKeyframe { .. }
             | Self::DeleteKeyframe
             | Self::ExtendFrame
             | Self::RemoveFrame
-            | Self::MoveOrCopyFrames { .. }
             | Self::AddLayer
             | Self::DeleteActiveLayer
             | Self::ReorderLayer { .. }
@@ -513,6 +520,21 @@ pub(crate) struct Policy {
     pub(crate) keeps_playback: bool,
     /// 進行中のキャンバスのドラッグを解かない（ドラッグを終える操作は、呼ぶ側がドラッグを外してから送るので、解いても同じ）
     pub(crate) keeps_drag: bool,
+    /// キャンバスのドラッグを終える操作か（入口が先に、ドラッグ中の仮表示を外して浮いた片の見た目に戻す）
+    pub(crate) finishes_drag: bool,
+    /// 操作ができたあと、右のパネルに何を出すか（`View::inspect_timeline_frame`。決める所はここだけ）
+    pub(crate) panel: PanelFocus,
+}
+
+/// 操作のあと、右のパネルに出すもの（`Policy::panel`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PanelFocus {
+    /// 変えない
+    Keep,
+    /// キャンバスで選んだもの（キャンバスで選ぶ・描く操作）
+    Canvas,
+    /// タイムラインで選んだコマ（コマを選ぶ・トゥイーン・キーフレームを入れる・コマを動かす操作）
+    Timeline,
 }
 
 impl Policy {
@@ -522,6 +544,32 @@ impl Policy {
             undo,
             keeps_playback: false,
             keeps_drag: false,
+            finishes_drag: false,
+            panel: PanelFocus::Keep,
+        }
+    }
+
+    /// 操作ができたあと、右のパネルにキャンバスで選んだものを出す行
+    const fn canvas(self) -> Self {
+        Self {
+            panel: PanelFocus::Canvas,
+            ..self
+        }
+    }
+
+    /// 操作ができたあと、右のパネルにタイムラインで選んだコマを出す行
+    const fn timeline(self) -> Self {
+        Self {
+            panel: PanelFocus::Timeline,
+            ..self
+        }
+    }
+
+    /// キャンバスのドラッグを終える操作の行
+    const fn finishing(self) -> Self {
+        Self {
+            finishes_drag: true,
+            ..self
         }
     }
 }
@@ -617,9 +665,9 @@ fn undo_snapshot(tab: &Tab) -> UndoEntry {
         // 音のライブラリも文書と共有する
         sounds: sounds.clone(),
         floating,
-        selection: tab.session.selection.clone(),
-        edit_path: tab.session.edit_path.clone(),
-        editing_group_path: tab.session.editing_group_path.clone(),
+        selection: tab.session.selection().clone(),
+        edit_path: tab.session.edit_path().clone(),
+        editing_group_path: tab.session.editing_group_path().to_vec(),
         stage_size: *stage_size,
         fps: *fps,
         symbols_revision: *revision,
@@ -711,10 +759,7 @@ fn mutate_timeline_with_undo(
     let changed = !tab.active_timeline().same_content(&before_tl)
         || !std::sync::Arc::ptr_eq(&tab.doc.sounds, &before_sounds);
     let moved = at(tab.active_timeline()) != at(&before_tl);
-    if changed || moved {
-        reset_session_after_timeline_change(tab);
-    }
-    changed || moved
+    (changed || moved) && reset_session_after_timeline_change(tab)
 }
 
 // ============================================================================
@@ -744,6 +789,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         // ない。文書を変えた所は、後始末（`finish_cel_writes`・`with_active_timeline_mut` など）でその場で作り直す）
         host.tab_mut().refresh_scene_base();
     }
+    if policy.finishes_drag {
+        host.tab_mut().session.clear_overlay();
+    }
     let before = undo_snapshot(host.tab());
     host.tab_mut().history.before = Some(before);
     let prev_library = host.tab().doc.library.clone();
@@ -751,8 +799,11 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     let prev_imported_map =
         matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
     // 操作の途中で止まったら（panic）、その操作を無かったことにする（`restore_after_panic`）
+    // 入口が先に貼り戻したか（操作が断った・何もしなかったときは、この貼り戻しも戻す）
+    let commits_first =
+        policy.floating == FloatingUse::CommitFirst && host.tab().session.floating().is_some();
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if policy.floating == FloatingUse::CommitFirst && !commit_floating(host.tab_mut()) {
+        if commits_first && !commit_floating(host.tab_mut()) {
             return (false, false);
         }
         let mark = ContentMark::of(host.tab());
@@ -771,10 +822,13 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     // 地図にできない形を作る編集は、ふつう文書を変える前に断ってあり、そのときは戻しても同じ）。前は、断る所が先に書いた
     // ものを各操作が自分で戻す約束だったので、グループの変形・削除で、断られた所だけが黙って残った（レビュー de92ceb の
     // N-4001・設計審査 de92ceb の D-5）
-    if let Some(refusal) = tab.session.refusal.take() {
-        if !res {
-            restore_state_before_action(tab);
-        }
+    // 入口が先に貼り戻したのに操作が何もしなかったときも、貼り戻す前に戻す（前は操作が条件を確かめてから貼り戻したので、
+    // 何もしない操作は持ち上げた絵をそのままにした）
+    let refusal = tab.session.refusal.take();
+    if !res && (refusal.is_some() || commits_first) {
+        restore_state_before_action(tab);
+    }
+    if let Some(refusal) = refusal {
         show_notice(toast, NoticeKind::Warning, refusal.message());
     }
     // シンボルの入れ子の深さは、ライブラリが変わったときだけ確かめる（深さはライブラリの中だけで決まる）
@@ -785,6 +839,18 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         res = false;
     }
     let before = tab.history.before.take();
+    // 選ぶ・外す操作（取り消しの1手にしない操作）で選択が変わったら、続けた編集のまとめを区切る（区切る所はここだけ。前は
+    // 選ぶ道ごとに区切り、選び足す道のいくつかが区切らなかったので、まれに1回の取り消しで2つの操作が戻った：約束の棚卸し
+    // 5616fcc の A の P-15）
+    if policy.undo == UndoUse::None && before.as_ref().is_some_and(|b| &b.selection != tab.session.selection()) {
+        tab.history.end_coalesce();
+    }
+    match policy.panel {
+        PanelFocus::Keep => {}
+        PanelFocus::Canvas if res => tab.view.inspect_timeline_frame = false,
+        PanelFocus::Timeline if res => tab.view.inspect_timeline_frame = true,
+        PanelFocus::Canvas | PanelFocus::Timeline => {}
+    }
     if res && changed {
         tab.history.content_gen += 1;
         let push = match policy.undo {
@@ -803,6 +869,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
             clipboard.imported_map = map;
         }
     }
+    // ドラッグを始めるときに作った答えは、ドラッグの直後の操作（離す）の1回だけ使う（捨てる所は、ここと、ドラッグをやめる
+    // `Session::rollback_shape_drag` だけ）
+    tab.session.drop_ahead_done();
     res
 }
 
@@ -885,7 +954,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::SelectMarquee { p0, p1, additive } => {
             apply_marquee_selection(tab, p0, p1, additive);
-            !tab.session.selection.is_empty()
+            !tab.session.selection().is_empty()
         }
         #[cfg(test)]
         Action::SelectAll => {
@@ -895,7 +964,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             let editable_lids: std::collections::HashSet<u64> =
                 editable_layer_ids(tab).into_iter().collect();
             tab.session.select_shapes_in_layers(&editable_lids);
-            !tab.session.selection.is_empty()
+            !tab.session.selection().is_empty()
         }
         Action::Deselect => clear_selection(tab),
         #[cfg(test)]
@@ -907,9 +976,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             total_delta,
             alt_duplicate,
         } => {
-            let done = apply_finish_move_selection_drag(tab, total_delta, alt_duplicate);
-            tab.session.drop_ahead_done();
-            done
+            apply_finish_move_selection_drag(tab, total_delta, alt_duplicate)
         }
         Action::DeleteSelection => prepare_delete_selected_shapes(tab),
         Action::ClearActiveFrame => {
@@ -1004,9 +1071,8 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             had_custom_pivot,
             changed,
         } => {
-            tab.session.clear_overlay();
             tab.session.transform_pivot = had_custom_pivot.then_some(orig_pivot);
-            let done = if changed && !tab.session.selection.is_empty() {
+            let done = if changed && !tab.session.selection().is_empty() {
                 let applied = apply_affine_to_selected_inner(tab, affine);
                 if applied && had_custom_pivot && tab.session.transform_pivot.is_some() {
                     tab.session.transform_pivot = Some(affine * orig_pivot);
@@ -1015,7 +1081,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             } else {
                 false
             };
-            tab.session.drop_ahead_done();
             done
         }
         Action::CommitPivotDrag {
@@ -1024,7 +1089,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             had_custom_pivot,
             changed,
         } => {
-            tab.session.clear_overlay();
             if changed {
                 if apply_set_selected_symbol_world_pivot(tab, Some(new_pivot)) {
                     tab.session.transform_pivot = None;
@@ -1058,7 +1122,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                 tab.refresh_scene_base();
                 tab.session.set_floating(None);
                 tab.session.transform_pivot = None;
-                tab.view.inspect_timeline_frame = false;
                 true
             } else {
                 false
@@ -1079,7 +1142,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         #[cfg(test)]
         Action::ExitSymbolToDepth { depth } => {
             let mut exited = false;
-            while tab.session.edit_path.len() > depth {
+            while tab.session.edit_path().len() > depth {
                 if !exit_symbol_timeline(tab) {
                     break;
                 }
@@ -1106,16 +1169,11 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::SetTweenRotate { rotate } => apply_set_tween_rotate(tab, rotate),
 
         Action::SwitchLayerAndFrame { layer_idx, frame } => {
-            apply_switch_to_layer_and_frame(tab, layer_idx, frame);
-            true
+            apply_switch_to_layer_and_frame(tab, layer_idx, frame)
         }
-        Action::ScrubRulerToFrame { frame } => {
-            apply_scrub_ruler_to_frame(tab, frame);
-            true
-        }
+        Action::ScrubRulerToFrame { frame } => apply_scrub_ruler_to_frame(tab, frame),
         Action::SelectTimelineCells { l0, f0, l1, f1 } => {
-            apply_select_timeline_cells(tab, l0, f0, l1, f1);
-            true
+            apply_select_timeline_cells(tab, l0, f0, l1, f1)
         }
         Action::ClearTimelineCells => {
             tab.set_active_cell_selection(None);
@@ -1215,7 +1273,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     let brush_color = shapes.first().map_or(Color32::BLACK, |s| s.color);
     let stroke_shapes: Vec<FillShape> = shapes
         .into_iter()
-        .map(|s| s.with_scope(target_lid, &tab.session.editing_group_path))
+        .map(|s| s.with_scope(target_lid, tab.session.editing_group_path()))
         .collect();
     if stroke_shapes.is_empty() {
         return false;
@@ -1225,7 +1283,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     if !is_brush
         && !tab.scene().iter().any(|s| {
             s.layer_id == target_lid
-                && s.is_raw_at_scope(&tab.session.editing_group_path)
+                && s.is_raw_at_scope(tab.session.editing_group_path())
                 && stroke_shapes
                     .iter()
                     .any(|er| rects_overlap(s.bounding_box(), er.bounding_box()))
@@ -1240,7 +1298,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     // apply が Undo の控えを捨てる
     let rule = MapRule::Paint(is_brush.then_some(brush_color));
     // 地図は文書の座標なので、線の形も文書の座標へ写す。格子に置けない所（±65,536px の外）の線は描かない
-    let world = tab.session.edit_path.world_xform();
+    let world = tab.session.edit_path().world_xform();
     let strokes: Vec<FillShape> = stroke_shapes
         .iter()
         .map(|s| s.to_doc(world).into_owned())
@@ -1284,7 +1342,7 @@ pub(crate) fn write_local(
 
 /// 今のレイヤー `layer_id` の、編集中の階層（道具が書く所。`write_local` に渡す1つの書く所）
 fn editing_target(tab: &Tab, layer_id: LayerId) -> [(LayerId, Vec<u64>); 1] {
-    [(layer_id, tab.session.editing_group_path.clone())]
+    [(layer_id, tab.session.editing_group_path().to_vec())]
 }
 
 /// 点で見えている、いちばん上のもの（`topmost_visible_at`）
@@ -1333,19 +1391,19 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
     }
 
     // 0. 選択領域が存在する場合：選択中の「生シェイプ」のみにバケツで色を流し込む（グループは無効）
-    if !tab.session.selection.is_empty() {
+    if !tab.session.selection().is_empty() {
         let tl = tab.active_timeline();
         let clicked_selected_raw = tab.scene().iter().any(|s| {
-            tab.session.selection.contains_shape(s)
+            tab.session.selection().contains_shape(s)
                 && tl.is_layer_editable_by_id(s.layer_id)
-                && s.is_raw_at_scope(&tab.session.editing_group_path)
+                && s.is_raw_at_scope(tab.session.editing_group_path())
                 && s.contains_point(pt)
         });
         if clicked_selected_raw {
             let any_color_diff = tab.scene().iter().any(|s| {
-                tab.session.selection.contains_shape(s)
+                tab.session.selection().contains_shape(s)
                     && tl.is_layer_editable_by_id(s.layer_id)
-                    && s.is_raw_at_scope(&tab.session.editing_group_path)
+                    && s.is_raw_at_scope(tab.session.editing_group_path())
                     && s.color != fill_color
             });
             if !any_color_diff {
@@ -1356,7 +1414,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
                 return false;
             }
-            let ids = tab.session.selection.shapes.clone();
+            let ids = tab.session.selection().shapes.clone();
             let mut recolored = Ok(false);
             tab.session.update_floating(|fl_opt| {
                 if let Some(fl) = fl_opt {
@@ -1385,7 +1443,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             return false;
         };
         s.layer_id == target_lid
-            && s.is_in_editing_scope(&tab.session.editing_group_path)
+            && s.is_in_editing_scope(tab.session.editing_group_path())
             && s.contains_point(pt)
     }) {
         let occluded_above = topmost_visible_at(tab, pt).is_some_and(|h| h.layer > target_layer_ord);
@@ -1394,7 +1452,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
             return false;
         };
         // 前面のレイヤーに覆われている所・グループやシンボルの上は塗らない
-        if occluded_above || !hit_shape.is_raw_at_scope(&tab.session.editing_group_path) {
+        if occluded_above || !hit_shape.is_raw_at_scope(tab.session.editing_group_path()) {
             return false;
         }
         focus_active_layer_to_shape_by_id(tab, hit_shape.shape_id);
@@ -1409,7 +1467,7 @@ fn fill_face_at(tab: &mut Tab, target_lid: u64, fill_color: Color32, pt: Point) 
     // 塗っても絵が変わらないとき（同じ色・囲まれていない所）と、格子に置けない所（±65,536px の外）では、write_local
     // が false を返し、apply が Undo の控えを捨てる
     // 地図は文書の座標なので、点も文書の座標へ写す
-    let doc_pt = tab.session.edit_path.world_xform().inverse() * pt;
+    let doc_pt = tab.session.edit_path().world_xform().inverse() * pt;
     let at = editing_target(tab, target_lid);
     write_local(tab, &at, |base, scope| {
         base.fill_local(doc_pt, fill_color, scope)
@@ -1427,7 +1485,7 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
         return false;
     }
     // 地図は文書の座標なので、線も文書の座標へ写す
-    let to_doc = tab.session.edit_path.world_xform().inverse();
+    let to_doc = tab.session.edit_path().world_xform().inverse();
     let segs: Vec<crate::planar_map::LineSeg> = segs
         .into_iter()
         .map(|(q, stroke)| (to_doc * q, stroke))
@@ -1454,7 +1512,7 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
         return false;
     }
     // 線が替わらないときは、write_local が false を返し、apply が Undo の控えを捨てる
-    let to_stage = tab.session.edit_path.world_xform();
+    let to_stage = tab.session.edit_path().world_xform();
     let doc_pt = to_stage.inverse() * pt;
     // 辺に合う距離は、選択ツールと同じ画面の px（文書の座標の長さにする）
     let px = 1.0 / (tab.view.zoom() as f64 * crate::vector_engine::max_scale(to_stage));
@@ -1466,21 +1524,21 @@ fn apply_ink_bottle(tab: &mut Tab, stroke: crate::planar_map::EdgeStroke, pt: Po
 }
 
 fn has_editable_selection(tab: &Tab) -> bool {
-    if tab.session.selection.is_empty() {
+    if tab.session.selection().is_empty() {
         return false;
     }
     let editable_lids = editable_layer_ids(tab);
     tab.scene().iter().any(|s| {
-        tab.session.selection.contains_shape(s)
+        tab.session.selection().contains_shape(s)
             && editable_lids.contains(&s.layer_id)
-            && s.is_in_editing_scope(&tab.session.editing_group_path)
+            && s.is_in_editing_scope(tab.session.editing_group_path())
     })
 }
 
 /// 選んでいるものに、ステージの座標の変換 `affine` をかける。`pivot_to_instance`：置けると決めたあと、変形の基準点
 /// （`transform_pivot`）を選んだインスタンスの中心点に書く（拡大・回転・反転の確定。移動は基準点も一緒に動くので書かない）
 fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: bool) -> bool {
-    if tab.session.selection.is_empty() {
+    if tab.session.selection().is_empty() {
         return false;
     }
     // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、まだ持ち上げていない選んだ生の図形と、選んだグループの中の
@@ -1503,8 +1561,8 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
         return false;
     }
     let mut any_transformed = false;
-    let selection = tab.session.selection.clone();
-    let world = tab.session.edit_path.world_xform();
+    let selection = tab.session.selection().clone();
+    let world = tab.session.edit_path().world_xform();
     let doc = world.inverse() * affine * world;
     let hidden = tab.session.floating_view().hidden().clone();
     let has_pieces = !tab.session.floating_view().pieces().is_empty();
@@ -1558,7 +1616,7 @@ fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
     let Some(content) = tab.session.take_ahead_content().or_else(|| selected_content(tab)) else {
         return false;
     };
-    let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
+    let xform = content_xform(content.world, tab.session.edit_path().world_xform(), offset);
     let Some(placement) = prepare_placement(tab, &content, xform, true, None) else {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
@@ -1566,7 +1624,7 @@ fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
     if !commit_floating(tab) {
         return false;
     }
-    tab.session.selection.clear();
+    tab.session.replace_selection(crate::canvas_tool::Selection::default());
     put_placements(tab, vec![placement], |sym| sym);
     true
 }
@@ -1576,7 +1634,6 @@ fn apply_finish_move_selection_drag(
     total_delta: KVec2,
     alt_duplicate: bool,
 ) -> bool {
-    tab.session.clear_overlay();
     if !tab.view.moves_on_screen(total_delta.hypot()) || !has_editable_selection(tab) {
         if let Some(piv) = &mut tab.session.transform_pivot {
             *piv -= total_delta;
@@ -1590,7 +1647,6 @@ fn apply_finish_move_selection_drag(
 }
 
 fn apply_move_selected(tab: &mut Tab, delta: KVec2) -> bool {
-    cancel_active_drag(tab);
     if delta == KVec2::ZERO || !has_editable_selection(tab) {
         return false;
     }
@@ -1609,8 +1665,7 @@ fn apply_map_reshape(
     (from, to): (Point, Point),
     edit: ReshapeEdit,
 ) -> bool {
-    tab.session.clear_overlay();
-    let xform = tab.session.edit_path.world_xform();
+    let xform = tab.session.edit_path().world_xform();
     if !tab
         .view
         .moves_on_screen((xform * to - xform * from).hypot())
@@ -1666,7 +1721,7 @@ fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
         return false;
     };
     let grab_t = crate::planar_map::grab_t(t);
-    let target = tab.session.edit_path.world_xform().inverse() * to;
+    let target = tab.session.edit_path().world_xform().inverse() * to;
     let follow = crate::tool_select::drag_follows(tab);
     apply_map_reshape(
         tab,
@@ -1700,7 +1755,7 @@ fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
     else {
         return false;
     };
-    let target = tab.session.edit_path.world_xform().inverse() * to;
+    let target = tab.session.edit_path().world_xform().inverse() * to;
     let follow = crate::tool_select::drag_follows(tab);
     apply_map_reshape(
         tab,
@@ -1741,7 +1796,7 @@ fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
         return edit_floating_anchor(tab, layer_id, group, edit);
     }
     // ほかはレイヤーの地図で編集する（境目なら両側の図形が変わる）。選択・浮いている図形があれば、先に確定して探し直す
-    if !tab.session.selection.is_empty() || tab.session.floating().is_some() {
+    if !tab.session.selection().is_empty() || tab.session.floating().is_some() {
         if !clear_selection(tab) {
             return false;
         }
@@ -1771,7 +1826,7 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: An
 fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> bool {
     let Some(binding) = tab
         .scene()
-        .selected_single_symbol_binding(&tab.session.selection)
+        .selected_single_symbol_binding(tab.session.selection())
     else {
         return false;
     };
@@ -1799,7 +1854,6 @@ fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Poin
 }
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
-    cancel_active_drag(tab);
     if affine == Affine::IDENTITY || !has_editable_selection(tab) {
         return false;
     }
@@ -1854,7 +1908,7 @@ fn apply_paste_clipboard(
     // 貼り付けるのは絵なので、いくつかのレイヤーから写した中身も、作業中のレイヤーへまとめて置く（下のレイヤーの絵から
     // 順に重ねるので、重なる所は上のレイヤーの絵が残る）。置く準備（格子の外へ出るなら、文書を変えずに断る）をしてから、
     // 選択を確定し、シンボルを移植して置く
-    let xform = content_xform(content.world, tab.session.edit_path.world_xform(), offset);
+    let xform = content_xform(content.world, tab.session.edit_path().world_xform(), offset);
     let Some(placement) = prepare_placement(tab, &content, xform, false, None) else {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
@@ -1888,7 +1942,7 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     // 消すシンボルの段から出る。出られなければ（浮いた片の確定が断られた）、文書を変えずに断る
     while tab
         .session
-        .edit_path
+        .edit_path()
         .levels
         .iter()
         .any(|lvl| lvl.symbol_id == sym_id)
@@ -1907,8 +1961,7 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     }
 
     tab.refresh_scene_base();
-    reset_session_after_timeline_change(tab);
-    true
+    reset_session_after_timeline_change(tab)
 }
 
 /// ライブラリのシンボル `sym_id` を複製して、すぐ下に入れて選ぶ（Adobe Animate の「複製」と同じ）。名前は「（元の名前）の
@@ -1916,7 +1969,7 @@ fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
 /// 振り直す（別のタブから移すときと同じ `remap_timeline_ids`）。中の子のシンボルは写さず元と同じものを使い、置いてある
 /// インスタンスは元のシンボルのまま。浮いた片は先に確定する（見えている片も写すため。そのシンボルの中で編集していたとき）
 fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
-    if tab.doc.find_symbol(sym_id).is_none() || !commit_floating(tab) {
+    if tab.doc.find_symbol(sym_id).is_none() {
         return false;
     }
     let Some(i) = tab.doc.library.iter().position(|s| s.id == sym_id) else {
@@ -1947,9 +2000,6 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
 fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -> bool {
     let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
-        return false;
-    }
-    if !commit_floating(tab) {
         return false;
     }
 
@@ -1984,7 +2034,6 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
 
     if changed {
         select_shapes_for_timeline_selection(tab);
-        tab.view.inspect_timeline_frame = true;
     }
     changed
 }
@@ -2013,7 +2062,6 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
     });
     if changed {
         select_shapes_for_timeline_selection(tab);
-        tab.view.inspect_timeline_frame = true;
     }
     changed
 }
@@ -2045,15 +2093,8 @@ fn update_selected_symbol_binding(
         return false;
     }
 
-    if !commit_floating(tab) {
-        return false;
-    }
-
-    let updated = update_instances(tab, &layer_ids, |gid| gid == inst_gid, &update);
-    if updated {
-        reset_session_after_timeline_change(tab);
-    }
-    updated
+    update_instances(tab, &layer_ids, |gid| gid == inst_gid, &update)
+        && reset_session_after_timeline_change(tab)
 }
 
 fn apply_set_symbol_playback(
@@ -2077,7 +2118,7 @@ fn apply_set_symbol_playback(
 /// フレーム移動（`prev_frame` -> `next_frame`）時に、同じキーフレームのスパン内に留まるレイヤー上の選択のみを残し、
 /// 別のキーフレームへ跨いだレイヤー上の選択を解除する
 fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_frame: usize) {
-    if prev_frame == next_frame || tab.session.selection.is_empty() {
+    if prev_frame == next_frame || tab.session.selection().is_empty() {
         return;
     }
     let same_kf_layer_ids: HashSet<u64> = tab
@@ -2094,41 +2135,41 @@ fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_fram
     tab.session.retain_selection_in_layers(&same_kf_layer_ids);
 }
 
-fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: usize) {
+/// レイヤー `layer_idx`・コマ `frame_idx` に移る（コマを変える入口 `Tab::set_active_frame` が先に持ち上げた絵を貼り戻す）。
+/// `false`：貼り戻しを断られた（移らない）
+fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: usize) -> bool {
     if tab.active_timeline().layers.is_empty() {
-        return;
+        return true;
     }
     let prev_frame = tab.active_timeline().current_frame;
-    if !commit_floating(tab) {
-        return;
+    if !tab.set_active_frame(frame_idx) {
+        return false;
     }
     let clamped_layer = layer_idx.min(tab.active_timeline().layers.len().saturating_sub(1));
     tab.set_active_layer(clamped_layer);
-    tab.set_active_frame(frame_idx);
     tab.set_active_cell_selection(Some(TimelineCellSelection::single(
         clamped_layer,
         frame_idx,
     )));
     let next_frame = tab.active_timeline().current_frame;
     retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
-    reset_session_after_timeline_change(tab);
-    tab.view.inspect_timeline_frame = true;
+    reset_session_after_timeline_change(tab)
 }
 
-fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) {
+/// コマ `frame_idx` へ移る（コマを変える入口が先に持ち上げた絵を貼り戻す）。`false`：貼り戻しを断られた（移らない）
+fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) -> bool {
     let tl = tab.active_timeline();
     let clamped_frame = frame_idx.min(tl.total_frames.saturating_sub(1));
     if tl.current_frame == clamped_frame && tl.cell_selection.is_none() {
-        return;
+        return true;
     }
     let prev_frame = tl.current_frame;
-    if !commit_floating(tab) {
-        return;
+    if !tab.set_active_frame(clamped_frame) {
+        return false;
     }
-    tab.set_active_frame(clamped_frame);
     tab.set_active_cell_selection(None);
     retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
-    reset_session_after_timeline_change(tab);
+    reset_session_after_timeline_change(tab)
 }
 
 fn apply_select_timeline_cells(
@@ -2137,18 +2178,21 @@ fn apply_select_timeline_cells(
     start_frame: usize,
     end_layer: usize,
     end_frame: usize,
-) {
+) -> bool {
     let num_layers = tab.active_timeline().layers.len();
     if num_layers == 0 {
-        return;
+        return true;
     }
     let max_l = num_layers - 1;
     let (l0, l1) = (start_layer.min(max_l), end_layer.min(max_l));
     let (f0, f1) = (start_frame, end_frame);
 
-    apply_switch_to_layer_and_frame(tab, l1, f1);
+    if !apply_switch_to_layer_and_frame(tab, l1, f1) {
+        return false;
+    }
     tab.set_active_cell_selection(Some(TimelineCellSelection::from_corners(l0, f0, l1, f1)));
     select_shapes_for_timeline_selection(tab);
+    true
 }
 
 fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
@@ -2168,9 +2212,6 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
 fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
-        return false;
-    }
-    if !commit_floating(tab) {
         return false;
     }
     if !tab
@@ -2193,9 +2234,6 @@ fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
 fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
-        return false;
-    }
-    if !commit_floating(tab) {
         return false;
     }
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
@@ -2335,7 +2373,7 @@ pub(crate) fn group_selected_shapes(host: &mut impl ActionHost) -> Option<u64> {
         .selected_indices()
         .first()
         .and_then(|&idx| tab.scene().get(idx))
-        .and_then(|s| s.active_group_id_at_scope(&tab.session.editing_group_path))
+        .and_then(|s| s.active_group_id_at_scope(tab.session.editing_group_path()))
 }
 
 #[cfg(test)]

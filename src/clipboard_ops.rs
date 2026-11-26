@@ -4,7 +4,7 @@ use std::sync::Arc;
 use kurbo::{Affine, Point, Vec2 as KVec2};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, cancel_active_drag, finish_cel_writes, write_cel, Clipboard,
+    active_scope_layer_id, finish_cel_writes, write_cel, Clipboard,
     MoveSelectionDrag, Tab,
 };
 use crate::planar_map::CheckedMap;
@@ -48,10 +48,10 @@ impl Content {
 /// 浮いた片を地図にできない
 pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
     let session = &tab.session;
-    if session.selection.is_empty() {
+    if session.selection().is_empty() {
         return None;
     }
-    let scope = &session.editing_group_path;
+    let scope = session.editing_group_path();
     let tl = tab.active_timeline();
     let mut layers = Vec::new();
     for &layer_id in session.base_cache.layer_order_ids() {
@@ -62,7 +62,7 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
             .floating()
             .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == layer_id));
         let raw = match float {
-            Some(l) => Some(l.selected_map(session.stage(), &session.selection.shapes)?),
+            Some(l) => Some(l.selected_map(session.stage(), &session.selection().shapes)?),
             None => None,
         };
         let tween = tl
@@ -70,8 +70,8 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
             .and_then(|i| tl.layers[i].interpolated_tween_binding_at(tl.current_frame));
         let picked = cel.picked(
             scope,
-            &session.selection.shapes,
-            &session.selection.instances,
+            &session.selection().shapes,
+            &session.selection().instances,
             raw,
             tween,
         );
@@ -81,7 +81,7 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
     }
     (!layers.is_empty()).then(|| Content {
         layers,
-        world: session.edit_path.world_xform(),
+        world: session.edit_path().world_xform(),
     })
 }
 
@@ -182,7 +182,7 @@ pub(crate) fn prepare_placement(
 /// シンボルの番号は `sym` で付け替える）、セル画に入れる（`Cel::insert_content`）。生の図形の地図は、浮いた片の組にする。
 /// 置いたものを選択に足す（呼ぶ側は、要るなら先に選択を外す）
 pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: impl Fn(u64) -> u64) {
-    let scope = tab.session.editing_group_path.clone();
+    let scope = tab.session.editing_group_path().to_vec();
     let mut written: Vec<LayerId> = Vec::new();
     let mut floats = Vec::new();
     for p in placements {
@@ -201,10 +201,10 @@ pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: imp
                     if !written.contains(&l.layer_id) {
                         written.push(l.layer_id);
                     }
-                    let sel = &mut tab.session.selection;
-                    sel.shapes.extend(nested.shape_ids());
-                    sel.instances
-                        .extend(nested.instances.iter().map(|i| i.binding.instance_gid));
+                    tab.session.add_to_selection(
+                        nested.shape_ids(),
+                        nested.instances.iter().map(|i| i.binding.instance_gid),
+                    );
                 }
             }
             floats.extend(l.pieces.into_iter().map(|m| (l.layer_id, m, p.xform)));
@@ -228,7 +228,7 @@ pub(crate) fn begin_move_selection_drag(
         let content = selected_content(tab);
         let copy = content
             .as_ref()
-            .map(|c| copied_raw_shapes(c, &tab.session.editing_group_path))
+            .map(|c| copied_raw_shapes(c, tab.session.editing_group_path()))
             .unwrap_or_default();
         (content, copy)
     } else {
@@ -402,7 +402,7 @@ pub(crate) fn can_paste_clipboard_symbol(
         Clip(u64),
         Doc(u64),
     }
-    let levels = &tab.session.edit_path.levels;
+    let levels = &tab.session.edit_path().levels;
     if levels.is_empty() {
         return true;
     }
@@ -582,7 +582,6 @@ pub(crate) fn import_clipboard_symbols(
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
 pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipboard) -> bool {
-    cancel_active_drag(tab);
     let Some(content) = selected_content(tab) else {
         return false;
     };
