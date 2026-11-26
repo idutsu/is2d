@@ -179,7 +179,7 @@ fn hodo_spread(v: &[KVec2]) -> f64 {
 pub(crate) struct CenterlineBuilder {
     /// 箱の半分の幅（文書の座標）
     half: f64,
-    /// 受け取った点（前の点と同じ点は除く）と、その弦の長さの媒介変数
+    /// 受け取った点（前の点の丸めの範囲に入る点は除く：`push`）と、その弦の長さの媒介変数
     pts: Vec<Point>,
     s: Vec<f64>,
     /// 確定した節の値と2階微分（点 0..確定した数）
@@ -217,10 +217,21 @@ impl CenterlineBuilder {
         self.fixed().saturating_sub(2)
     }
 
-    /// 点を足す（有限でない点と、前の点と同じ点は足さない）。確定した所が増えたら、増える前の確定した節の数を返す
+    /// 点を足す（有限でない点と、前の点の丸めの範囲（縦横 ±h の箱）に入る点は足さない）。確定した所が増えたら、増える前の
+    /// 確定した節の数を返す。
+    ///
+    /// 本当のペンの位置は、各点のまわりの箱のどこかにある（GEOMETRY 2.1）ので、前の点の箱に入る点は、前の点と見分けられない。
+    /// 足さないので、節の間隔はいつも h 以上（解き方の前提：節の間隔が箱の幅と同じ桁）。前は、ビットまで同じ点だけを捨てた
+    /// ので、ペンをほぼ止めたときの、ほとんど動かない点（0.0001 画素以下）が節になり、ほぼ 0 の節の間隔で解き方が悪条件になって、
+    /// 中心線が描いた所から大きく振れた（とげ）。点がさらに近いと、1本の確定が数十秒かかった（レビュー de92ceb の N-2001）
     pub(crate) fn push(&mut self, p: Point) -> Option<usize> {
-        if !p.x.is_finite() || !p.y.is_finite() || self.pts.last() == Some(&p) {
+        if !p.x.is_finite() || !p.y.is_finite() {
             return None;
+        }
+        if let Some(&l) = self.pts.last() {
+            if (p.x - l.x).abs().max((p.y - l.y).abs()) < self.half {
+                return None;
+            }
         }
         let s = match (self.pts.last(), self.s.last()) {
             (Some(&l), Some(&sl)) => sl + (p - l).hypot(),
@@ -303,7 +314,8 @@ pub(crate) fn centerline(points: &[Point], step: f64) -> Centerline {
 fn box_spline(s: &[f64], v: &[f64], hw: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = v.len();
     let m = n - 2;
-    let h: Vec<f64> = (0..n - 1).map(|j| (s[j + 1] - s[j]).max(1e-12)).collect();
+    // 節の間隔は h 以上（`CenterlineBuilder::push` が、前の点の丸めの範囲に入る点を足さない）
+    let h: Vec<f64> = (0..n - 1).map(|j| s[j + 1] - s[j]).collect();
     // Q の列 i（中の節 i+1）の3つの値（行 i, i+1, i+2）
     let qc: Vec<[f64; 3]> = (0..m)
         .map(|i| {

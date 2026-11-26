@@ -25193,6 +25193,56 @@ fn dragging_after_mixed_selections_matches_the_drop() {
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
 }
 
+/// ペンをほぼ止めて、前の点からほとんど動かない点（0.0001 画素以下のずれ）が続けて来ても、ブラシの形が描いた所から
+/// はみ出さない（中心線の入口 `CenterlineBuilder::push` は、前の点の丸めの範囲（縦横 ±h の箱）に入る点を、新しい節に
+/// しない。前は、ビットまで同じ点だけを捨てたので、ほぼ 0 の節の間隔が中心線に入り、解き方が悪条件になって、描いた所から
+/// 数十〜数百 px 離れた所までとげができ、ほかの色の絵を削った：レビュー de92ceb の N-2001）
+#[test]
+fn nearly_repeated_pen_points_make_no_spikes() {
+    use crate::vector_stroke::stroke_shapes;
+    let mut rng = fastrand::Rng::with_seed(0x5eed_2001);
+    // 手描き風の線：ゆっくり（刻みより細かい点）と速い所を混ぜ、点は f32 に丸める（実際の入力の点と同じ）
+    let stroke = |rng: &mut fastrand::Rng| -> Vec<Point> {
+        let mut p = Point::new(300.0 + rng.f64() * 200.0, 300.0 + rng.f64() * 200.0);
+        let mut ang = rng.f64() * std::f64::consts::TAU;
+        let n = 40 + rng.usize(0..160);
+        let mut out = Vec::new();
+        for _ in 0..n {
+            ang += rng.f64() * 0.3 - 0.15;
+            let speed = if rng.usize(0..4) == 0 { 0.05 + rng.f64() * 0.4 } else { 1.0 + rng.f64() * 6.0 };
+            p += KVec2::new(ang.cos(), ang.sin()) * speed;
+            out.push(Point::new(p.x as f32 as f64, p.y as f32 as f64));
+        }
+        out
+    };
+    let (step, z, radius) = (0.5, 1.0, 5.0);
+    let mut bad = Vec::new();
+    for eps in [1e-12, 1e-9, 1e-6, 3.2e-5, 1e-4] {
+        for k in 0..80 {
+            // 点の半分の後ろに、x に ε だけずらした点を足す
+            let mut pts = Vec::new();
+            for (i, q) in stroke(&mut rng).into_iter().enumerate() {
+                pts.push(q);
+                if i % 2 == 0 {
+                    pts.push(q + KVec2::new(eps, 0.0));
+                }
+            }
+            let reach = pts
+                .iter()
+                .fold(kurbo::Rect::from_points(pts[0], pts[0]), |r, &q| r.union_pt(q))
+                .inflate(radius + 10.0, radius + 10.0);
+            let out = stroke_shapes(&pts, radius, step, z, Color32::RED)
+                .iter()
+                .map(|s| s.bounding_box())
+                .any(|b| b.x0 < reach.x0 || b.y0 < reach.y0 || b.x1 > reach.x1 || b.y1 > reach.y1);
+            if out {
+                bad.push(format!("ε={eps} の {k} 本目"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "描いた所からはみ出す形ができた：{bad:?}");
+}
+
 /// 中身を変えない操作は、取り消しの控えを積まない：キーフレームの上で F6 を押し、次のコマにもうキーフレームがあるとき
 /// （次のコマへ進むだけ）と、中身の無いコマを動かしたとき（選択とコマの位置が動くだけ）。前は「変わった」と答えて控えを
 /// 積んだので、取り消しても絵は何も変わらず、コマの位置が戻るだけだった（設計：claude/取り消しの約束を入口で守る設計_43c2564.md
