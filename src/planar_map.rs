@@ -1056,6 +1056,13 @@ pub(crate) fn is_line_id(id: ShapeId) -> bool {
     id & LINE_ID_BIT != 0
 }
 
+/// 1つの地図の中で描く順（線は塗りより上。重なりの決まりはこれ1つ）：塗りの図形は 0、線の図形は 1。地図の描く図形
+/// （`LayerBase::drawn_shapes`：面の図形のあとに線の図形）と、画面の上乗せの重なり順（`build_scene_order_by_layer_ids`：
+/// 同じ地図から来た上乗せの図形は、この順に並べる）が使う
+pub(crate) fn draw_rank(shape: &FillShape) -> u8 {
+    u8::from(shape.line.is_some())
+}
+
 /// 線の図形の表：線を乗せた辺1本ずつ（アンカーとアンカーの間。クリックで選ぶ単位：設計 claude/線の設計_68a596e.md の
 /// 6.4）の線の図形を、番号（`line_id_of`）の順に並べたもの（面の表と同じ入れ物。変わった所のかかる塊だけを作り直す）
 pub(crate) type LineTable = crate::chunked_list::ChunkedList<FillShape>;
@@ -3096,7 +3103,7 @@ impl LayerBase {
         out
     }
 
-    /// 描く図形：面の図形を全部並べたあとに、線の図形を並べたもの（線は塗りより上）
+    /// 描く図形：面の図形を全部並べたあとに、線の図形を並べたもの（線は塗りより上：`draw_rank` の順）
     pub(crate) fn drawn_shapes(&self, group_path: &[u64]) -> Vec<Arc<FillShape>> {
         let mut out: Vec<Arc<FillShape>> = self.faces(group_path).iter().cloned().collect();
         out.extend(self.lines(group_path).iter().cloned());

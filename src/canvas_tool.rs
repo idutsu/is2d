@@ -902,14 +902,15 @@ pub(crate) enum Placement {
     /// 隠した元の図形（ドラッグで動かしている、グループ・インスタンスの図形そのもの）と同じ重なり順に置く。元の図形は、
     /// この上乗せを作った土台にあり、ドラッグの間は土台が変わらない（文書を変えるとドラッグは終わり、上乗せも作り直す）
     ReplaceAt(ShapeId),
-    /// そのレイヤー・その階層の生の図形の置き場（面の図形は階層のいちばん下。面の図形どうしに前後は無いので、番号で
-    /// 指さない。線の図形は、線がいつも塗りより上なので、その階層の生の図形のいちばん上。浮いた片の残り・輪郭の変形の
-    /// 仮表示）
+    /// そのレイヤー・その階層の生の図形の地図の中（浮いた片の残り・輪郭の変形の仮表示・複製のドラッグ中の確定した絵。
+    /// その地図の図形の代わりに出すもの）。並べ方は地図の描く順と同じ決まり（`planar_map::draw_rank`：塗りはその地図の
+    /// 塗りのあと、線はその地図の線のあと）
     RawOf(LayerId, Scope),
-    /// そのレイヤー・その階層の生の図形のいちばん上（グループ・インスタンスより下）。浮いた片と、動かしている生の図形の
-    /// 置き場（生の図形はいつもグループ・インスタンスより下：Animate と同じ。確定した後と同じ重なり。前はレイヤーの
-    /// いちばん上に置いたので、選んだ生の絵がグループを隠した）
-    AboveRaw(LayerId, Scope),
+    /// そのレイヤー・その階層の生の図形のすぐ上（グループ・インスタンスより下）の、組の番号（下から）ごとの置き場。浮いた片
+    /// と、動かしている生の図形の置き場（生の図形はいつもグループ・インスタンスより下：Animate と同じ。確定した後と同じ
+    /// 重なり。前はレイヤーのいちばん上に置いたので、選んだ生の絵がグループを隠した）。1つの組は1つの地図から来た図形で、
+    /// 組の中は地図の描く順（`planar_map::draw_rank`）、組と組は下から順（確定で片の組を下から順に重ねるのと同じ）
+    AboveRaw(LayerId, Scope, usize),
     /// そのレイヤー・その編集スコープの一番上に置く
     TopOfLayer(LayerId, Scope),
 }
@@ -958,7 +959,9 @@ pub(crate) fn build_scene_order_by_layer_ids(
     layer_order_ids: &[LayerId],
 ) -> Vec<SceneEntry> {
     let mut before_all: Vec<(usize, usize)> = Vec::new();
-    let mut after_base: Vec<Vec<(usize, usize)>> = vec![Vec::new(); base.len()];
+    // 土台の図形のあとに足す上乗せ：（並べる鍵（置き場の順, 組の順, 描く順）, 上乗せの番号）。同じ鍵は足した順
+    type OrderKey = (usize, usize, u8);
+    let mut after_base: Vec<Vec<(OrderKey, usize)>> = vec![Vec::new(); base.len()];
     let mut replace_at_base: Vec<Vec<usize>> = vec![Vec::new(); base.len()];
     // 置き場の表：（引き方, レイヤー, 階層）ごとの土台の位置を、初めて引くときに土台を1回なめて控える（上乗せ1つごとに
     // 土台をなめない。上乗せの置き場の（レイヤー, 階層）は、ふつう数個。前は上乗せ1つごとに土台の並び全体をなめたので、
@@ -967,6 +970,7 @@ pub(crate) fn build_scene_order_by_layer_ids(
     enum Find {
         FirstInScope,
         LastRaw,
+        LastRawFill,
         LastInScope,
         LastOfLayer,
     }
@@ -985,6 +989,9 @@ pub(crate) fn build_scene_order_by_layer_ids(
             Find::LastRaw => base
                 .iter()
                 .rposition(|s| s.layer_id == lid && s.is_raw_at_scope(scope)),
+            Find::LastRawFill => base.iter().rposition(|s| {
+                s.layer_id == lid && s.is_raw_at_scope(scope) && crate::planar_map::draw_rank(s) == 0
+            }),
             Find::LastInScope => base
                 .iter()
                 .rposition(|s| s.layer_id == lid && s.is_in_editing_scope(scope)),
@@ -1008,27 +1015,19 @@ pub(crate) fn build_scene_order_by_layer_ids(
                 replace_at_base[pos].push(add_idx);
                 None
             }
-            Placement::RawOf(lid, scope) => {
-                // 線は塗りより上：その階層の生の図形（面の図形のあとに線の図形）のいちばん上に置く
-                let line_pos = shape.line.and_then(|_| slot(Find::LastRaw, *lid, scope));
-                if let Some(pos) = line_pos {
-                    after_base[pos].push((0, add_idx));
-                    None
-                } else {
-                    match slot(Find::FirstInScope, *lid, scope) {
-                        Some(pos) => {
-                            replace_at_base[pos].push(add_idx);
-                            None
-                        }
-                        None => Some(*lid),
-                    }
-                }
-            }
-            Placement::AboveRaw(lid, scope) => {
-                // その階層の生の図形のいちばん上（生の図形が無ければ、その階層のいちばん下）
-                match slot(Find::LastRaw, *lid, scope) {
+            Placement::RawOf(lid, scope) | Placement::AboveRaw(lid, scope, _) => {
+                // 地図の描く順と同じ決まり（`draw_rank`）：その地図の中のもの（`RawOf`）は、塗りはその階層の生の塗りの
+                // あと、線はその階層の生の線のあと。地図のすぐ上の組（`AboveRaw`）は、生の図形のあとに、組の順、組の中は
+                // 描く順。置き場の生の図形が無ければ、その階層のいちばん下
+                let rank = crate::planar_map::draw_rank(shape);
+                let (anchor, key) = match placement {
+                    Placement::AboveRaw(_, _, g) => (slot(Find::LastRaw, *lid, scope), (1 + g, rank)),
+                    _ if rank == 0 => (slot(Find::LastRawFill, *lid, scope), (0, 0)),
+                    _ => (slot(Find::LastRaw, *lid, scope), (0, 1)),
+                };
+                match anchor {
                     Some(pos) => {
-                        after_base[pos].push((0, add_idx));
+                        after_base[pos].push(((0, key.0, key.1), add_idx));
                         None
                     }
                     None => match slot(Find::FirstInScope, *lid, scope) {
@@ -1045,10 +1044,10 @@ pub(crate) fn build_scene_order_by_layer_ids(
                     .then(|| slot(Find::LastInScope, *lid, scope))
                     .flatten();
                 if let Some(pos) = scope_pos {
-                    after_base[pos].push((1, add_idx));
+                    after_base[pos].push(((1, 0, 0), add_idx));
                     None
                 } else if let Some(pos) = slot(Find::LastOfLayer, *lid, scope) {
-                    after_base[pos].push((2, add_idx));
+                    after_base[pos].push(((2, 0, 0), add_idx));
                     None
                 } else {
                     Some(*lid)
@@ -1061,7 +1060,7 @@ pub(crate) fn build_scene_order_by_layer_ids(
                 .iter()
                 .rposition(|s| layer_order_index(layer_order_ids, s.layer_id) <= ord)
             {
-                after_base[pos].push((3 + ord.min(usize::MAX - 3), add_idx));
+                after_base[pos].push(((3 + ord.min(usize::MAX - 3), 0, 0), add_idx));
             } else {
                 before_all.push((ord, add_idx));
             }
@@ -1081,7 +1080,7 @@ pub(crate) fn build_scene_order_by_layer_ids(
             out.push(SceneEntry::Base(base_idx));
         }
         if !after_base[base_idx].is_empty() {
-            after_base[base_idx].sort_by_key(|&(prio, _)| prio);
+            after_base[base_idx].sort_by_key(|&(key, _)| key);
             for &(_, add_idx) in &after_base[base_idx] {
                 out.push(SceneEntry::Overlay(add_idx));
             }
@@ -1563,12 +1562,9 @@ impl Session {
                 .add
                 .extend(fl.placed_remainder().iter().cloned());
             self.overlay_movable_start = self.overlay.add.len();
-            for piece in fl.pieces() {
-                self.overlay.add.push((
-                    Placement::AboveRaw(piece.layer_id, scope.clone()),
-                    piece.clone(),
-                ));
-            }
+            let pieces: Vec<(Placement, FillShape)> =
+                fl.placed_pieces(&scope).map(|(at, p)| (at, p.clone())).collect();
+            self.overlay.add.extend(pieces);
             self.invalidate_scene_order();
         } else if had_overlay {
             self.invalidate_scene_order();
@@ -1713,10 +1709,11 @@ impl Session {
         // （設計審査 de92ceb の D-1 の (c)・レビュー de92ceb の N-3001）
         let scope = self.editing_group_path.clone();
         let world = self.edit_path.world_xform();
-        let moving_raw: Vec<FillShape> = if alt_duplicate {
+        let moving_raw: Vec<(Placement, FillShape)> = if alt_duplicate {
             // 複製は、離すとき、今の浮いた片を確定してから写しを置く（`duplicate_selected_in_working_copy`）ので、止まった絵は
             // 確定した絵（確定の計算 `FloatLayer::commit_edit`。動かしていない切り口は確定で捨てて元に戻るので、セル画のまま）、
-            // 動かす生の絵は、離したときに置く写しの絵（`copy`：`clipboard_ops::begin_move_selection_drag`）
+            // 動かす生の絵は、離したときに置く写しの絵（`copy`：`clipboard_ops::begin_move_selection_drag`。レイヤーごとに1つの
+            // 地図なので、組は1つ）
             let mut plan = Some(crate::canvas_tool::CommitPlan::new());
             if let Some(fl) = self.floating.as_ref().filter(|fl| fl.modified) {
                 let outcomes = fl.commit_edits(self.stage());
@@ -1750,14 +1747,16 @@ impl Session {
             if let Some(ahead) = &mut self.drop_ahead {
                 ahead.commit = plan;
             }
-            copy
+            copy.into_iter()
+                .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone(), 0), f))
+                .collect()
         } else {
             match self.lift_ahead() {
                 Ok(Some(mut fl)) => {
                     fl.refresh(world, &scope, self.base_cache.layer_order_ids());
                     self.overlay.hide = fl.hidden().clone();
                     self.overlay.add.extend(fl.placed_remainder().iter().cloned());
-                    fl.pieces().to_vec()
+                    fl.placed_pieces(&scope).map(|(at, p)| (at, p.clone())).collect()
                 }
                 Ok(None) => Vec::new(),
                 // 持ち上げられなければ、離したときに断るので、何も動かさない
@@ -1769,9 +1768,7 @@ impl Session {
         };
         self.overlay_movable_start = self.overlay.add.len();
         let mut orig_shapes = Vec::new();
-        let moving = moving_raw
-            .into_iter()
-            .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone()), f));
+        let moving = moving_raw.into_iter();
         // 選んだグループ・インスタンスの図形（生の図形でないもの）は、その図形を動かす（離したあとは、グループの地図・
         // インスタンスの置き方の変換を動かす。複製は、写しを今の階層のいちばん上に置く）
         let nested: Vec<(Placement, FillShape)> = self

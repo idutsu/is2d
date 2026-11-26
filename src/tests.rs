@@ -25178,6 +25178,49 @@ fn dragging_after_mixed_selections_matches_the_drop() {
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
 }
 
+/// 画面の上乗せの重なり順は、地図の描く順と同じ1つの決まり（`planar_map::draw_rank`：同じ地図から来た図形は塗りのあとに
+/// 線、組と組は下から順）で決まる。足した順によらない（レビュー de92ceb の N-3001：前は、生の図形の置き場 `RawOf` だけが
+/// 線を特別に扱い、そのすぐ上の置き場 `AboveRaw` は足した順に並べたので、足す順しだいで線が塗りに隠れた）
+#[test]
+fn overlay_order_follows_the_map_drawing_order() {
+    use crate::canvas_tool::{build_scene_order_by_layer_ids, Overlay, Placement, SceneEntry};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let shape = |id: u64, line: bool| {
+        let mut s = map_overlay::rect_shape(0.0, 0.0, 10.0, 10.0, Color32::RED);
+        s.shape_id = id;
+        s.layer_id = 1;
+        s.group_path = Vec::new();
+        if line {
+            s.line = Some(ink);
+        }
+        s
+    };
+    // 土台：その階層の生の図形の地図（塗り 1・2、線 3）
+    let base = vec![shape(1, false), shape(2, false), shape(3, true)];
+    let scope: Vec<u64> = Vec::new();
+    let mut overlay = Overlay::default();
+    // わざと線を先に足す：地図の中のもの（線 11・塗り 12）、片の組 1（線 21・塗り 22）、片の組 0（線 31・塗り 32）
+    for (at, id, line) in [
+        (Placement::RawOf(1, scope.clone()), 11, true),
+        (Placement::RawOf(1, scope.clone()), 12, false),
+        (Placement::AboveRaw(1, scope.clone(), 1), 21, true),
+        (Placement::AboveRaw(1, scope.clone(), 1), 22, false),
+        (Placement::AboveRaw(1, scope.clone(), 0), 31, true),
+        (Placement::AboveRaw(1, scope.clone(), 0), 32, false),
+    ] {
+        overlay.add.push((at, shape(id, line)));
+    }
+    let ids: Vec<u64> = build_scene_order_by_layer_ids(&base, &overlay, &[1])
+        .into_iter()
+        .map(|e| match e {
+            SceneEntry::Base(i) => base[i].shape_id,
+            SceneEntry::Overlay(i) => overlay.add[i].1.shape_id,
+        })
+        .collect();
+    // 地図の塗り（1・2・12）→ 地図の線（3・11）→ 組 0 の塗り・線（32・31）→ 組 1 の塗り・線（22・21）
+    assert_eq!(ids, vec![1, 2, 12, 3, 11, 32, 31, 22, 21]);
+}
+
 /// ドラッグ中の最後の見た目と、離したあとの見た目が同じ（お手本の比べ：設計 claude/浮いた片と選択の決まりを1つにする設計_ddcd41e.md
 /// の 2.2）。ブラシ・鉛筆・インクボトル・グループ・2枚目のレイヤーを混ぜた絵で、矩形・クリック・ダブルクリック（Shift も）
 /// で選び、半分の回は先に選んだものを動かしてから（動かした浮いた片がある所で）選び足し、移動・Alt の複製・拡大・回転の

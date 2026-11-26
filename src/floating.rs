@@ -323,8 +323,9 @@ pub(crate) struct Floating {
     /// 動かした・変形したか、文書に無い片があるか。`true` なら確定のときに重ねる。`false` は動かしていない矩形選択の
     /// 切り口で、捨てれば元に戻る
     pub(crate) modified: bool,
-    /// 片の図形（ステージの写し）
+    /// 片の図形（ステージの写し）と、それぞれの片の組の番号（そのレイヤーの、下から何番目の組か：`placed_pieces`）
     pieces: Vec<FillShape>,
+    piece_groups: Vec<usize>,
     /// 残りの図形（ステージの写し）と、その置き場所
     remainder: Vec<(Placement, FillShape)>,
     /// 画面から隠すセル画の図形
@@ -337,6 +338,7 @@ impl Floating {
             layers: Vec::new(),
             modified,
             pieces: Vec::new(),
+            piece_groups: Vec::new(),
             remainder: Vec::new(),
             hidden: HashSet::new(),
         }
@@ -345,6 +347,16 @@ impl Floating {
     /// 片の図形（ステージの写し）
     pub(crate) fn pieces(&self) -> &[FillShape] {
         &self.pieces
+    }
+
+    /// 片の図形と、その置き場（そのレイヤー・階層 `scope` の生の図形のすぐ上の、片の組ごとの置き場：`Placement::AboveRaw`）
+    pub(crate) fn placed_pieces<'a>(
+        &'a self,
+        scope: &'a [u64],
+    ) -> impl Iterator<Item = (Placement, &'a FillShape)> + 'a {
+        self.pieces.iter().zip(&self.piece_groups).map(move |(p, &g)| {
+            (Placement::AboveRaw(p.layer_id, scope.to_vec(), g), p)
+        })
     }
 
     /// 残りの図形（ステージの写し）
@@ -398,6 +410,7 @@ impl Floating {
         self.hidden.clear();
         self.remainder.clear();
         self.pieces.clear();
+        self.piece_groups.clear();
         for l in &mut self.layers {
             let layer_id = l.layer_id;
             if let Some(o) = &mut l.origin {
@@ -413,7 +426,7 @@ impl Floating {
                     }
                 }
             }
-            for g in &mut l.groups {
+            for (gi, g) in l.groups.iter_mut().enumerate() {
                 for f in g.hold().drawn_shapes(scope) {
                     let mut s = (*f).clone();
                     s.layer_id = layer_id;
@@ -423,6 +436,7 @@ impl Floating {
                     }
                     s.place(world);
                     self.pieces.push(s);
+                    self.piece_groups.push(gi);
                 }
             }
         }
@@ -440,6 +454,7 @@ impl Floating {
             }
         }
         self.pieces = Vec::new();
+        self.piece_groups = Vec::new();
         self.remainder = Vec::new();
         self.hidden = HashSet::new();
     }
