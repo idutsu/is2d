@@ -21439,6 +21439,50 @@ fn moving_raw_art_inside_a_symbol_shows_on_its_other_instances() {
     assert!((sibling_bottom(&mut app) - 240.0).abs() < 1.0, "選択を外しても、ほかのインスタンスに映らない");
 }
 
+/// 浮いた片は、持ち上げた絵（セル画の地図）を覚えていて、確定するときに今のセル画の地図がそれと違えば、何も書かずに断る
+/// （設計審査 de92ceb の D-3）。確定を通らずにセル画が変わった（確定の呼び忘れ）ときに、持ち上げたときの「残り」で今の絵を
+/// 黙って置き換えない。前は、確定は今の画面のセル画に残りを書いたので、変わった絵が消えた
+#[test]
+fn committing_floating_pieces_onto_a_changed_cel_is_refused() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
+    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 200.0) }));
+    assert!(app.session.floating().is_some());
+    // 確定を通らずに、同じセル画が別の絵に変わる（確定の呼び忘れの代わり）
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(500.0, 100.0, 600.0, 200.0, Color32::BLUE)]);
+    let maps_before = app.doc.root.layers[0].keyframes[0].cel.maps.clone();
+    app.toast = None;
+    assert!(!apply(&mut app, Action::Deselect), "変わったセル画に浮いた片を確定した");
+    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some(crate::canvas_tool::Refusal::Unplaceable.message()));
+    assert!(std::sync::Arc::ptr_eq(&app.doc.root.layers[0].keyframes[0].cel.maps, &maps_before), "変わった絵が書き換わった");
+}
+
+/// 浮いた片の片は、いつもみな選ばれている：矩形で選んだあと、同じ色の塗りを分ける線を Shift クリックで外しても、線が
+/// 外れて1つになった塗り（新しい番号の片）は選ばれたまま。前は、片の番号が付け直される道のうち1つ（動かしていない片を
+/// 戻す道）だけが片を選び直さず、選択の表示に無い塗りが、ドラッグで動き、Delete で消えた（設計審査 de92ceb の D-1 の
+/// (a)）。片を選ぶのは、浮いた片の写しを作り直す1か所（`Session::sync_floating`）
+#[test]
+fn floating_pieces_stay_selected_after_deselecting_a_dividing_line() {
+    use crate::doc_actions::{apply, Action};
+    let ink = crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 4 };
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Pencil });
+    let cut: Vec<Point> = (0..=20).map(|i| Point::new(200.0, 80.0 + 12.0 * i as f64)).collect();
+    assert!(apply(&mut app, Action::PencilStroke { points: cut, stroke: ink }));
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(350.0, 350.0), additive: false }));
+    assert!(app.session.floating().is_some(), "矩形で選ぶと浮いた片になる");
+    // 塗りを分ける線を Shift クリックで外す
+    crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 200.0), true, true);
+    let fl = app.session.floating().expect("塗りは浮いたまま");
+    let unselected: Vec<u64> = fl.pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).map(|p| p.shape_id).collect();
+    assert!(unselected.is_empty(), "浮いているのに選ばれていない片がある: {unselected:?}");
+}
+
 /// グループの変形は、地図を書く入口（`write_local`）の1つを通る：選んだグループが2つのレイヤーにあっても、どちらも動く。
 /// 書く所のどれかが断ったら、そこで止めて知らせる（前はグループの変形だけが入口の中身を写した道で書き、断った理由を捨て、
 /// 断られたグループだけが黙って動かずに残った：レビュー de92ceb の N-4001。止めたあとの戻しは `apply` の
@@ -21862,6 +21906,14 @@ fn selections_keep_their_lines_through_operations() {
                 }
             }
             ops.push(name.to_string());
+            // 浮いた片の片は、いつもみな選ばれている（`Session::sync_floating`）
+            if let Some(fl) = app.session.floating() {
+                let n = fl.pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).count();
+                if n > 0 {
+                    bad.push(format!("{case}（{}）：浮いているのに選ばれていない片が {n} 個", ops.join("・")));
+                    break;
+                }
+            }
             // グループのまとまり（今の階層の子グループ・インスタンスごとに、みな選ばれているか、みな選ばれていないか）
             let scope_now = app.session.editing_group_path.clone();
             let mut units: std::collections::HashMap<u64, (usize, usize, usize)> = std::collections::HashMap::new();

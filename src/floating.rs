@@ -204,6 +204,11 @@ pub(crate) struct Origin {
     hidden: Vec<ShapeId>,
     /// 残りの図形の番号（残りの地図の面のうち、セル画に無いもの。図形は計算に使う写しの面から作る：`Floating::refresh`）
     remainder: Vec<ShapeId>,
+    /// 出どころ：持ち上げたときのセル画の地図（その階層の）。確定するときに、今のセル画の地図がこれと同じでなければ断る
+    /// （`FloatLayer::still_on`。持って生かしておくので、番地が別の地図に使い回されない）。前は出どころを持たず、確定は今の
+    /// 画面のセル画に残りを書いたので、確定を通らずにセル画が変わる（確定の呼び忘れ）と、変わった絵が残りで黙って置き換わった
+    /// （設計審査 de92ceb の D-3）
+    from: StoredMap,
 }
 
 impl Origin {
@@ -223,6 +228,7 @@ impl Origin {
             held: Some(base),
             hidden,
             remainder,
+            from: cel.stored.clone(),
         }
     }
 
@@ -251,6 +257,14 @@ pub(crate) struct FloatLayer {
 impl FloatLayer {
     fn is_empty(&self) -> bool {
         self.origin.is_none() && self.groups.is_empty()
+    }
+
+    /// 今のセル画の地図 `cel` に確定してよいか：持ち上げた残りがあれば、その出どころの地図が `cel` そのもの（残りの無い
+    /// レイヤー（貼り付け・複製の片だけ）は、今のセル画の地図に片を重ねるだけなので、いつもよい）
+    pub(crate) fn still_on(&self, cel: &LayerBase) -> bool {
+        self.origin
+            .as_ref()
+            .is_none_or(|o| o.from.id() == cel.stored.id())
     }
 
     /// 中身の地図：残りの地図か、無ければセル画の地図 `cel`
@@ -442,7 +456,7 @@ impl Floating {
                 a.layer_id == b.layer_id
                     && match (&a.origin, &b.origin) {
                         (None, None) => true,
-                        (Some(x), Some(y)) => x.rest.id() == y.rest.id(),
+                        (Some(x), Some(y)) => x.rest.id() == y.rest.id() && x.from.id() == y.from.id(),
                         _ => false,
                     }
                     && a.groups.len() == b.groups.len()

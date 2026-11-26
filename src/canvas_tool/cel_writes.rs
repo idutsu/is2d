@@ -308,7 +308,8 @@ pub(crate) type CommitPlan = Vec<(
 /// 浮いた片 `fl` を確定するときに書くもの（文書を変えない）：レイヤーごとに、残りの地図（無ければセル画の地図）に片の組
 /// を下から順に重ねた地図（`FloatLayer::committed_local`）を、今の階層の地図にするとき何を書くか（1本の道の答え：`LayerBase::replace_local`）。重ねる
 /// 計算から何を書くかまでをレイヤーごとに同時に作る（レイヤーをまたがないので、待ち時間はいちばん重いレイヤー1つ分）。
-/// 全部か無しか：1つでも書けない（編集できないレイヤーを含む）なら `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
+/// 全部か無しか：1つでも書けない（編集できないレイヤー・持ち上げた絵と違うセル画（`FloatLayer::still_on`）を含む）なら
+/// `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形
 /// は `TransformFit::fits`、新しい中身は `prepare_placement`）
 pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
@@ -329,6 +330,10 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
         crate::planar_map::parallel_map(fl.layers(), |l| {
             let cel = cache.cel(l.layer_id)?;
             let base = cel.scope_base(&scope);
+            // 持ち上げた絵（出どころ）でないセル画には書かない（`FloatLayer::still_on`：設計審査 de92ceb の D-3）
+            if !l.still_on(&base) {
+                return None;
+            }
             let next = l.committed_local(&base)?;
             let r = base.replace_local(&next, &scope);
             Some((r, base))
@@ -473,9 +478,8 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
             return false;
         }
     }
-    // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`）。浮いた片はいつも
-    // みな選ばれている
-    tab.session.select_floating_pieces();
+    // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`。選び直しは
+    // `Session::sync_floating`）
     true
 }
 

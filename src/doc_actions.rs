@@ -1161,8 +1161,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return false;
             }
-            // 同じ色でとなり合う片は1つになる（新しい番号）
-            tab.session.select_floating_pieces();
+            // 同じ色でとなり合う片は1つになる（新しい番号。選び直しは `Session::sync_floating`）
             return true;
         }
         return false;
@@ -1572,7 +1571,6 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: An
     }
     push_undo(tab, None);
     tab.session.set_floating(Some(fl));
-    tab.session.select_floating_pieces();
     true
 }
 

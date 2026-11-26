@@ -1477,7 +1477,10 @@ impl Session {
         }
     }
 
-    /// 浮いた片の写しを作り直し（片も残りも無ければ外す）、`overlay` を同期再構築する
+    /// 浮いた片の写しを作り直し（片も残りも無ければ外す）、`overlay` を同期再構築し、片をみな選んで、もう無い図形を選択から
+    /// 外す（浮いた片はいつもみな選ばれている。浮いた片が変わる所はみなここを通るので、片の番号が変わる道を足しても漏れ
+    /// ない。前は片の番号が変わる道ごとに呼ぶ側が選び直し、1つの道（動かしていない片を戻す道）だけ選び直さず、選択の表示
+    /// に無い塗りが、ドラッグで動き、Delete で消えた：設計審査 de92ceb の D-1 の (a)）
     fn sync_floating(&mut self) {
         self.floating_rev += 1;
         let world = self.edit_path.world_xform();
@@ -1492,25 +1495,19 @@ impl Session {
             }
         }
         self.rebuild_overlay_from_floating();
+        if let Some(fl) = &self.floating {
+            self.selection.shapes.extend(fl.piece_ids());
+        }
+        self.retain_existing_selection();
     }
 
-    /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に）。片の番号が変わるので、
-    /// 選択は、片をみな選び、もう無い図形を外す（浮いた片はいつもみな選ばれている）
+    /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に。片の選び直しは `sync_floating`）
     pub(crate) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
         let mut fl = self.floating.take().unwrap_or_else(|| Floating::new(false));
         let res = f(&mut fl, self.stage());
         self.floating = Some(fl);
         self.sync_floating();
-        self.select_floating_pieces();
         res
-    }
-
-    /// 浮いた片をみな選び、もう無い図形を選択から外す（片の番号が変わる操作のあと。浮いた片はいつもみな選ばれている）
-    pub(crate) fn select_floating_pieces(&mut self) {
-        if let Some(fl) = &self.floating {
-            self.selection.shapes.extend(fl.piece_ids());
-        }
-        self.retain_existing_selection();
     }
 
     /// 現在の `self.floating` の状態から `self.overlay` を再構築する（ドラッグ中でない通常状態の表示用）
