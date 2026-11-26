@@ -446,9 +446,10 @@ impl Is2dApp {
 
         // 浮いた片を置けなければ、画面に見えている片が入らない動画は書き出さない
         let Some(doc) = self.tab().committed_document_copy() else {
-            self.notify_warning(
-                "選んだ図形を置けないため書き出せません（動かすか、取り消してから書き出してください）",
-            );
+            self.notify_warning(format!(
+                "選んだ図形を置けないため書き出せません。{}",
+                canvas_tool::undo_exit_text()
+            ));
             return;
         };
         self.video_export = Some(video_export::VideoExportJob::start(doc, path));
@@ -787,7 +788,7 @@ impl Is2dApp {
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
-    fn current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, &'static str)> {
+    fn current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, String)> {
         if self.tab().session.drag.unplaceable() {
             return Some((NoticeKind::Warning, canvas_tool::Refusal::OffGrid.message()));
         }
@@ -813,7 +814,7 @@ impl Is2dApp {
                 "\u{e897} 現在のレイヤーはロック中または非表示のため編集できません"
             }
         };
-        Some((NoticeKind::Warning, msg))
+        Some((NoticeKind::Warning, msg.to_owned()))
     }
 
     /// 状態連動の警告バッジおよび一時トースト通知をキャンバス左上へ統一フォーマットで縦積み描画する
@@ -1037,16 +1038,10 @@ impl Is2dApp {
         for action in actions.drain(..) {
             self.apply_action(action, ctx);
         }
-        // ファイルから読んだ地図が、使うときに確かめて壊れていたら知らせる（何も無いものとして描いている）
-        let broken = self.tab().doc.broken_maps.take();
-        if let Some(first) = broken.first() {
-            let at = match broken.len() {
-                1 => first.clone(),
-                n => format!("{first} ほか {} か所", n - 1),
-            };
-            self.notify_warning(format!(
-                "{at}の絵が壊れていたので、何も無いものとして表示しています（保存すると元のまま書きます）"
-            ));
+        // ファイルから読んだもので、切り直した地図・何も無いものとして見せている地図・読めない音があれば知らせる（地図は
+        // 使うときに確かめるので、あとから増える）
+        if let Some(text) = load_notice_text(&self.tab().doc.load_notices.take()) {
+            self.notify_warning(text);
             ctx.request_repaint();
         }
         // そのフレームの操作をすべて適用した後の状態から、OS のメニューの見せ方とウィンドウタイトルを更新し、コマが
@@ -1103,6 +1098,42 @@ impl Is2dApp {
         let maps = prefetch::wanted_maps(tl, first, last, !playing, self.timeline_ui.loop_playback);
         self.prefetch.want(maps);
     }
+}
+
+/// ファイルから読んだものの知らせ `notices` を、種類ごとに1文にまとめた文（無ければ `None`）
+fn load_notice_text(notices: &[timeline::LoadNotice]) -> Option<String> {
+    use timeline::LoadNotice;
+    let places = |pick: fn(&LoadNotice) -> Option<&String>| -> Option<String> {
+        let all: Vec<&String> = notices.iter().filter_map(pick).collect();
+        let first = all.first()?;
+        Some(match all.len() {
+            1 => (*first).clone(),
+            n => format!("{first} ほか {} か所", n - 1),
+        })
+    };
+    let repaired = places(|n| match n {
+        LoadNotice::Repaired(at) => Some(at),
+        _ => None,
+    })
+    .map(|at| format!("{at}の絵が今の決まりに合わなかったので、切り直して表示しています（保存すると切り直した絵を書きます）"));
+    let blank = places(|n| match n {
+        LoadNotice::Blank(at) => Some(at),
+        _ => None,
+    })
+    .map(|at| {
+        format!("{at}の絵が壊れていたので、何も無いものとして表示しています（この絵には描けません。保存すると元のまま書きます）")
+    });
+    let sounds: Vec<&str> = notices
+        .iter()
+        .filter_map(|n| match n {
+            LoadNotice::UnreadableSound(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let sound = (!sounds.is_empty())
+        .then(|| format!("音「{}」を読めなかったので、鳴らさずに開きました（保存すると元のまま書きます）", sounds.join("」「")));
+    let lines: Vec<String> = [repaired, blank, sound].into_iter().flatten().collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 impl eframe::App for Is2dApp {

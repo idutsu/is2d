@@ -4317,7 +4317,7 @@ fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
         .all(|(a, b)| a.exterior().segments == b.exterior().segments));
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some(canvas_tool::Refusal::OffGrid.message())
+        Some(canvas_tool::Refusal::OffGrid.message().as_str())
     );
 }
 
@@ -10276,6 +10276,16 @@ fn break_map_colors(proj: &mut SavedProject, kf: usize) {
     proj.map_tiles.tiles.push(tile);
 }
 
+/// テスト用：`break_map_colors` と同じ地図の、最初の塊の頂点1つを格子の外（±65,536px）へ出す（切り直しても地図にできない：
+/// `planar_map::realized` が断る）
+fn break_map_off_grid(proj: &mut SavedProject, kf: usize) {
+    let m = &mut proj.timeline.layers[0].keyframes[kf].maps[0];
+    let mut tile = proj.map_tiles.tiles[m.tiles[0] as usize].clone();
+    tile.nodes[0] = [1.0e7, 1.0e7];
+    m.tiles[0] = proj.map_tiles.tiles.len() as u32;
+    proj.map_tiles.tiles.push(tile);
+}
+
 /// 保存用の型 `doc` を、今の版の `.is2d` ファイルとして `path` に書く（`project_file_bytes`）
 fn write_project_file<T: serde::Serialize>(
     path: &std::path::Path,
@@ -10317,6 +10327,11 @@ fn project_from_bytes(bytes: &[u8]) -> Result<SavedProject, String> {
 /// 作品のファイル `path` を、塊の表を保存の形のまま読む（中身を見たり細工したりする：`project_from_bytes`）
 fn saved_project_at(path: &std::path::Path) -> SavedProject {
     project_from_bytes(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// テスト用：今のタブを保存した形（書いて読み戻したもの）
+fn saved_project_of(app: &Is2dApp) -> SavedProject {
+    saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).expect("保存できる"))
 }
 
 /// 保存用の型 `doc` を今の版の `.is2d` の中身に書いて、読み戻す（保存して開くのと同じ形を通る）
@@ -15691,7 +15706,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
         app.current_state_notice(false),
         Some((
             canvas_tool::NoticeKind::Warning,
-            "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）",
+            "トゥイーンの途中のコマは編集できません（F6 でキーフレームを挿入してください）".to_owned(),
         )),
         "トゥイーン途中のコマでキャンバスの警告メッセージが返ること"
     );
@@ -21500,8 +21515,15 @@ fn committing_floating_pieces_onto_a_changed_cel_is_refused() {
     let maps_before = app.doc.root.layers[0].keyframes[0].cel.maps().clone();
     app.toast = None;
     assert!(!apply(&mut app, Action::Deselect), "変わったセル画に浮いた片を確定した");
-    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some(crate::canvas_tool::Refusal::Unplaceable.message()));
+    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some(crate::canvas_tool::Refusal::Unplaceable.message().as_str()));
     assert!(std::sync::Arc::ptr_eq(app.doc.root.layers[0].keyframes[0].cel.maps(), &maps_before), "変わった絵が書き換わった");
+    // 断った知らせは、出口（取り消し）を案内する。取り消しは確定を断られたときも効き、動かす前に戻る（新しい操作は作らない：
+    // 持ち主が決めた 2026-11-27。審査 5616fcc の D-2）
+    assert!(app.toast.as_ref().unwrap().message.contains("取り消し（"), "知らせが出口を案内しない");
+    assert!(apply(&mut app, Action::Undo), "確定を断られたあとの取り消しが効かない");
+    assert!(app.session.floating().is_none_or(|f| !f.modified()), "取り消しても動かしたまま");
+    assert!(crate::project_io::ProjectDocument::from_app(app.tab()).is_ok(), "取り消したあとも保存できない");
+    assert!(apply(&mut app, Action::Deselect), "取り消したあとも選択を外せない");
 }
 
 /// 浮いた片の片は、いつもみな選ばれている：矩形で選んだあと、同じ色の塗りを分ける線を Shift クリックで外しても、線が
@@ -33593,7 +33615,7 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
     ));
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some(off_grid)
+        Some(off_grid.as_str())
     );
     // 輪郭の変形（辺を格子の外へ引っぱる）
     app.toast = None;
@@ -33610,7 +33632,7 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
     ));
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some(off_grid)
+        Some(off_grid.as_str())
     );
     // 格子の中のブラシは知らせない
     app.toast = None;
@@ -36249,7 +36271,9 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
 
 /// 計測用の作品のファイルを、その場で今の版に直す（ゼロベースレビューの前に `claude/review-bench/A.is2d`・`B.is2d` を
 /// 直すため）。直すのは前の版（版 5 の JSON・版 6〜版 9）のファイルだけで、元のファイルは同じフォルダに `<名前>.v<版>.is2d`
-/// として残す。今の版のファイルは、開けることを確かめるだけで変えない（何度流してもよい）
+/// として残す。そのあと（今の版のファイルも）、地図をみな今のコードの決まりで確かめ、合わない地図があれば切り直して書き直す
+/// （正しさの決まりを変えたら、版を上げてこれで直す：審査 5616fcc の D-3 の (3)）。切り直す前のファイルは
+/// `<名前>.before-recut.is2d` として残す。切り直しても作れない地図があれば止まる。直す所が無ければ変えない（何度流してもよい）
 ///
 /// 実行：`IS2D_CONVERT=作品のパス,作品のパス cargo test --release convert_work_files_to_current_format -- --ignored --nocapture`
 #[test]
@@ -36274,7 +36298,7 @@ fn convert_work_files_to_current_format() {
         let bytes = std::fs::read(path).expect("作品を読めること");
         let Some((doc, version)) = old_format_document(&bytes) else {
             assert!(opens(path), "今の版として開けること：{}", path.display());
-            eprintln!("今の版なので、そのまま：{}", path.display());
+            recut_work_file(path);
             continue;
         };
         let backup = path.with_extension(format!("v{version}.is2d"));
@@ -36297,7 +36321,30 @@ fn convert_work_files_to_current_format() {
             std::fs::metadata(path).unwrap().len() as f64 / 1e6,
             backup.display()
         );
+        recut_work_file(path);
     }
+}
+
+/// 今の版の作品 `path` の地図をみな確かめ（`check_all_maps`）、今の決まりに合わない地図があれば、切り直した地図で書き直す
+/// （元のファイルは `<名前>.before-recut.is2d`）。切り直しても作れない地図があれば止まる
+fn recut_work_file(path: &std::path::Path) {
+    let mut app = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app, path, None).expect("開ける");
+    let notices = check_all_maps(&app.doc);
+    let blank: Vec<_> = notices.iter().filter(|n| matches!(n, timeline::LoadNotice::Blank(_))).collect();
+    assert!(blank.is_empty(), "切り直しても作れない地図がある：{}：{blank:?}", path.display());
+    let recut = notices.iter().filter(|n| matches!(n, timeline::LoadNotice::Repaired(_))).count();
+    if recut == 0 {
+        eprintln!("地図はどれも今の決まりに合う：{}", path.display());
+        return;
+    }
+    let backup = path.with_extension("before-recut.is2d");
+    assert!(!backup.exists(), "元のファイルを残す所に、もうファイルがある：{}", backup.display());
+    let written = path.with_extension("recutting.is2d");
+    project_io::save_project_to_path(&mut app, &written).expect("書ける");
+    std::fs::rename(path, &backup).expect("元のファイルを残せること");
+    std::fs::rename(&written, path).expect("書き直したファイルの名前を替えられること");
+    eprintln!("地図を {recut} 枚切り直した：{}。元のファイル：{}", path.display(), backup.display());
 }
 
 /// 計測：作品のファイルで、重さが気になる操作の時間を測る（Mac で作品 A・A-x2 を測るため）
@@ -37040,24 +37087,35 @@ fn copying_unviewed_frames_to_another_layer_does_not_check_their_maps() {
 fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     use crate::doc_actions::{apply, Action};
     let path = save_many_keyframes("lazy_broken", 3);
-    // コマ 3 のキーフレームの地図で、1本の辺の片側だけ色を変える（面の輪郭の色がそろわない）
+    // コマ 3 のキーフレームの地図の頂点1つを格子の外へ出す（切り直しても地図にできない）
     let mut proj = saved_project_at(&path);
-    break_map_colors(&mut proj, 1);
+    break_map_off_grid(&mut proj, 1);
     let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
     assert!(app.scene().len() > 0);
-    assert!(app.doc.broken_maps.take().is_empty());
+    assert!(app.doc.load_notices.take().is_empty());
     assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
     assert!(app.scene().len() == 0, "壊れた地図は何も無いものとして描く");
     assert!(app.doc.root.layers[0].keyframes[1].cel.maps()[0].is_broken());
     assert_eq!(
-        app.doc.broken_maps.take(),
-        vec!["レイヤー「Layer 1」のコマ 3".to_owned()]
+        app.doc.load_notices.take(),
+        vec![timeline::LoadNotice::Blank("レイヤー「Layer 1」のコマ 3".to_owned())]
     );
-    assert!(app.doc.broken_maps.take().is_empty(), "知らせるのは1回");
+    assert!(app.doc.load_notices.take().is_empty(), "知らせるのは1回");
+    // 何も無いものとして見せている絵には描けない（描くと、元の地図を黙って置き換える：審査 5616fcc の D-3）
+    let before = saved_map_content(&saved_project_of(&app), &saved_project_of(&app).timeline.layers[0].keyframes[1].maps[0]);
+    assert!(!apply(
+        &mut app,
+        Action::PaintStroke { points: vec![Point::new(100.0, 100.0), Point::new(160.0, 100.0)], radius: 8.0, color: Color32::BLUE },
+    ));
+    assert_eq!(
+        saved_map_content(&saved_project_of(&app), &saved_project_of(&app).timeline.layers[0].keyframes[1].maps[0]),
+        before,
+        "壊れた絵に描いた"
+    );
     // 保存すると、壊れた地図は読んだままに書く
     let out = path.with_file_name("saved_again.is2d");
     crate::project_io::save_project_to_path(&mut app, &out).unwrap();
@@ -37069,6 +37127,165 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// 文書 `doc` の、まだ確かめていない地図をみな確かめ（使うときと同じ入口：`UncheckedMaps::check`）、ファイルから読んだもの
+/// の知らせを返す
+fn check_all_maps(doc: &symbol::Document) -> Vec<timeline::LoadNotice> {
+    let _ = doc.check_maps_in_background().expect("スレッドを作れる").join();
+    doc.load_notices.take()
+}
+
+/// 見本の作品（`claude/review-bench/sample.is2d`：作品 A の、正しさの決まりを少し変えると外れる絵：`make_sample_work`。
+/// 作品の絵なのでリポジトリには入れない：持ち主が決めた 2026-11-27）の地図は、どれも今のコードの決まりで正しい（切り
+/// 直しも何も無い地図も無い）。正しさの決まり（判定の形・許容）を変えて落ちたら、ファイルの版を上げて、テスト用の変換
+/// （`convert_work_files_to_current_format`：地図も切り直す）で見本と作品を直す（審査 5616fcc の D-3 の (3)。前は決まりを
+/// 変えても、前の作品の絵が次に開いたとき空になるまで気づけなかった）
+#[test]
+fn sample_work_maps_are_all_valid_with_the_current_code() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("claude/review-bench/sample.is2d");
+    assert!(
+        path.exists(),
+        "見本の作品が無い：{}（作り方は `make_sample_work` の説明）",
+        path.display()
+    );
+    let doc = project_io::read_project_document(&path)
+        .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
+        .expect("見本の作品を開ける");
+    let maps = std::iter::once(&doc.root)
+        .chain(doc.library().iter().map(|s| &s.timeline))
+        .flat_map(|tl| &tl.layers)
+        .flat_map(|l| l.keyframes.iter())
+        .map(|k| k.cel.maps().len())
+        .sum::<usize>();
+    assert!(maps >= 20, "見本の地図が少ない：{maps}");
+    let notices = check_all_maps(&doc);
+    assert!(
+        notices.is_empty(),
+        "見本の作品の地図が今の決まりに合わない（ファイルの版を上げ、テスト用の変換で切り直す）：{notices:?}"
+    );
+}
+
+/// 作品 `IS2D_WORK` の地図をみな確かめ、切り直した・何も無い地図として見せた場所を出す（正しさの決まりを変えたとき、
+/// 前の作品のどの絵が外れるかを見る）
+///
+/// 実行：`IS2D_WORK=作品のパス cargo test --release list_maps_failing_the_current_check -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn list_maps_failing_the_current_check() {
+    let Ok(work) = std::env::var("IS2D_WORK") else {
+        eprintln!("IS2D_WORK に作品のパスを入れて実行してください");
+        return;
+    };
+    let doc = project_io::read_project_document(std::path::Path::new(&work))
+        .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
+        .expect("作品を開ける");
+    for n in check_all_maps(&doc) {
+        eprintln!("{n:?}");
+    }
+}
+
+/// 見本の作品を作る：作品 `IS2D_WORK` のルートのキーフレームのうち、`IS2D_SAMPLE_KEEP`（「レイヤーの名前:始まりのコマ」を
+/// カンマで区切る。コマは 1 から）のほかを空にして、`claude/review-bench/sample.is2d` に書く。見本に残すのは、正しさの決まり（重ね合わせ
+/// の許容 `FLAT_TOL`）を 0.001・0.003 に変えると外れた絵（`list_maps_failing_the_current_check` で調べた）
+///
+/// 実行：`IS2D_WORK=作品のパス IS2D_SAMPLE_KEEP=... cargo test --release make_sample_work -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn make_sample_work() {
+    let (Ok(work), Ok(keep)) = (std::env::var("IS2D_WORK"), std::env::var("IS2D_SAMPLE_KEEP")) else {
+        eprintln!("IS2D_WORK に作品のパス、IS2D_SAMPLE_KEEP に残すキーフレームを入れて実行してください");
+        return;
+    };
+    let keep: std::collections::HashSet<(String, usize)> = keep
+        .split(',')
+        .filter_map(|k| {
+            let (name, frame) = k.rsplit_once(':')?;
+            Some((name.to_owned(), frame.parse::<usize>().ok()? - 1))
+        })
+        .collect();
+    let mut app = Is2dApp::default();
+    project_io::open_project_in_tab(&mut app, std::path::Path::new(&work), None).expect("作品を開ける");
+    let mut kept = 0;
+    app.tab_mut().with_active_timeline_mut(|tl, _| {
+        for layer in &mut tl.layers {
+            let starts: Vec<usize> = layer.keyframes_with_start().map(|(s, _)| s).collect();
+            for (k, start) in starts.into_iter().enumerate() {
+                if keep.contains(&(layer.name.clone(), start)) {
+                    kept += 1;
+                } else {
+                    layer.keyframe_mut(k).cel = timeline::Cel::default();
+                }
+            }
+        }
+    });
+    assert_eq!(kept, keep.len(), "残すキーフレームが見つからない");
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("claude/review-bench/sample.is2d");
+    project_io::save_project_to_path(&mut app, &out).expect("書ける");
+    eprintln!("見本：{}（{:.1}MB）", out.display(), std::fs::metadata(&out).unwrap().len() as f64 / 1e6);
+}
+
+/// 今の判定に合わない地図（ここでは辺1本の片側の色がそろわない）は、開いて使うときに、変換・貼り付けと同じ決まり
+/// （`planar_map::realized`）で切り直して見せ、知らせる。保存すると切り直した地図を書き、次に開くと知らせない（審査
+/// 5616fcc の D-3。直す前は、何も無いものとして見せた）
+#[test]
+fn a_map_failing_the_current_check_is_recut_when_opened() {
+    use crate::doc_actions::{apply, Action};
+    let path = save_many_keyframes("recut", 3);
+    let mut proj = saved_project_at(&path);
+    break_map_colors(&mut proj, 1);
+    let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
+    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+
+    let mut app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
+    assert!(app.scene().len() > 0, "切り直した絵を見せる");
+    assert!(!app.doc.root.layers[0].keyframes[1].cel.maps()[0].is_broken());
+    assert_eq!(
+        app.doc.load_notices.take(),
+        vec![timeline::LoadNotice::Repaired("レイヤー「Layer 1」のコマ 3".to_owned())]
+    );
+    // 切り直した絵には描ける
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke { points: vec![Point::new(300.0, 300.0), Point::new(360.0, 300.0)], radius: 8.0, color: Color32::BLUE },
+    ));
+    // 保存すると切り直した地図を書き、次に開くと正しい地図なので知らせない
+    let out = path.with_file_name("recut_saved.is2d");
+    crate::project_io::save_project_to_path(&mut app, &out).unwrap();
+    let back = saved_project_at(&out);
+    assert_ne!(saved_map_content(&back, &back.timeline.layers[0].keyframes[1].maps[0]), broken);
+    let mut again = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut again, &out, None).expect("開ける");
+    assert!(apply(&mut again, Action::ScrubRulerToFrame { frame: 2 }));
+    assert!(again.doc.load_notices.take().is_empty(), "切り直して保存した地図で、また知らせた");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 波形にできない音（読めないバイト）は、作品を開かないのでなく「読めない音」として開いて知らせる。バイトは残して保存し、
+/// 区間もそのまま。鳴らさず、区間の端は動かせない（長さが分からない）（審査 5616fcc の D-3、持ち主が決めた 2026-11-27。
+/// 直す前は作品全体を開かなかった）
+#[test]
+fn unreadable_sound_opens_silently_and_keeps_its_bytes() {
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    let mut saved = project_io::ProjectDocument::of(&app.doc);
+    saved.sounds[0].bytes = b"broken"[..].into();
+    let clip = saved.timeline.layers[0].keyframes[0].sound;
+    let doc = saved.clone().into_document().expect("読めない音があっても開く");
+    assert!(!doc.sounds[0].readable());
+    assert_eq!(&*doc.sounds[0].encoded, b"broken");
+    assert_eq!(
+        doc.load_notices.take(),
+        vec![timeline::LoadNotice::UnreadableSound(saved.sounds[0].name.clone())]
+    );
+    assert!(crate::sound::sounding_at(&doc, &doc.root, 0).iter().all(|v| v.sound.pcm.samples.is_empty()), "鳴らす波形が無い");
+    assert!(doc.root.layers[0].sound_trim_range(0, crate::sound::SoundEdge::End, &doc.sounds, doc.fps).is_none());
+    // 保存すると、バイトと区間をそのまま書く
+    let again = project_io::ProjectDocument::of(&doc);
+    assert_eq!(&*again.sounds[0].bytes, b"broken");
+    assert_eq!(format!("{:?}", again.timeline.layers[0].keyframes[0].sound), format!("{clip:?}"));
+}
+
 /// 開いたあと、まだ確かめていない地図を裏のスレッドで全部確かめる（初めて見るコマで待たない）。壊れた地図は、使うときに
 /// 見つけたときと同じく、何も無いものとして描き、場所を1回知らせる。閉じた文書の地図は確かめない（弱い参照で持つ）。
 /// 直す前は、見るまで確かめなかった（レビュー f01d518 の R4）
@@ -37077,7 +37294,7 @@ fn maps_are_checked_in_the_background_after_opening() {
     use crate::doc_actions::{apply, Action};
     let path = save_many_keyframes("background_check", 4);
     let mut proj = saved_project_at(&path);
-    break_map_colors(&mut proj, 1);
+    break_map_off_grid(&mut proj, 1);
     crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
@@ -37114,12 +37331,12 @@ fn maps_are_checked_in_the_background_after_opening() {
         ]
     );
     assert_eq!(
-        app.doc.broken_maps.take(),
-        vec!["レイヤー「Layer 1」のコマ 3".to_owned()]
+        app.doc.load_notices.take(),
+        vec![timeline::LoadNotice::Blank("レイヤー「Layer 1」のコマ 3".to_owned())]
     );
     assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
     assert!(app.scene().len() == 0, "壊れた地図は何も無いものとして描く");
-    assert!(app.doc.broken_maps.take().is_empty(), "知らせるのは1回");
+    assert!(app.doc.load_notices.take().is_empty(), "知らせるのは1回");
     assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 4 }));
     assert!(app.scene().len() > 0);
 
@@ -37801,7 +38018,7 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
     assert_eq!(app.history.undo_stack.len(), undo_before);
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some(crate::canvas_tool::Refusal::OffGrid.message())
+        Some(crate::canvas_tool::Refusal::OffGrid.message().as_str())
     );
     // 書く入口そのもの：断るときは何も変えない
     let mut cel = app.doc.root.layers[0].keyframes[0].cel.clone();
@@ -39689,8 +39906,9 @@ fn sounds_survive_save_and_open() {
     assert!(doc.next_sound_id > doc.sounds[0].id);
 }
 
-/// 壊れた音のデータ（読めないバイト・無い音を指す区間・音の長さを越える区間・絵のあるキーフレームの音・重なる番号）は、
-/// 開くときに壊れたファイルとして断る（黙って音を外さない）
+/// 壊れた音のデータ（無い音を指す区間・音の長さを越える区間・絵のあるキーフレームの音・重なる番号）は、開くときに壊れた
+/// ファイルとして断る（黙って音を外さない）。読めないバイトの音は断らず、「読めない音」として開く
+/// （`unreadable_sound_opens_silently_and_keeps_its_bytes`）
 #[test]
 fn broken_sound_data_is_refused_when_opening() {
     let mut app = Is2dApp::default();
@@ -39705,7 +39923,7 @@ fn broken_sound_data_is_refused_when_opening() {
     fn kf(d: &mut project_io::ProjectDocument) -> &mut project_io::SavedKeyframe {
         &mut d.timeline.layers[0].keyframes[0]
     }
-    assert!(refused(&|d| d.sounds[0].bytes = b"broken"[..].into()));
+    assert!(!refused(&|d| d.sounds[0].bytes = b"broken"[..].into()), "読めない音は開く");
     assert!(refused(&|d| kf(d).sound.as_mut().unwrap().sound = 99));
     assert!(refused(&|d| kf(d).sound.as_mut().unwrap().end += 1));
     assert!(refused(&|d| {

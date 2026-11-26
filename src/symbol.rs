@@ -699,7 +699,7 @@ pub(crate) struct Document {
     /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
     /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
-    pub(crate) broken_maps: crate::timeline::BrokenMaps,
+    pub(crate) load_notices: crate::timeline::LoadNotices,
 }
 
 /// 取り消しの控えにする文書の中身（`Document::content`・`replace_content`）。番号の数え札（取り消しても戻さない：番号を
@@ -737,7 +737,7 @@ impl Document {
             next_group_id,
             next_sound_id,
             revision: crate::vector_engine::next_mesh_revision(),
-            broken_maps: Default::default(),
+            load_notices: Default::default(),
         }
     }
 
@@ -759,7 +759,7 @@ impl Document {
             next_symbol_id: _,
             next_group_id: _,
             next_sound_id: _,
-            broken_maps: _,
+            load_notices: _,
         } = self;
         DocContent {
             root: root.clone(),
@@ -783,7 +783,7 @@ impl Document {
             next_symbol_id: _,
             next_group_id: _,
             next_sound_id: _,
-            broken_maps: _,
+            load_notices: _,
         } = self;
         DocContent {
             root: std::mem::replace(root, content.root),
@@ -823,7 +823,7 @@ impl Default for Document {
             next_group_id: 1,
             next_sound_id: 1,
             revision: 0,
-            broken_maps: Default::default(),
+            load_notices: Default::default(),
         }
     }
 }
@@ -855,10 +855,10 @@ impl Document {
     /// まだ確かめていない地図（ファイルから読んだもの）に、壊れていたときの知らせ先（`broken_maps`）と場所を付ける
     /// （読み込みのあと）
     pub(crate) fn watch_broken_maps(&self) {
-        self.root.watch_broken_maps(&self.broken_maps, "");
+        self.root.watch_broken_maps(&self.load_notices, "");
         for sym in self.library.iter() {
             sym.timeline
-                .watch_broken_maps(&self.broken_maps, &format!("シンボル「{}」の", sym.name));
+                .watch_broken_maps(&self.load_notices, &format!("シンボル「{}」の", sym.name));
         }
     }
 

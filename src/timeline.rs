@@ -237,8 +237,8 @@ struct LazyStored {
     /// 確かめた地図（まだ確かめていなければ空。正しい地図なら、面に1つずつ別の番号を記した地図：アプリが書いた地図は
     /// みなそうなので、ふつうは `stored` と同じ地図。壊れていれば `None`。編集で作った地図は、はじめから確かめてある）
     checked: OnceLock<Option<StoredMap>>,
-    /// 壊れていたときの知らせ先と、その場所（読み込みのあとに付ける：`Document::watch_broken_maps`）
-    notice: OnceLock<(BrokenMaps, String)>,
+    /// 切り直した・壊れていたときの知らせ先と、その場所（読み込みのあとに付ける：`Document::watch_broken_maps`）
+    notice: OnceLock<(LoadNotices, String)>,
 }
 
 /// 図形の番号をみな新しい番号にする替え方（1回の作業（キーフレームの移動・複製）で1つ。グループの番号の `gid_map` と
@@ -279,15 +279,26 @@ impl LazyStored {
     /// 確かめた地図：しまった地図の計算に使う写し（`LayerBase::of_stored`。持ち主（画面の土台など）が持っていればそれ）で
     /// 確かめる（`LayerBase::checked_stored`。受け入れの判定は `PlanarMap::checked` と同じ1つ）。正しければ、面に1つずつ
     /// 別の番号を記した地図（番号が変わらなければ、しまった地図そのもの）。確かめに作った判定の形・輪郭・面は写しに残る
-    /// ので、写しの持ち主はそのまま使える（`ScopeMap::base`）。壊れていれば `None` にして知らせる
+    /// ので、写しの持ち主はそのまま使える（`ScopeMap::base`）。今の判定に合わなければ、変換・貼り付けと同じ「その座標の
+    /// 格子で正しい地図にする」決まり（`realized`）で切り直して使い、知らせる（保存すると切り直した地図を書く）。それでも
+    /// 作れなければ `None`（何も無い地図として見せ、その階層には書かない：`Cel::keeps_blank_maps`）にして知らせる（審査
+    /// 5616fcc の D-3。前は今の判定に合わなければ、いつも何も無い地図にした）
     fn check(&self) -> Option<StoredMap> {
-        let checked = LayerBase::of_stored(&self.stored).checked_stored();
-        if checked.is_none() {
-            if let Some((sink, at)) = self.notice.get() {
-                sink.push(at.clone());
-            }
+        let base = LayerBase::of_stored(&self.stored);
+        if let Some(checked) = base.checked_stored() {
+            return Some(checked);
         }
-        checked
+        let repaired = crate::planar_map::realized(base.map(), kurbo::Affine::IDENTITY)
+            .map(|m| m.into_stored(Some(&self.stored)))
+            .filter(|s| !s.is_empty());
+        if let Some((sink, at)) = self.notice.get() {
+            sink.push(if repaired.is_some() {
+                LoadNotice::Repaired(at.clone())
+            } else {
+                LoadNotice::Blank(at.clone())
+            });
+        }
+        repaired
     }
 }
 
@@ -351,20 +362,31 @@ impl UncheckedMaps {
     }
 }
 
-/// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所の知らせ。文書ごとに1つ（`Document::broken_maps`）
-#[derive(Clone, Debug, Default)]
-pub(crate) struct BrokenMaps(Arc<Mutex<Vec<String>>>);
+/// ファイルから読んだものの知らせ1つ
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadNotice {
+    /// 今の判定に合わなかった地図を切り直した（場所）
+    Repaired(String),
+    /// 切り直しても作れなかった地図を、何も無い地図として見せている（場所）
+    Blank(String),
+    /// 波形にできなかった音（名前）
+    UnreadableSound(String),
+}
 
-impl BrokenMaps {
-    fn push(&self, at: String) {
+/// ファイルから読んだものの知らせ（地図は使うときに確かめるので、あとから増える）。文書ごとに1つ（`Document::load_notices`）
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LoadNotices(Arc<Mutex<Vec<LoadNotice>>>);
+
+impl LoadNotices {
+    pub(crate) fn push(&self, notice: LoadNotice) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(at);
+            .push(notice);
     }
 
-    /// まだ知らせていない場所（取り出すと空になる）
-    pub(crate) fn take(&self) -> Vec<String> {
+    /// まだ知らせていないもの（取り出すと空になる）
+    pub(crate) fn take(&self) -> Vec<LoadNotice> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
@@ -420,8 +442,8 @@ impl ScopeMap {
         }
     }
 
-    /// 確かめたら壊れていた（何も無い地図として使っている。保存では読んだままの地図を書く）
-    #[cfg(test)]
+    /// 確かめたら壊れていて、切り直しても作れなかった（何も無い地図として使っている。保存では読んだままの地図を書く。
+    /// この階層には書かない：`Cel::keeps_blank_maps`）
     pub(crate) fn is_broken(&self) -> bool {
         matches!(self.map.checked.get(), Some(None))
     }
@@ -433,7 +455,7 @@ impl ScopeMap {
     }
 
     /// 壊れていたときの知らせ先 `sink` と場所 `at` を付ける（まだ確かめていない地図だけ。読み込みのあと）
-    fn watch(&self, sink: &BrokenMaps, at: impl FnOnce() -> String) {
+    fn watch(&self, sink: &LoadNotices, at: impl FnOnce() -> String) {
         if self.map.checked.get().is_none() {
             let _ = self.map.notice.set((sink.clone(), at()));
         }
@@ -686,6 +708,16 @@ fn test_scope_map_from_shapes(
 }
 
 impl Cel {
+    /// 前のセル画 `before` の、何も無い地図として見せている地図（`ScopeMap::is_broken`）を、みなそのまま持っているか（その
+    /// 階層を書き換えていないか。書けば、ファイルから読んだ元の地図を黙って置き換える：審査 5616fcc の D-3）
+    pub(crate) fn keeps_blank_maps(&self, before: &Cel) -> bool {
+        before
+            .maps
+            .iter()
+            .filter(|m| m.is_broken())
+            .all(|b| self.maps.iter().any(|m| Arc::ptr_eq(&m.map, &b.map)))
+    }
+
     /// 階層ごとの生の図形の地図（読むだけ。書くのは `Cel` の関数だけで、そこで版を上げる：約束の棚卸し 5616fcc の B の C3・
     /// A の P-22）
     pub(crate) fn maps(&self) -> &Arc<Vec<ScopeMap>> {
@@ -2127,7 +2159,8 @@ impl Layer {
     ) -> Option<std::ops::RangeInclusive<usize>> {
         use crate::sound::{frames_to_reach, SoundEdge};
         let clip = self.keyframes[k].sound?;
-        let len = sounds.iter().find(|s| s.id == clip.sound)?.len();
+        // 読めない音は長さが分からないので、端を動かせない
+        let len = sounds.iter().find(|s| s.id == clip.sound).filter(|s| s.readable())?.len();
         let shown = self.sounding_frames(k, fps)?;
         let span_end = self.span_end_for_keyframe(k) + 1;
         Some(match edge {
@@ -2260,7 +2293,7 @@ impl Timeline {
 
     /// まだ確かめていない地図に、壊れていたときの知らせ先 `sink` と場所（`place` に続けて、レイヤーの名前とキーフレームの
     /// コマの番号）を付ける（`Document::watch_broken_maps`）
-    pub(crate) fn watch_broken_maps(&self, sink: &BrokenMaps, place: &str) {
+    pub(crate) fn watch_broken_maps(&self, sink: &LoadNotices, place: &str) {
         for layer in &self.layers {
             for (start, kf) in layer.keyframes_with_start() {
                 for m in kf.cel.maps.iter() {

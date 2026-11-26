@@ -38,6 +38,9 @@ pub(crate) struct Sound {
     pub(crate) pcm: Arc<Pcm>,
     /// 波形の絵のための山の表（`Peaks`。初めて描くときに作る写し。保存しない。写しの音と共有する）
     peaks: Arc<Peaks>,
+    /// 波形にできたか（できない音は「読めない音」：バイトは残して保存し、鳴らさない。長さが分からないので、区間の端は
+    /// 動かせない）
+    readable: bool,
 }
 
 /// 波形の絵の山の表の入れ物：（細かさ, 表）を1つ。表は、音の中の位置を細かさ（`SOUND_RATE` の単位の長さ）ごとに区切った、
@@ -93,7 +96,29 @@ impl Sound {
             encoded,
             pcm: Arc::new(pcm),
             peaks: Arc::default(),
+            readable: true,
         })
+    }
+
+    /// ファイルから読んだ音：波形にできなければ「読めない音」にする（作品は開く。バイトは残す：審査 5616fcc の D-3、
+    /// 持ち主が決めた 2026-11-27。前は1つでも読めないと作品全体を開かなかった）
+    pub(crate) fn loaded(id: u64, name: String, encoded: Arc<[u8]>) -> Self {
+        Self::new(id, name.clone(), encoded.clone()).unwrap_or_else(|_| Self {
+            id,
+            name,
+            encoded,
+            pcm: Arc::new(Pcm {
+                rate: SOUND_RATE as u32,
+                samples: Vec::new(),
+            }),
+            peaks: Arc::default(),
+            readable: false,
+        })
+    }
+
+    /// 波形にできた音か（できない音は鳴らさず、区間の端を動かせない）
+    pub(crate) fn readable(&self) -> bool {
+        self.readable
     }
 
     /// 音の中の位置 `a` から `b` の前まで（`SOUND_RATE` の単位。`a < b`）の、左右の値のいちばん小さいもの・大きいもの
@@ -184,13 +209,13 @@ impl SoundClip {
         })
     }
 
-    /// 音のライブラリ `sounds` に照らして、正しい区間か（番号の音があり、`start < end ≤ 音の長さ`）。区間を受け入れる
-    /// 判定はこれ1つ（読み込み・付ける所）
+    /// 音のライブラリ `sounds` に照らして、正しい区間か（番号の音があり、`start < end ≤ 音の長さ`。読めない音は長さが
+    /// 分からないので、長さは見ない）。区間を受け入れる判定はこれ1つ（読み込み・付ける所）
     pub(crate) fn fits(&self, sounds: &[Arc<Sound>]) -> bool {
         sounds
             .iter()
             .find(|s| s.id == self.sound)
-            .is_some_and(|s| self.start < self.end && self.end <= s.len())
+            .is_some_and(|s| self.start < self.end && (!s.readable || self.end <= s.len()))
     }
 }
 

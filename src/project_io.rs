@@ -812,8 +812,7 @@ impl ProjectDocument {
     /// 浮いた片を置けなければ `Err`（画面に見えている片が入らないファイルは書かない）
     pub(crate) fn from_app(tab: &Tab) -> Result<Self, String> {
         let doc = tab.committed_document_copy().ok_or_else(|| {
-            "選んだ図形を置けないため保存できません（動かすか、取り消してから保存してください）"
-                .to_owned()
+            format!("選んだ図形を置けないため保存できません。{}", crate::canvas_tool::undo_exit_text())
         })?;
         Ok(Self::of(&doc))
     }
@@ -936,15 +935,15 @@ impl ProjectDocument<ReadTiles> {
         if !all_read {
             return Err(broken());
         }
-        // 音のライブラリ：どの音も、使える番号（`is_safe_id`）で番号が重ならず、波形にできること。そうでなければ壊れた
-        // ファイル（黙って音を外さない）
+        // 音のライブラリ：どの音も、使える番号（`is_safe_id`）で番号が重ならないこと。そうでなければ壊れたファイル（黙って
+        // 音を外さない）。波形にできない音は「読めない音」として開いて知らせる（`Sound::loaded`）
         let mut sounds: Vec<Arc<crate::sound::Sound>> = Vec::with_capacity(self.sounds.len());
         let mut sound_ids = HashSet::with_capacity(self.sounds.len());
         for s in std::mem::take(&mut self.sounds) {
             if !is_safe_id(s.id) || !sound_ids.insert(s.id) {
                 return Err("プロジェクトファイルの音が壊れています".to_owned());
             }
-            sounds.push(Arc::new(crate::sound::Sound::new(s.id, s.name, s.bytes)?));
+            sounds.push(Arc::new(crate::sound::Sound::loaded(s.id, s.name, s.bytes)));
         }
         let fps = self.timeline.fps.clamp(1, crate::symbol::MAX_FPS);
         let mut timeline = Timeline::from_saved(self.timeline, trimmed)?;
@@ -1057,6 +1056,9 @@ impl ProjectDocument<ReadTiles> {
             fresh_sound_ids.next_to_save(self.next_sound_id),
         );
         doc.watch_broken_maps();
+        for s in doc.sounds.iter().filter(|s| !s.readable()) {
+            doc.load_notices.push(crate::timeline::LoadNotice::UnreadableSound(s.name.clone()));
+        }
         Ok(doc)
     }
 }
