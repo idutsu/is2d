@@ -57,7 +57,11 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
     // 動かしていない浮いた片は、どの操作でも先に戻してから地図を編集する（`apply_anchor_edit_at`）ので、カーソル合わせも
     // 戻した後の地図（セル画の地図）で行う。動かした浮いた片は、残りの地図と片の地図（`floating_maps`）で行う
     let floating = session.floating().filter(|fl| fl.modified);
-    let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
+    let pieces: HashSet<ShapeId> = if floating.is_some() {
+        session.floating_view().piece_ids()
+    } else {
+        HashSet::new()
+    };
     // 浮いた片（ほかの図形と重なることがある）は入れない
     let in_map = |s: &FillShape| is_map_shape(s, scope) && !pieces.contains(&s.shape_id);
     let mut by_layer: Vec<(LayerId, usize, Vec<&FillShape>)> = Vec::new();

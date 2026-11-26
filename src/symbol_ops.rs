@@ -68,14 +68,16 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     // 断る）、インスタンスを置いてから書く（今の階層の中身をみな選んでいても、今の階層の地図がまだあるうちにインスタンス
     // を入れるので、今の階層の重なりの位置が変わらない）。断るのは文書を変える前（採番・登録より前）：`apply` は `false`
     // なら文書は変わっていないものとして控えを捨て、採番を戻す。断るときは、浮いた片を持ち上げる前に戻す
+    let keep: HashSet<u64> = tab
+        .session
+        .floating_view()
+        .pieces()
+        .iter()
+        .filter(|p| selection.contains_shape(p))
+        .map(|p| p.shape_id)
+        .collect();
     let rest_plan = match tab.session.take_floating() {
         Some(mut fl) => {
-            let keep: HashSet<u64> = fl
-                .pieces()
-                .iter()
-                .filter(|p| selection.contains_shape(p))
-                .map(|p| p.shape_id)
-                .collect();
             let Ok(rest) = fl.split_off(&keep, &tab.session.editing_group_path) else {
                 tab.session.set_floating(before);
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);

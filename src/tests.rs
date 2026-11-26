@@ -1825,8 +1825,8 @@ fn test_nested_grouping_edit_in_place_and_single_level_ungroup() {
     let cel_shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert_eq!(cel_shapes.len(), 2);
     assert!(cel_shapes.iter().all(|s| s.group_path == vec![eye_gid]));
-    let fl = app.session.floating().expect("生に戻った図形は浮いた片");
-    assert!(fl
+    app.session.floating().expect("生に戻った図形は浮いた片");
+    assert!(app.session.floating_view()
         .pieces()
         .iter()
         .any(|p| p.color == red && p.group_path.is_empty()));
@@ -11405,9 +11405,9 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .floating()
         .expect("マーキー矩形スライス直後に Floating が生成されること");
     assert!(!fl.modified);
-    assert_eq!(fl.pieces().len(), 1);
-    assert_eq!(fl.remainder().count(), 1);
-    assert_eq!(fl.hidden().len(), 1);
+    assert_eq!(app.session.floating_view().pieces().len(), 1);
+    assert_eq!(app.session.floating_view().remainder().count(), 1);
+    assert_eq!(app.session.floating_view().hidden().len(), 1);
 
     run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating().is_none());
@@ -15005,9 +15005,9 @@ fn test_g1_5_floating_mutations_auto_rebuild_overlay() {
     assert_eq!(app.scene().get(0).unwrap().color, Color32::RED);
 
     let layers: HashSet<u64> = [app.doc.root.layers[0].id].into();
+    let ids = app.tabs[0].session.floating_view().piece_ids();
     app.tabs[0].session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
-            let ids = fl.piece_ids();
             assert!(fl.recolor(&ids, Color32::BLUE, &layers).unwrap());
         }
     });
@@ -17054,7 +17054,7 @@ fn test_m4_1_alt_duplicate_touching_sliced_pieces_merges_into_single_shape_on_de
     assert!(
         app.session
             .floating()
-            .is_some_and(|fl| fl.pieces().len() == 1),
+            .is_some_and(|_| app.session.floating_view().pieces().len() == 1),
         "つながったスライス片は選び足した時点で1片に結合され、Alt複製後も1片が floating に入っていること"
     );
 
@@ -18562,11 +18562,11 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                     );
                 } else if match (&before_floating, app.session.floating()) {
                     (None, None) => true,
-                    (Some(a), Some(b)) => a.matches_undo_snapshot(b),
+                    (Some(a), Some(b)) => a.same_content(b),
                     _ => false,
                 } {
                     // 4. 作品の中身も浮いた片も変わらなければ、Undo は増えない（取り消しても何も起きない1手を作らない。取り消しが
-                    //    戻すのは、作品の中身と浮いた片：浮いた片が同じかは `Floating::matches_undo_snapshot`。その場に貼り付けは、
+                    //    戻すのは、作品の中身と浮いた片：浮いた片が同じかは `Floating::same_content`。その場に貼り付けは、
                     //    確定した中身が同じでも浮いた写しができるので、1手になる）
                     assert_eq!(
                         after_undo, before_undo,
@@ -21493,8 +21493,8 @@ fn floating_pieces_stay_selected_after_deselecting_a_dividing_line() {
     assert!(app.session.floating().is_some(), "矩形で選ぶと浮いた片になる");
     // 塗りを分ける線を Shift クリックで外す
     crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 200.0), true, true);
-    let fl = app.session.floating().expect("塗りは浮いたまま");
-    let unselected: Vec<u64> = fl.pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).map(|p| p.shape_id).collect();
+    app.session.floating().expect("塗りは浮いたまま");
+    let unselected: Vec<u64> = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).map(|p| p.shape_id).collect();
     assert!(unselected.is_empty(), "浮いているのに選ばれていない片がある: {unselected:?}");
 }
 
@@ -21922,8 +21922,8 @@ fn selections_keep_their_lines_through_operations() {
             }
             ops.push(name.to_string());
             // 浮いた片の片は、いつもみな選ばれている（`Session::sync_floating`）
-            if let Some(fl) = app.session.floating() {
-                let n = fl.pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).count();
+            if app.session.floating().is_some() {
+                let n = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection.contains_shape(p)).count();
                 if n > 0 {
                     bad.push(format!("{case}（{}）：浮いているのに選ばれていない片が {n} 個", ops.join("・")));
                     break;
@@ -22591,9 +22591,9 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
                 scene_idx: right_idx
             }
         ));
-        let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces().len(), 1);
-        assert_eq!(fl.remainder().count(), 0);
+        app.session.floating().expect("Floating が存在すること");
+        assert_eq!(app.session.floating_view().pieces().len(), 1);
+        assert_eq!(app.session.floating_view().remainder().count(), 0);
         assert_eq!(app.session.selection.shapes.len(), 1);
 
         let left_idx = app
@@ -22665,9 +22665,9 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
                 additive: true,
             },
         ));
-        let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces().len(), 1);
-        assert_eq!(fl.remainder().count(), 1);
+        app.session.floating().expect("Floating が存在すること");
+        assert_eq!(app.session.floating_view().pieces().len(), 1);
+        assert_eq!(app.session.floating_view().remainder().count(), 1);
     }
 
     // 5. 左端を選び、Shift+矩形で右端を足す（つながっていない）→ 片が2つ
@@ -22689,8 +22689,8 @@ fn test_merge_touching_sliced_pieces_on_additive_select() {
                 additive: true,
             },
         ));
-        let fl = app.session.floating().expect("Floating が存在すること");
-        assert_eq!(fl.pieces().len(), 2);
+        app.session.floating().expect("Floating が存在すること");
+        assert_eq!(app.session.floating_view().pieces().len(), 2);
     }
 
     // 6. 1 のあと動かさずに選択を外す → 元の図形のまま（番号も同じ）で、Undo の履歴が増えない
@@ -22768,9 +22768,9 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
                 additive: true,
             },
         ));
-        let fl_before = app.session.floating().unwrap();
-        assert_eq!(fl_before.pieces().len(), 2);
-        assert_eq!(fl_before.remainder().count(), 2);
+        app.session.floating().unwrap();
+        assert_eq!(app.session.floating_view().pieces().len(), 2);
+        assert_eq!(app.session.floating_view().remainder().count(), 2);
 
         let b_idx = app
             .scene()
@@ -22782,9 +22782,9 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             Action::ToggleSelectionAt { scene_idx: b_idx }
         ));
 
-        let fl_after = app.session.floating().unwrap();
-        assert_eq!(fl_after.pieces().len(), 1);
-        assert_eq!(fl_after.remainder().count(), 1);
+        app.session.floating().unwrap();
+        assert_eq!(app.session.floating_view().pieces().len(), 1);
+        assert_eq!(app.session.floating_view().remainder().count(), 1);
         let rem_idx = app
             .scene()
             .iter()
@@ -22800,9 +22800,9 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             &mut app,
             Action::ToggleSelectionAt { scene_idx: rem_idx }
         ));
-        let fl_all = app.session.floating().unwrap();
-        assert_eq!(fl_all.pieces().len(), 1);
-        assert_eq!(fl_all.remainder().count(), 0);
+        app.session.floating().unwrap();
+        assert_eq!(app.session.floating_view().pieces().len(), 1);
+        assert_eq!(app.session.floating_view().remainder().count(), 0);
         assert_eq!(app.session.selection.shapes.len(), 1);
     }
 
@@ -22892,8 +22892,8 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
                 additive: true,
             },
         ));
-        assert_eq!(app.session.floating().unwrap().pieces().len(), 2);
-        assert_eq!(app.session.floating().unwrap().remainder().count(), 1);
+        assert_eq!(app.session.floating_view().pieces().len(), 2);
+        assert_eq!(app.session.floating_view().remainder().count(), 1);
 
         // 上の赤（残りが無い片）を Shift+クリックで外す
         let red_idx = app
@@ -22905,9 +22905,9 @@ fn test_deselected_slice_piece_merges_into_touching_remainder() {
             &mut app,
             Action::ToggleSelectionAt { scene_idx: red_idx }
         ));
-        let fl = app.session.floating().unwrap();
-        assert_eq!(fl.pieces().len(), 1);
-        assert_eq!(fl.remainder().count(), 2);
+        app.session.floating().unwrap();
+        assert_eq!(app.session.floating_view().pieces().len(), 1);
+        assert_eq!(app.session.floating_view().remainder().count(), 2);
 
         let scene_ids: Vec<_> = app.scene().iter().map(|s| s.shape_id).collect();
         let unique_ids: std::collections::HashSet<_> = scene_ids.iter().copied().collect();
@@ -25722,11 +25722,11 @@ fn test_anchor_delete_on_unmoved_selection_keeps_shared_border() {
             },
         ));
         // 赤と黒の境目にある頂点（赤の図形と黒の図形の両方の輪郭にある点）を、残り（左）か片（右）から選ぶ
-        let fl = app.session.floating().expect("選択");
+        app.session.floating().expect("選択");
         let side: Vec<FillShape> = if right_side {
-            fl.pieces().to_vec()
+            app.session.floating_view().pieces().to_vec()
         } else {
-            fl.remainder().cloned().collect()
+            app.session.floating_view().remainder().cloned().collect()
         };
         let verts = |c: Color32| -> Vec<Point> {
             side.iter()
@@ -25840,7 +25840,7 @@ fn test_floating_anchor_delete_on_shared_border_changes_both_pieces() {
     ] {
         assert!(doc_actions::apply(&mut app, action));
     }
-    let pieces = |app: &Is2dApp| app.session.floating().expect("浮いた片").pieces().to_vec();
+    let pieces = |app: &Is2dApp| app.session.floating_view().pieces().to_vec();
     assert!(app.session.has_modified_floating());
     // 赤と黒の境目にある角（赤の片と黒の片の両方の輪郭にある点）
     let verts = |c: Color32| -> Vec<Point> {
@@ -28434,8 +28434,8 @@ mod map_overlay {
             }
         ));
         let piece_segs = |app: &Is2dApp| {
-            app.session.floating().map(|fl| {
-                fl.pieces()
+            app.session.floating().map(|_| {
+                app.session.floating_view().pieces()
                     .iter()
                     .map(|p| p.exterior.segments.len())
                     .sum::<usize>()
@@ -29464,8 +29464,8 @@ mod map_overlay {
             Point::new(80.0, 20.0),
             true,
         );
-        let fl = app.session.floating().expect("選択");
-        let colors: Vec<Color32> = fl.pieces().iter().map(|p| p.color).collect();
+        app.session.floating().expect("選択");
+        let colors: Vec<Color32> = app.session.floating_view().pieces().iter().map(|p| p.color).collect();
         for c in [Color32::RED, Color32::BLUE, Color32::GREEN] {
             assert_eq!(
                 colors.iter().filter(|&&x| x == c).count(),
@@ -29536,10 +29536,10 @@ mod map_overlay {
                 doc_actions::apply(&mut app, action);
             }
             for _ in 0..20 {
-                let Some(fl) = app.session.floating() else {
+                let Some(_) = app.session.floating() else {
                     break;
                 };
-                let segs: Vec<QuadBez> = fl
+                let segs: Vec<QuadBez> = app.session.floating_view()
                     .pieces()
                     .iter()
                     .flat_map(|s| s.contours())
@@ -29558,11 +29558,11 @@ mod map_overlay {
                     continue;
                 }
                 // 片の外（レイヤーの図形）の角だったときは、選択を外してレイヤーの地図で編集している
-                let Some(fl) = app.session.floating() else {
+                let Some(_) = app.session.floating() else {
                     break;
                 };
                 edits += 1;
-                if !PlanarMap::from_faces(fl.pieces().iter()).is_valid() {
+                if !PlanarMap::from_faces(app.session.floating_view().pieces().iter()).is_valid() {
                     bad += 1;
                 }
             }
@@ -29617,7 +29617,7 @@ mod map_overlay {
                     additive: false,
                 },
             ));
-            let before = app.session.floating().map_or(0, |f| f.pieces().len());
+            let before = app.session.floating().map_or(0, |_| app.session.floating_view().pieces().len());
             let (y0, y1) = (-130.0 + r.f() * 80.0, 30.0 + r.f() * 100.0);
             let x2 = x1 + 20.0 + r.f() * 80.0;
             doc_actions::apply(
@@ -29628,8 +29628,8 @@ mod map_overlay {
                     additive: true,
                 },
             );
-            let fl = app.session.floating().expect("選択");
-            let pieces: Vec<FillShape> = fl.pieces().to_vec();
+            app.session.floating().expect("選択");
+            let pieces: Vec<FillShape> = app.session.floating_view().pieces().to_vec();
             // 同じ色の片どうしが接している所：片の輪郭の区間の真ん中から、
             // 片の外へ 0.05px 出た点が、同じ色の別の片に入るか
             let mut seams = 0;
@@ -30041,7 +30041,7 @@ mod map_overlay {
         assert!(app
             .session
             .floating()
-            .is_some_and(|fl| !fl.pieces().is_empty()));
+            .is_some_and(|_| !app.session.floating_view().pieces().is_empty()));
         act(&mut app, doc_actions::Action::Deselect);
         // 矩形で切った片を Alt 複製で動かす → 確定
         assert!(act(
@@ -30121,7 +30121,7 @@ mod map_overlay {
         assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
         assert!(doc_actions::copy_selected_shapes(&mut app));
         assert!(doc_actions::paste_clipboard(&mut app, true));
-        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        let pieces = app.session.floating_view().pieces().to_vec();
         assert_eq!(pieces.len(), original.len());
         assert!(same_areas(&areas_by_color(&pieces), &areas, 1e-9));
         doc_actions::apply(&mut app, doc_actions::Action::Undo);
@@ -30152,7 +30152,7 @@ mod map_overlay {
             binding.instance_gid
         ));
         assert!(doc_actions::paste_clipboard(&mut app, true));
-        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        let pieces = app.session.floating_view().pieces().to_vec();
         let b2 = crate::vector_engine::union_bounding_boxes(&pieces);
         assert!(
             (b2.x0 - bbox.x0).abs() < 1e-6
@@ -30188,7 +30188,7 @@ mod map_overlay {
         );
         let lid = app.doc.root.layers[0].id;
         assert!(doc_actions::paste_clipboard(&mut app, true));
-        let pieces = app.session.floating().unwrap().pieces().to_vec();
+        let pieces = app.session.floating_view().pieces().to_vec();
         assert!(pieces.iter().all(|p| p.layer_id == lid));
         let b3 = crate::vector_engine::union_bounding_boxes(&pieces);
         assert!(
@@ -30592,7 +30592,8 @@ mod map_overlay {
 
     /// 矩形で選んで動かしても、Undo の控えの浮いた片は、しまう形だけを持ち（計算に使う写しは持たない）、残りの地図は
     /// セル画の地図の、切り口で変わらなかった塊を共有する（レビュー 7f63b04 の N-2002。直す前は、控え1件が残りの地図を、
-    /// 計算に使う形と、塊を共有しないしまう形の2つで丸ごと持った）
+    /// 計算に使う形と、塊を共有しないしまう形の2つで丸ごと持った）。セッションの浮いた片の箱も預かり物を持たず、控えは
+    /// その箱を分け合う（設計：claude/浮いた片の中身と写しを分ける設計_cb00886.md）
     #[test]
     fn floating_undo_snapshots_hold_only_stored_maps() {
         let mut app = dense_scene_app(7);
@@ -30605,15 +30606,21 @@ mod map_overlay {
         for _ in 0..3 {
             doc_actions::finish_move_selection_drag(&mut app, KVec2::new(5.0, 3.0), false);
         }
+        // 次の操作の控えは、セッションの浮いた片の箱を分け合う（動かしたあと、もう1回動かすと、その前の控えに入る）
+        let now = app.session.shared_floating().expect("浮いた片");
+        doc_actions::finish_move_selection_drag(&mut app, KVec2::new(5.0, 3.0), false);
+        let last = app.history.undo_stack.back().and_then(|e| e.floating.clone());
+        assert!(
+            last.is_some_and(|l| std::sync::Arc::ptr_eq(&l, &now)),
+            "控えが、セッションの浮いた片の箱を分け合っていない"
+        );
         let cel_map = |lid: u64| {
             let l = app.doc.root.layers.iter().find(|l| l.id == lid).unwrap();
             l.keyframes[0].cel.maps[0].stored().clone()
         };
         let mut rests = 0;
-        for e in app.history.undo_stack.iter() {
-            let Some(fl) = e.floating.as_ref() else {
-                continue;
-            };
+        let session_box = app.session.shared_floating();
+        for fl in app.history.undo_stack.iter().filter_map(|e| e.floating.as_ref()).chain(session_box.as_ref()) {
             for (lid, rest, groups) in fl.stored_maps() {
                 assert!(groups.iter().all(|(_, held)| !held), "控えの片が写しを持つ");
                 let Some((rest, held)) = rest else {
@@ -31030,7 +31037,7 @@ mod map_overlay {
         let pieces = app
             .session
             .floating()
-            .map(|fl| fl.pieces().to_vec())
+            .map(|_| app.session.floating_view().pieces().to_vec())
             .unwrap_or_default();
         assert!(!pieces.is_empty(), "囲んだ所が片になる");
         // 切り口の頂点は文書の座標の格子（1/4096px）に置くので、ステージではその拡大の分（1.4 倍）まで外へ出うる
@@ -31199,7 +31206,7 @@ mod map_overlay {
         assert!(app
             .session
             .floating()
-            .is_some_and(|fl| !fl.pieces().is_empty()));
+            .is_some_and(|_| !app.session.floating_view().pieces().is_empty()));
         assert!(doc_actions::apply(
             &mut app,
             doc_actions::Action::MoveSelected {
@@ -32611,14 +32618,14 @@ fn deselecting_a_moved_piece_keeps_it_above_a_piece_selected_later() {
     assert!(!keep.is_empty());
     assert!(canvas_tool::commit_floating_except(app.tab_mut(), &keep));
     assert_eq!(top(&app), red, "外しても赤が上のまま");
-    let fl = app.session.floating().unwrap();
-    assert!(!fl.pieces().is_empty());
+    app.session.floating().unwrap();
+    assert!(!app.session.floating_view().pieces().is_empty());
     assert!(
-        fl.pieces().iter().all(|p| p.color == blue),
+        app.session.floating_view().pieces().iter().all(|p| p.color == blue),
         "青は浮いたまま"
     );
     assert!(
-        app.session.selected_indices().len() >= fl.pieces().len(),
+        app.session.selected_indices().len() >= app.session.floating_view().pieces().len(),
         "浮いた片はみな選ばれている"
     );
     // 残した青を下へ動かしても、赤はそのまま（青は確定していないので、その下の中身を削っていない）
@@ -33162,14 +33169,14 @@ fn failing_to_return_unselected_pieces_keeps_the_selection() {
     );
     let picked = app.session.selected_indices();
     assert_eq!(picked.len(), 2);
-    let floating_before = app.session.floating().unwrap().pieces().len();
+    let floating_before = app.session.floating_view().pieces().len();
     // 戻す先のセル画が引けない（ロックしたレイヤーは画面の土台に地図を持たない）
     app.doc.root.layers[0].locked = true;
     app.refresh_scene_base();
     assert!(!canvas_tool::commit_floating_except(&mut app, &picked[..1]));
-    let fl = app.session.floating().unwrap();
-    assert_eq!(fl.pieces().len(), floating_before);
-    assert!(fl
+    app.session.floating().unwrap();
+    assert_eq!(app.session.floating_view().pieces().len(), floating_before);
+    assert!(app.session.floating_view()
         .pieces()
         .iter()
         .all(|p| app.session.selection.contains_shape(p)));
@@ -35056,9 +35063,9 @@ fn marquee_cut_overlays_once_for_inside_and_rest() {
         }],
     );
     assert_eq!(crate::planar_map::fed_runs() - before, 1);
-    let fl = app.session.floating().expect("片が浮く");
-    assert_eq!(fl.pieces().len(), 1);
-    assert_eq!(fl.remainder().count(), 1);
+    app.session.floating().expect("片が浮く");
+    assert_eq!(app.session.floating_view().pieces().len(), 1);
+    assert_eq!(app.session.floating_view().remainder().count(), 1);
 }
 
 /// 重ね合わせの1回で、判定の形の索引を作るのは1回：曲線に戻す所（`ChainRestorer`）が作った索引を、続く
@@ -40463,7 +40470,7 @@ fn touched_range_grows_with_length_not_area() {
             }],
         );
         assert_eq!(
-            app.session.floating().map(|fl| fl.pieces().len()),
+            app.session.floating().map(|_| app.session.floating_view().pieces().len()),
             Some(1),
             "線をまるごと選ぶ"
         );
@@ -41531,7 +41538,7 @@ mod strokes {
         assert!(picked.len() == 1 && crate::planar_map::is_line_id(picked[0]));
         assert!(app.session.lift_selected_raw_shapes_to_floating());
         app.session.begin_move_overlay(false, None, Vec::new());
-        let remade = app.session.floating().unwrap().remainder().filter(|s| s.line.is_some()).count();
+        let remade = app.session.floating_view().remainder().filter(|s| s.line.is_some()).count();
         assert!(remade > 0, "角の輪郭の線を作り直す");
         assert!(lines_above_fills(&app));
         // 輪郭の変形の仮表示も同じ：線のある辺を引っぱっている間、作り直した線は塗りより上。赤の上の辺を引っぱると、

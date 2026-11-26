@@ -58,7 +58,7 @@ impl UnsavedTab {
             doc: tab.doc.clone(),
             edit_path: tab.session.edit_path.clone(),
             editing_group_path: tab.session.editing_group_path.clone(),
-            floating: tab.history.snapshot_floating(tab.session.floating()),
+            floating: tab.session.shared_floating(),
         })
     }
 }

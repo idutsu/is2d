@@ -414,16 +414,16 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
     let before = tab.session.selection.clone();
     tab.session
         .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
-    let Some(mut fl) = tab.session.take_floating() else {
-        return true;
-    };
-    let keep: HashSet<ShapeId> = fl
-        .pieces()
+    let pieces = tab.session.floating_view().pieces();
+    let keep: HashSet<ShapeId> = pieces
         .iter()
         .filter(|p| tab.session.selection.contains_shape(p))
         .map(|p| p.shape_id)
         .collect();
-    let all_kept = keep.len() == fl.pieces().len();
+    let all_kept = keep.len() == pieces.len();
+    let Some(mut fl) = tab.session.take_floating() else {
+        return true;
+    };
 
     if !fl.modified {
         if keep.is_empty() {

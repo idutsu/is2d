@@ -421,7 +421,7 @@ fn undo_snapshot(tab: &Tab) -> UndoEntry {
         next_sound_id: _,
         broken_maps: _,
     } = &tab.doc;
-    let floating = tab.history.snapshot_floating(tab.session.floating());
+    let floating = tab.session.shared_floating();
     UndoEntry {
         timeline: root.clone(),
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
@@ -1338,17 +1338,14 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
     let selection = tab.session.selection.clone();
     let world = tab.session.edit_path.world_xform();
     let doc = world.inverse() * affine * world;
-    let hidden = tab
-        .session
-        .floating()
-        .map(|fl| fl.hidden().clone())
-        .unwrap_or_default();
+    let hidden = tab.session.floating_view().hidden().clone();
+    let has_pieces = !tab.session.floating_view().pieces().is_empty();
     // 選んだグループの中の生の図形の階層（レイヤー, 階層）
     let scopes = tab.session.selected_group_scopes();
     // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
     tab.session.update_floating(|fl_opt| {
         if let Some(fl) = fl_opt {
-            if !fl.pieces().is_empty() {
+            if has_pieces {
                 fl.transform(doc);
                 any_transformed = true;
             }

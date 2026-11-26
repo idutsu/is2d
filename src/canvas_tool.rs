@@ -1379,7 +1379,7 @@ impl<'a> Scene<'a> {
     }
 }
 
-pub(crate) use crate::floating::Floating;
+pub(crate) use crate::floating::{Floating, FloatingView};
 use crate::floating::Stage;
 
 /// 親の背景を描く文書の写し：（鍵, 浮いた片を確定した後の文書。確定できなければ `None`）
@@ -1417,7 +1417,9 @@ pub(crate) struct Session {
     /// キャンバス上で進行中のドラッグ操作（ブラシ/消しゴム・選択・自由変形の排他的状態マシン）
     pub(crate) drag: ActiveCanvasDrag,
     pub(crate) selection: Selection,
-    floating: Option<Floating>,
+    /// 浮いた片の中身（分け合える箱。取り消しの控えは箱を分け合う：`shared_floating`）と、その見た目
+    floating: Option<Arc<Floating>>,
+    floating_view: FloatingView,
     pub(crate) hover_target: HoverTarget,
     /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）
     pub(crate) editing_group_path: Vec<u64>,
@@ -1433,10 +1435,10 @@ pub(crate) struct Session {
 
 /// ドラッグを始めるときに、離したときと同じ計算で作った答え（ドラッグ中の見た目に使い、離したときに使い回す：設計
 /// claude/浮いた片と選択の決まりを1つにする設計_ddcd41e.md の 2.2）。使い回すのは、作ったときと今とで、浮いた片
-/// （同じ中身かは `Floating::matches_undo_snapshot`）・選択・階層・計算に使ったセル画の地図がみな同じときだけ（違えば
+/// （同じ中身かは `Floating::same_content`）・選択・階層・計算に使ったセル画の地図がみな同じときだけ（違えば
 /// 作り直す。同じ入力からは同じ答えなので、使い回しても作り直しても答えは同じ）
 struct DropAhead {
-    floating: Option<Floating>,
+    floating: Option<Arc<Floating>>,
     selection: Selection,
     scope: Vec<u64>,
     /// 計算に使ったセル画の地図（生かしておくので、番地が別の地図に使い回されない）
@@ -1490,27 +1492,39 @@ impl Session {
     /// 現在の `Floating` への読み取り専用参照を返す
     #[inline]
     pub(crate) fn floating(&self) -> Option<&Floating> {
-        self.floating.as_ref()
+        self.floating.as_deref()
+    }
+
+    /// 浮いた片の見た目（片・残りの図形、隠す図形）
+    #[inline]
+    pub(crate) fn floating_view(&self) -> &FloatingView {
+        &self.floating_view
+    }
+
+    /// 取り消しの控えにする浮いた片（箱を分け合う。箱は預かり物を持たない：`put_floating`）
+    pub(crate) fn shared_floating(&self) -> Option<Arc<Floating>> {
+        self.floating.clone()
     }
 
     /// `Floating` を置き換え、`overlay` を同期再構築する
     pub(crate) fn set_floating(&mut self, fl: Option<Floating>) {
-        self.floating = fl;
-        self.sync_floating();
+        self.put_floating(fl);
     }
 
-    /// `Floating` を取り出し、`overlay` を同期再構築する
+    /// `Floating` を取り出し、`overlay` を同期再構築する（控えと分け合っていれば中身を写す）
     pub(crate) fn take_floating(&mut self) -> Option<Floating> {
         self.floating_rev += 1;
-        let fl = self.floating.take();
+        let fl = self.floating.take().map(Arc::unwrap_or_clone);
+        self.floating_view = FloatingView::default();
         self.rebuild_overlay_from_floating();
         fl
     }
 
-    /// クロージャで `Floating` を更新し、`overlay` を同期再構築する
+    /// クロージャで `Floating` を更新し、`overlay` を同期再構築する（控えと分け合っていれば中身を写して書く）
     pub(crate) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
-        let res = f(&mut self.floating);
-        self.sync_floating();
+        let mut fl = self.floating.take().map(Arc::unwrap_or_clone);
+        let res = f(&mut fl);
+        self.put_floating(fl);
         res
     }
 
@@ -1522,36 +1536,40 @@ impl Session {
         }
     }
 
-    /// 浮いた片の写しを作り直し（片も残りも無ければ外す）、`overlay` を同期再構築し、片をみな選んで、もう無い図形を選択から
-    /// 外す（浮いた片はいつもみな選ばれている。浮いた片が変わる所はみなここを通るので、片の番号が変わる道を足しても漏れ
-    /// ない。前は片の番号が変わる道ごとに呼ぶ側が選び直し、1つの道（動かしていない片を戻す道）だけ選び直さず、選択の表示
-    /// に無い塗りが、ドラッグで動き、Delete で消えた：設計審査 de92ceb の D-1 の (a)）
-    fn sync_floating(&mut self) {
+    /// 書き換えた浮いた片 `fl` を箱に入れる（浮いた片を書き換える入口はみなここを通る）：重ね順に並べて空のレイヤーを外し
+    /// （片も残りも無ければ外す）、見た目を作り（計算に使う写しは見た目が持つ）、中身の預かり物を外してから箱に入れる
+    /// （箱と取り消しの控えは預かり物を持たない：`Floating::drop_fresh`）。そして `overlay` を同期再構築し、片をみな選んで、
+    /// もう無い図形を選択から外す（浮いた片はいつもみな選ばれている。浮いた片が変わる所はみなここを通るので、片の番号が
+    /// 変わる道を足しても漏れない。前は片の番号が変わる道ごとに呼ぶ側が選び直し、1つの道（動かしていない片を戻す道）だけ
+    /// 選び直さず、選択の表示に無い塗りが、ドラッグで動き、Delete で消えた：設計審査 de92ceb の D-1 の (a)）
+    fn put_floating(&mut self, fl: Option<Floating>) {
         self.floating_rev += 1;
         let world = self.edit_path.world_xform();
-        if let Some(fl) = &mut self.floating {
-            fl.refresh(
-                world,
-                &self.editing_group_path,
-                self.base_cache.layer_order_ids(),
-            );
-            if fl.is_empty() {
-                self.floating = None;
-            }
-        }
+        let fl = fl.and_then(|mut fl| {
+            fl.tidy(self.base_cache.layer_order_ids());
+            (!fl.is_empty()).then_some(fl)
+        });
+        self.floating_view = fl.as_ref().map_or_else(FloatingView::default, |fl| {
+            FloatingView::of(fl, world, &self.editing_group_path)
+        });
+        self.floating = fl.map(|mut fl| {
+            fl.drop_fresh();
+            Arc::new(fl)
+        });
         self.rebuild_overlay_from_floating();
-        if let Some(fl) = &self.floating {
-            self.selection.shapes.extend(fl.piece_ids());
-        }
+        self.selection.shapes.extend(self.floating_view.piece_ids());
         self.retain_existing_selection();
     }
 
-    /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に。片の選び直しは `sync_floating`）
+    /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に。控えと分け合っていれば中身を
+    /// 写して書く。片の選び直しは `put_floating`）
     pub(crate) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
-        let mut fl = self.floating.take().unwrap_or_else(|| Floating::new(false));
+        let mut fl = self
+            .floating
+            .take()
+            .map_or_else(|| Floating::new(false), Arc::unwrap_or_clone);
         let res = f(&mut fl, self.stage());
-        self.floating = Some(fl);
-        self.sync_floating();
+        self.put_floating(Some(fl));
         res
     }
 
@@ -1561,16 +1579,17 @@ impl Session {
         self.overlay.clear();
         self.overlay_only_selected = false;
         self.overlay_movable_start = 0;
-        if let Some(fl) = &self.floating {
+        if self.floating.is_some() {
             let scope = self.editing_group_path.clone();
-            self.overlay.hide = fl.hidden().clone();
+            let view = &self.floating_view;
+            self.overlay.hide = view.hidden().clone();
             self.overlay.add.extend(
-                fl.placed_remainder()
+                view.placed_remainder()
                     .iter()
                     .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
             );
             self.overlay_movable_start = self.overlay.add.len();
-            let pieces: Vec<(Placement, Arc<FillShape>)> = fl
+            let pieces: Vec<(Placement, Arc<FillShape>)> = view
                 .placed_pieces(&scope)
                 .map(|(at, p)| (at, Arc::new(p.clone())))
                 .collect();
@@ -1659,7 +1678,7 @@ impl Session {
     fn ahead_holds(&self, ahead: &DropAhead, floating: Option<&Floating>) -> bool {
         let same_floating = match (&ahead.floating, floating) {
             (None, None) => true,
-            (Some(a), Some(b)) => a.matches_undo_snapshot(b),
+            (Some(a), Some(b)) => a.same_content(b),
             _ => false,
         };
         same_floating
@@ -1695,7 +1714,7 @@ impl Session {
     /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
     pub(crate) fn take_ahead_content(&mut self) -> Option<crate::clipboard_ops::Content> {
         let ahead = self.drop_ahead.as_ref()?;
-        if !self.ahead_holds(ahead, self.floating.as_ref()) {
+        if !self.ahead_holds(ahead, self.floating.as_deref()) {
             return None;
         }
         self.drop_ahead.as_mut()?.content.take()
@@ -1781,14 +1800,15 @@ impl Session {
         } else {
             match self.lift_ahead() {
                 Ok(Some(mut fl)) => {
-                    fl.refresh(world, &scope, self.base_cache.layer_order_ids());
-                    self.overlay.hide = fl.hidden().clone();
+                    fl.tidy(self.base_cache.layer_order_ids());
+                    let view = FloatingView::of(&fl, world, &scope);
+                    self.overlay.hide = view.hidden().clone();
                     self.overlay.add.extend(
-                        fl.placed_remainder()
+                        view.placed_remainder()
                             .iter()
                             .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
                     );
-                    fl.placed_pieces(&scope)
+                    view.placed_pieces(&scope)
                         .map(|(at, p)| (at, Arc::new(p.clone())))
                         .collect()
                 }
@@ -1880,15 +1900,14 @@ impl Session {
         let holds = self
             .drop_ahead
             .as_ref()
-            .is_some_and(|a| self.ahead_holds(a, self.floating.as_ref()));
+            .is_some_and(|a| self.ahead_holds(a, self.floating.as_deref()));
         let ahead = holds
             .then(|| self.drop_ahead.as_mut().and_then(|a| a.lifted.take()))
             .flatten();
         match ahead.unwrap_or_else(|| self.lifted_floating()) {
             Ok(None) => true,
             Ok(Some(fl)) => {
-                self.floating = Some(fl);
-                self.sync_floating();
+                self.put_floating(Some(fl));
                 true
             }
             Err(()) => false,
@@ -1904,7 +1923,11 @@ impl Session {
         if by_layer.is_empty() && self.floating.is_none() {
             return Ok(None);
         }
-        let mut fl = self.floating.clone().unwrap_or_else(|| Floating::new(false));
+        let mut fl = self
+            .floating
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| Floating::new(false));
         if !fl.cut(self.stage(), &by_layer, None).is_empty() {
             return Err(());
         }
@@ -1928,7 +1951,7 @@ impl Session {
     /// 地図を持たないので、変換が潰れなければ置ける。拡大・回転のドラッグは、始めるときに1回だけ作って持つ
     pub(crate) fn transform_fit(&self) -> TransformFit {
         let mut maps = crate::floating::piece_maps(
-            self.floating.as_ref(),
+            self.floating.as_deref(),
             self.stage(),
             &self.selected_raw_ids_by_layer(true),
         );
@@ -1952,10 +1975,10 @@ impl Session {
     /// 選んでいるグループの中の生の図形の階層：（レイヤー, 階層）。浮いた片が隠すセル画の図形と、今の階層の生の図形
     /// （浮いた片にして動かす）は入れない
     pub(crate) fn selected_group_scopes(&self) -> Vec<(LayerId, Vec<u64>)> {
-        let hidden = self.floating.as_ref().map(|fl| fl.hidden());
+        let hidden = self.floating_view.hidden();
         let mut scopes: Vec<(LayerId, Vec<u64>)> = Vec::new();
         for s in self.base_cache.shapes() {
-            if !hidden.is_some_and(|h| h.contains(&s.shape_id))
+            if !hidden.contains(&s.shape_id)
                 && self.selection.contains_shape(s)
                 && s.symbol_instance.is_none()
                 && !s.is_raw_at_scope(&self.editing_group_path)
@@ -1979,10 +2002,10 @@ impl Session {
             }
             None => by_layer.push((s.layer_id, HashSet::from([s.shape_id]))),
         };
-        let hidden = self.floating.as_ref().map(|fl| fl.hidden());
+        let hidden = self.floating_view.hidden();
         if base {
             for s in self.base_cache.shapes() {
-                if !hidden.is_some_and(|h| h.contains(&s.shape_id))
+                if !hidden.contains(&s.shape_id)
                     && self.selection.contains_shape(s)
                     && s.is_raw_at_scope(scope)
                 {
@@ -1990,11 +2013,9 @@ impl Session {
                 }
             }
         }
-        if let Some(fl) = &self.floating {
-            for r in fl.remainder() {
-                if self.selection.shapes.contains(&r.shape_id) {
-                    add(r);
-                }
+        for r in self.floating_view.remainder() {
+            if self.selection.shapes.contains(&r.shape_id) {
+                add(r);
             }
         }
         by_layer
@@ -2033,7 +2054,8 @@ impl Session {
     pub(crate) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
         if self.floating.as_ref().is_some_and(|fl| {
             !fl.modified
-                && !fl
+                && !self
+                    .floating_view
                     .pieces()
                     .iter()
                     .any(|p| self.selection.shapes.contains(&p.shape_id))
@@ -2334,22 +2356,6 @@ impl UndoHistory {
     #[inline]
     pub(crate) fn mark_unsaved(&mut self) {
         self.saved_commit_id = None;
-    }
-
-    /// `Floating` が直近の履歴エントリから未変更であれば `Arc` を $O(1)$ で共有し、
-    /// 変更されている場合は一時キャッシュを除去した新しい `Arc<Floating>` を返す
-    pub(crate) fn snapshot_floating(&self, floating: Option<&Floating>) -> Option<Arc<Floating>> {
-        let fl = floating?;
-        let prev_entry = self.undo_stack.back().or_else(|| self.redo_stack.last());
-        if let Some(prev_fl) = prev_entry
-            .and_then(|e| e.floating.as_ref())
-            .filter(|prev| prev.matches_undo_snapshot(fl))
-        {
-            return Some(Arc::clone(prev_fl));
-        }
-        let mut stripped = fl.clone();
-        stripped.strip_transient_caches();
-        Some(Arc::new(stripped))
     }
 
     /// 新しい Undo エントリをスタックへ追加し、Redo スタックをクリアして現在の状態世代IDを進める
@@ -2884,7 +2890,7 @@ impl Tab {
 
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
-        let prev_floating = self.history.snapshot_floating(self.session.floating());
+        let prev_floating = self.session.shared_floating();
         // 控えと文書の項目は全部書く（どちらかに項目を足すと、ここが組み立てで止まるので、戻すか戻さないかを必ず決める。
         // 控えを作る所 `doc_actions::undo_snapshot` も同じ：設計審査 de92ceb の D-5 の (3)）。戻さないもの：番号の数え札・
         // 壊れていた地図の知らせ先（`undo_snapshot` を見よ）

@@ -305,7 +305,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     let scope = tab.session.editing_group_path.clone();
     let floating = tab.session.floating();
     let modified = floating.is_some_and(|fl| fl.modified);
-    let pieces: HashSet<ShapeId> = floating.map(|fl| fl.piece_ids()).unwrap_or_default();
+    let pieces: HashSet<ShapeId> = tab.session.floating_view().piece_ids();
     let raw = |s: &FillShape| editable_lids.contains(&s.layer_id) && s.is_raw_at_scope(&scope);
     // 切るレイヤー：中身（隠していない生の図形・浮いている残り・動かしていない片）が矩形にかかるレイヤー。レイヤーごとに、
     // 中身を、選ぶ所（そのレイヤーで選んでいる面・動かしていない片・矩形）で切る（`Floating::cut`）。片と残りが
@@ -336,11 +336,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     };
     // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
     // 矩形の中にあるときだけ選ぶ
-    let hidden_now: HashSet<ShapeId> = tab
-        .session
-        .floating()
-        .map(|fl| fl.hidden().clone())
-        .unwrap_or_default();
+    let hidden_now: HashSet<ShapeId> = tab.session.floating_view().hidden().clone();
     let mut selection = std::mem::take(&mut tab.session.selection);
     for shape in tab.session.base_cache.shapes() {
         if selection.contains_shape(shape)
