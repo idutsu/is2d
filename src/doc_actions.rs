@@ -25,7 +25,7 @@ use crate::select_ops::{
 };
 use crate::symbol::{ColorEffect, Document, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
-    enter_symbol_from_library, enter_symbol_timeline, exit_symbol_timeline,
+    enter_symbol_from_library, enter_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
     prepare_swap_selected_instances, selected_single_symbol_info,
 };
@@ -56,6 +56,22 @@ pub(crate) trait ActionHost {
         &mut Option<StatusToast>,
     );
     fn stop_playback(&mut self);
+    /// 再生中なら、今のコマから鳴らし直す（再生のコマは鳴らした数から決めるので、fps が変わったら鳴らし直す。入口 `apply`
+    /// が、fps を変えた操作のあとに呼ぶ）
+    fn restart_playback(&mut self);
+    /// ダイアログ（書き出し中・復旧・未保存の確認）が出ているか（出ている間、入口 `apply` は、表がダイアログの間も
+    /// 受け付けるとした操作のほかを断る：`Policy::during_dialog`）
+    fn dialog_shown(&self) -> bool;
+
+    /// 「操作を始める」：再生を止め、続けた編集のまとめを区切る（入口 `apply` を通らない形で始まる操作：キャンバスや
+    /// タイムラインに触った・ドラッグの始まり・タブの切り替えと保存の前。組で呼ぶ所はここだけ：約束の棚卸し 5616fcc の C の B6）
+    fn begin_operation(&mut self)
+    where
+        Self: Sized,
+    {
+        self.stop_playback();
+        apply(self, Action::EndCoalesce { key: None });
+    }
 
     fn notify_error(&mut self, message: impl Into<String>) {
         show_notice(self.toast_mut(), NoticeKind::Error, message);
@@ -483,7 +499,14 @@ impl Action {
             // 道具の切り替え・取り消し・やり直し・まとめの区切り
             Self::SetTool { .. } => none(Untouched),
             Self::Undo | Self::Redo => none(Handles),
-            Self::EndCoalesce { .. } => Policy { keeps_playback: true, keeps_drag: true, ..none(Untouched) },
+            // まとめの区切りは、ダイアログの間も受け付ける（未保存の確認の「保存」が、保存の前に区切る。区切れないと、保存の
+            // あとに続けて打った分に未保存の印が付かない）
+            Self::EndCoalesce { .. } => Policy {
+                keeps_playback: true,
+                keeps_drag: true,
+                during_dialog: true,
+                ..none(Untouched)
+            },
         }
     }
 }
@@ -524,6 +547,9 @@ pub(crate) struct Policy {
     pub(crate) finishes_drag: bool,
     /// 操作ができたあと、右のパネルに何を出すか（`View::inspect_timeline_frame`。決める所はここだけ）
     pub(crate) panel: PanelFocus,
+    /// ダイアログが出ている間も受け付けるか（ダイアログの関所はここだけ。前は関所が4つにばらばらで、タイムラインの
+    /// パネルは関所を通らなかった：約束の棚卸し 5616fcc の C の C1）
+    pub(crate) during_dialog: bool,
 }
 
 /// 操作のあと、右のパネルに出すもの（`Policy::panel`）
@@ -546,6 +572,7 @@ impl Policy {
             keeps_drag: false,
             finishes_drag: false,
             panel: PanelFocus::Keep,
+            during_dialog: false,
         }
     }
 
@@ -588,26 +615,21 @@ struct ContentMark {
 
 impl ContentMark {
     fn of(tab: &Tab) -> Self {
-        // 文書の項目は全部書く（項目を足すと組み立てが止まるので、取り消しで比べるかを必ず決める）。比べないもの：版・番号の
-        // 数え札（中身ではない）、壊れていた地図の知らせ先
-        let Document {
+        // 文書の中身は取り消しの控えと同じ項目（`Document::content`：文書に項目を足すと組み立てが止まる）。版は比べない
+        let crate::symbol::DocContent {
             root,
             library,
             sounds,
             stage_size,
             fps,
             revision: _,
-            next_symbol_id: _,
-            next_group_id: _,
-            next_sound_id: _,
-            broken_maps: _,
-        } = &tab.doc;
+        } = tab.doc.content();
         Self {
-            root: root.clone(),
-            library: library.clone(),
-            sounds: sounds.clone(),
-            stage_size: *stage_size,
-            fps: *fps,
+            root,
+            library,
+            sounds,
+            stage_size,
+            fps,
             floating: tab.session.shared_floating(),
         }
     }
@@ -616,7 +638,7 @@ impl ContentMark {
     fn same_as(&self, tab: &Tab) -> bool {
         let doc = &tab.doc;
         doc.root.same_content(&self.root)
-            && library_same_content(&doc.library, &self.library)
+            && library_same_content(doc.library(), &self.library)
             && std::sync::Arc::ptr_eq(&doc.sounds, &self.sounds)
             && doc.stage_size == self.stage_size
             && doc.fps == self.fps
@@ -645,32 +667,28 @@ fn undo_snapshot(tab: &Tab) -> UndoEntry {
     // `Tab::restore_state_snapshot` も同じ。前は入れる項目だけを手で並べたので、足し忘れると、取り消しで戻らないのに
     // 未保存の印だけ戻った：設計審査 de92ceb の D-5 の (3)）。入れないもの：番号の数え札（取り消しても戻さない：番号を
     // 使い回すと、別の中身と番号がぶつかる）、壊れていた地図の知らせ先（読み込んだときの知らせ）
-    let Document {
+    let crate::symbol::DocContent {
         root,
         library,
         sounds,
         stage_size,
         fps,
         revision,
-        next_symbol_id: _,
-        next_group_id: _,
-        next_sound_id: _,
-        broken_maps: _,
-    } = &tab.doc;
+    } = tab.doc.content();
     let floating = tab.session.shared_floating();
     UndoEntry {
-        timeline: root.clone(),
+        timeline: root,
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
-        library: library.clone(),
+        library,
         // 音のライブラリも文書と共有する
-        sounds: sounds.clone(),
+        sounds,
         floating,
         selection: tab.session.selection().clone(),
         edit_path: tab.session.edit_path().clone(),
         editing_group_path: tab.session.editing_group_path().to_vec(),
-        stage_size: *stage_size,
-        fps: *fps,
-        symbols_revision: *revision,
+        stage_size,
+        fps,
+        symbols_revision: revision,
         commit_id: tab.history.current_commit_id,
     }
 }
@@ -686,18 +704,25 @@ fn apply_import_sound(
     if tab.active_timeline().active_sound_slot().is_none() {
         return false;
     }
-    let sound = match crate::sound::Sound::new(tab.doc.next_sound_id, name, bytes) {
+    // 番号は音のライブラリに足すとき `add_sound` が付ける（ここでは仮の 0）。区間は足したときに返る番号で作る（前は次の番号を
+    // 先回りして区間を作り、同じ1歩で足すと同じ番号が付くことに頼っていた：約束の棚卸し 5616fcc の A の P-17）
+    let sound = match crate::sound::Sound::new(0, name, bytes) {
         Ok(s) => s,
         Err(e) => {
             show_notice(toast, NoticeKind::Error, e);
             return false;
         }
     };
-    let Some(clip) = crate::sound::SoundClip::whole(&sound) else {
+    let Some(whole) = crate::sound::SoundClip::whole(&sound) else {
         show_notice(toast, NoticeKind::Error, "音の長さが 0 です");
         return false;
     };
-    set_active_keyframe_sound(tab, Some(clip), Some(sound))
+    set_active_keyframe_sound(tab, |doc| {
+        Some(crate::sound::SoundClip {
+            sound: doc.add_sound(sound),
+            ..whole
+        })
+    })
 }
 
 /// 今のコマの音を付けられるキーフレーム（`Timeline::active_sound_slot`）に、音のライブラリの番号 `sound` の音を頭から
@@ -716,28 +741,25 @@ fn apply_set_keyframe_sound(tab: &mut Tab, sound: Option<u64>) -> bool {
         }
         None => None,
     };
-    set_active_keyframe_sound(tab, clip, None)
+    set_active_keyframe_sound(tab, |_| clip)
 }
 
-/// 今のコマの音を付けられるキーフレームの音を `clip` にする（取り消しの1歩）。新しく読み込んだ音 `added` は、同じ1歩で
-/// 音のライブラリに足す（付く番号は次の音の番号 `next_sound_id`：`clip` はその番号で作ってある）。付けられる所が無い・
-/// 変わらないなら断る
+/// 今のコマの音を付けられるキーフレームの音を `clip(文書)` が返す区間にする（取り消しの1歩）。`clip` は付けられる所が
+/// あるときだけ呼ぶ（新しく読み込んだ音は、`clip` の中で音のライブラリに足し、返った番号で区間を作る）。付けられる所が
+/// 無い・変わらないなら断る
 fn set_active_keyframe_sound(
     tab: &mut Tab,
-    clip: Option<crate::sound::SoundClip>,
-    added: Option<crate::sound::Sound>,
+    clip: impl FnOnce(&mut Document) -> Option<crate::sound::SoundClip>,
 ) -> bool {
     mutate_timeline_with_undo(tab, |tl, doc| {
         let Some((l, k)) = tl.active_sound_slot() else {
             return;
         };
+        let clip = clip(doc);
         if tl.layers[l].keyframes[k].sound == clip {
             return;
         }
         tl.layers[l].keyframe_mut(k).sound = clip;
-        if let Some(s) = added {
-            doc.add_sound(s);
-        }
     })
 }
 
@@ -780,6 +802,9 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         "apply の中から apply を呼んだ（控えは1つしか持てない）"
     );
     let policy = action.policy(host.tab());
+    if host.dialog_shown() && !policy.during_dialog {
+        return false;
+    }
     if !policy.keeps_drag {
         cancel_active_drag(host.tab_mut());
     }
@@ -794,10 +819,13 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     }
     let before = undo_snapshot(host.tab());
     host.tab_mut().history.before = Some(before);
-    let prev_library = host.tab().doc.library.clone();
+    let prev_library = host.tab().doc.library().clone();
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
-    let prev_imported_map =
-        matches!(action, Action::Paste { .. }).then(|| host.parts_mut().2.imported_map.clone());
+    let prev_fps = host.tab().doc.fps;
+    // 断った操作は、クリップボード（移植の控え・貼るたびのずらし・カットで書き換えた中身）も操作の前に戻す。どの操作が
+    // クリップボードを書くかを並べず、いつも写しておく（写すのは中身の `Arc` と移植の控えの表だけ。前は貼り付けの移植の
+    // 控えだけを戻し、ずらしとカットの中身は進んだままだった：約束の棚卸し 5616fcc の A の P-16）
+    let prev_clipboard = host.parts_mut().2.clone();
     // 操作の途中で止まったら（panic）、その操作を無かったことにする（`restore_after_panic`）
     // 入口が先に貼り戻したか（操作が断った・何もしなかったときは、この貼り戻しも戻す）
     let commits_first =
@@ -832,9 +860,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         show_notice(toast, NoticeKind::Warning, refusal.message());
     }
     // シンボルの入れ子の深さは、ライブラリが変わったときだけ確かめる（深さはライブラリの中だけで決まる）
-    if res && !library_same_content(&tab.doc.library, &prev_library) && tab.doc.symbol_nest_exceeded() {
+    if res && !library_same_content(tab.doc.library(), &prev_library) && tab.doc.symbol_nest_exceeded() {
         restore_state_before_action(tab);
-        tab.ensure_valid_library_selection();
         show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
         res = false;
     }
@@ -865,13 +892,16 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     }
     if !res {
         (tab.doc.next_symbol_id, tab.doc.next_group_id) = prev_ids;
-        if let Some(map) = prev_imported_map {
-            clipboard.imported_map = map;
-        }
+        *clipboard = prev_clipboard;
     }
     // ドラッグを始めるときに作った答えは、ドラッグの直後の操作（離す）の1回だけ使う（捨てる所は、ここと、ドラッグをやめる
     // `Session::rollback_shape_drag` だけ）
     tab.session.drop_ahead_done();
+    // fps が変わったら、再生中なら鳴らし直す（鳴らし直す所はここだけ。前は fps の入力欄が `apply` のあとに手で鳴らし直した：
+    // 約束の棚卸し 5616fcc の C の B5）
+    if tab.doc.fps != prev_fps {
+        host.restart_playback();
+    }
     res
 }
 
@@ -893,7 +923,7 @@ fn restore_state_before_action(tab: &mut Tab) {
 /// タブの保存していない作業が消えた
 fn restore_after_panic(host: &mut impl ActionHost) {
     let (tab, _, _, toast) = host.parts_mut();
-    tab.session.base_cache = Default::default();
+    tab.session.drop_scene_base();
     restore_state_before_action(tab);
     show_notice(
         toast,
@@ -1115,7 +1145,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             if let Some((sym_id, target_lid)) =
                 prepare_convert_selection_to_symbol(tab)
             {
-                tab.view.selected_library_symbol = Some(sym_id);
+                tab.view.select_library_symbol(sym_id);
                 if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
                     tab.set_active_layer(l_idx);
                 }
@@ -1138,12 +1168,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::EnterSymbolTimeline { instance_gid } => enter_symbol_timeline(tab, instance_gid),
         Action::EnterSymbolFromLibrary { sym_id } => enter_symbol_from_library(tab, sym_id),
         #[cfg(test)]
-        Action::ExitSymbolTimeline => exit_symbol_timeline(tab),
+        Action::ExitSymbolTimeline => crate::symbol_ops::exit_symbol_timeline(tab),
         #[cfg(test)]
         Action::ExitSymbolToDepth { depth } => {
             let mut exited = false;
             while tab.session.edit_path().len() > depth {
-                if !exit_symbol_timeline(tab) {
+                if !crate::symbol_ops::exit_symbol_timeline(tab) {
                     break;
                 }
                 exited = true;
@@ -1270,7 +1300,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
     if !tab.active_timeline().is_layer_editable_by_id(target_lid) {
         return false;
     }
-    let brush_color = shapes.first().map_or(Color32::BLACK, |s| s.color);
+    let brush_color = shapes.first().map_or(Color32::BLACK, |s| s.color());
     let stroke_shapes: Vec<FillShape> = shapes
         .into_iter()
         .map(|s| s.with_scope(target_lid, tab.session.editing_group_path()))
@@ -1368,7 +1398,7 @@ pub(crate) fn topmost_visible_at(tab: &Tab, pt: Point) -> Option<Seen> {
         .rev()
         .find(|s| s.contains_point(pt))
         .and_then(|s| {
-            Some(Seen { layer: tl.layer_index_by_id(s.layer_id)?, color: s.color, line: s.line })
+            Some(Seen { layer: tl.layer_index_by_id(s.layer_id)?, color: s.color(), line: s.line })
         });
     // 当たった図形より上のロック中のレイヤー（上から順）
     tl.layers
@@ -1404,7 +1434,7 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 tab.session.selection().contains_shape(s)
                     && tl.is_layer_editable_by_id(s.layer_id)
                     && s.is_raw_at_scope(tab.session.editing_group_path())
-                    && s.color != fill_color
+                    && s.color() != fill_color
             });
             if !any_color_diff {
                 return false;
@@ -1578,7 +1608,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
         }
     });
     let mut target_lids: Vec<u64> = Vec::new();
-    for s in tab.session.base_cache.shapes() {
+    for s in tab.session.base_cache().shapes() {
         if !hidden.contains(&s.shape_id)
             && selection.contains_shape(s)
             && !target_lids.contains(&s.layer_id)
@@ -1936,32 +1966,7 @@ fn tool_for_placed(tab: &mut Tab, tool: &mut ToolSettings) {
 }
 
 fn apply_delete_symbol(tab: &mut Tab, sym_id: u64) -> bool {
-    if tab.doc.find_symbol(sym_id).is_none() {
-        return false;
-    }
-    // 消すシンボルの段から出る。出られなければ（浮いた片の確定が断られた）、文書を変えずに断る
-    while tab
-        .session
-        .edit_path()
-        .levels
-        .iter()
-        .any(|lvl| lvl.symbol_id == sym_id)
-    {
-        if !exit_symbol_timeline(tab) {
-            return false;
-        }
-    }
-    if !clear_selection(tab) {
-        return false;
-    }
-
-    tab.doc.remove_symbol_and_instances(sym_id);
-    if tab.view.selected_library_symbol == Some(sym_id) {
-        tab.view.selected_library_symbol = tab.doc.library.first().map(|s| s.id);
-    }
-
-    tab.refresh_scene_base();
-    reset_session_after_timeline_change(tab)
+    tab.remove_symbol(sym_id)
 }
 
 /// ライブラリのシンボル `sym_id` を複製して、すぐ下に入れて選ぶ（Adobe Animate の「複製」と同じ）。名前は「（元の名前）の
@@ -1972,11 +1977,11 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     if tab.doc.find_symbol(sym_id).is_none() {
         return false;
     }
-    let Some(i) = tab.doc.library.iter().position(|s| s.id == sym_id) else {
+    let Some(i) = tab.doc.library().iter().position(|s| s.id == sym_id) else {
         return false;
     };
 
-    let mut copy = (**tab.doc.library.get(i).expect("見つけた所")).clone();
+    let mut copy = (**tab.doc.library().get(i).expect("見つけた所")).clone();
     let base = std::mem::take(&mut copy.name);
     copy.name = tab.doc.unused_symbol_name(
         std::iter::once(format!("{base}のコピー"))
@@ -1991,9 +1996,8 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
         &Default::default(),
     );
     let new_id = copy.id;
-    tab.doc.library.insert(i + 1, std::sync::Arc::new(copy));
-    tab.doc.bump_revision();
-    tab.view.selected_library_symbol = Some(new_id);
+    tab.doc.add_symbol(Some(i + 1), copy);
+    tab.view.select_library_symbol(new_id);
     true
 }
 
@@ -2436,7 +2440,7 @@ pub(crate) fn rotate_selected_shapes(host: &mut impl ActionHost, angle_rad: f64)
 
 #[cfg(test)]
 pub(crate) fn convert_selection_to_symbol(host: &mut impl ActionHost) -> Option<u64> {
-    apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library.last().map(|s| s.id))?
+    apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library().last().map(|s| s.id))?
 }
 
 #[cfg(test)]

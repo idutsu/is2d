@@ -130,6 +130,9 @@ pub(crate) fn tool_tooltip(tool: Tool) -> String {
 /// UIパネル（メニュー・ツールバー・タブバー・プロパティ・ライブラリ・確認モーダル）が発行するコマンドアクション
 #[derive(Clone, Debug)]
 pub(crate) enum UiAction {
+    /// ライブラリでシンボルを選ぶ（表示だけ。右のパネルはタブを読むだけで、変えるものはみな `UiAction` で返す：約束の
+    /// 棚卸し 5616fcc の C の A1）
+    SelectLibrarySymbol(u64),
     // ファイル・ドキュメントタブ操作
     NewProject,
     OpenProjectDialog,
@@ -481,7 +484,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
         }
         let sym_name = tab
             .doc
-            .library
+            .library()
             .iter()
             .find(|s| s.id == lvl.symbol_id)
             .map(|s| s.name.as_str())
@@ -539,7 +542,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
 // ------------------------------------------------------------------------
 
 pub(crate) fn draw_right_properties_panel(
-    tab: &mut Tab,
+    tab: &Tab,
     tool: &mut ToolSettings,
     right_panel_tab: &mut RightPanelTab,
     actions: &mut Vec<UiAction>,
@@ -613,7 +616,7 @@ fn draw_right_panel_tab_bar(right_panel_tab: &mut RightPanelTab, ui: &mut egui::
 
 /// 「プロパティ」タブの描画（現在選択中の `tool.tool` に応じてツール別の設定メソッドへ振り分け）
 fn draw_properties_tab(
-    tab: &mut Tab,
+    tab: &Tab,
     tool: &mut ToolSettings,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
@@ -673,7 +676,7 @@ fn draw_properties_tab(
 
 /// 選択ツール (`Tool::Select`) のプロパティ設定項目
 fn draw_select_tool_properties(
-    tab: &mut Tab,
+    tab: &Tab,
     tool: &ToolSettings,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
@@ -1000,7 +1003,7 @@ fn draw_color_palette_section(ui: &mut egui::Ui, label: &str, color: &mut Color3
 }
 
 /// 「キャンバス」タブの描画（ステージサイズ・枠外マスク・ウィンドウに合わせる・表示倍率リセット）
-fn draw_canvas_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     draw_panel_section_label(ui, "キャンバス情報", 6.0);
 
     ui.horizontal(|ui| {
@@ -1247,7 +1250,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
 
 /// キャンバス上で単一のシンボルインスタンスを選択しているときにプロパティパネル下部に表示する再生オプション（ループ再生 / 1回再生 / 停止）
 pub(crate) fn draw_selected_symbol_properties(
-    tab: &mut Tab,
+    tab: &Tab,
     actions: &mut Vec<UiAction>,
     ui: &mut egui::Ui,
 ) {
@@ -1451,8 +1454,8 @@ fn draw_symbol_color_effect(
 }
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
-pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    if tab.doc.library.is_empty() {
+pub(crate) fn draw_library_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+    if tab.doc.library().is_empty() {
         ui.label(
             egui::RichText::new(
                 "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
@@ -1461,15 +1464,13 @@ pub(crate) fn draw_library_tab(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &
             .color(Color32::from_rgb(115, 122, 135)),
         );
     } else {
-        tab.ensure_valid_library_selection();
-
-        if let Some(sel_id) = tab.view.selected_library_symbol {
+        if let Some(sel_id) = tab.library_symbol() {
             draw_selected_library_symbol_controls(tab, actions, ui, sel_id);
         }
 
         draw_panel_section_label(
             ui,
-            &format!("登録シンボル一覧 ({})", tab.doc.library.len()),
+            &format!("登録シンボル一覧 ({})", tab.doc.library().len()),
             4.0,
         );
         draw_library_symbol_list(tab, actions, ui);
@@ -1559,13 +1560,14 @@ fn draw_selected_library_symbol_controls(
 }
 
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
-fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
+fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let entries: Vec<(u64, String)> = tab
         .doc
-        .library
+        .library()
         .iter()
         .map(|s| (s.id, s.name.clone()))
         .collect();
+    let shown = tab.library_symbol();
     let mut select_req: Option<u64> = None;
     let mut rename_req: Option<(u64, String)> = None;
     let mut clear_renaming_id: Option<u64> = None;
@@ -1584,7 +1586,7 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
         .show(ui, |ui| {
             for (sym_id, mut name) in entries {
                 ui.push_id((active_doc_id, sym_id), |ui| {
-                    let is_sel = tab.view.selected_library_symbol == Some(sym_id);
+                    let is_sel = shown == Some(sym_id);
                     let row_fill = if is_sel {
                         Color32::from_rgb(220, 234, 252)
                     } else {
@@ -1634,7 +1636,7 @@ fn draw_library_symbol_list(tab: &mut Tab, actions: &mut Vec<UiAction>, ui: &mut
         });
 
     if let Some(sym_id) = select_req {
-        tab.view.selected_library_symbol = Some(sym_id);
+        actions.push(UiAction::SelectLibrarySymbol(sym_id));
     }
     if let Some((sym_id, new_name)) = rename_req {
         actions.push(UiAction::Doc(Action::RenameSymbol { sym_id, new_name }));
@@ -1737,7 +1739,7 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
     let drawn =
         tab.view
             .symbol_previews
-            .with(sym, tab.doc.revision, &tab.doc.library, |bbox, mesh| {
+            .with(sym, &tab.doc, |bbox, mesh| {
                 let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
                 let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
                 let pad = 14.0;

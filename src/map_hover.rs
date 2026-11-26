@@ -100,7 +100,7 @@ pub(crate) fn scope_maps(scene: Scene<'_>, session: &Session) -> Arc<ScopeMaps> 
             .map(|o| o.base());
         let base = match rest {
             Some(rest) => rest,
-            None => session.base_cache.cel(*layer_id)?.scope_base(scope),
+            None => session.base_cache().cel(*layer_id)?.scope_base(scope),
         };
         Some(LayerMap {
             layer_id: *layer_id,

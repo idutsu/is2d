@@ -333,9 +333,11 @@ pub(crate) type LayerId = u64;
 pub(crate) struct FillShape {
     /// 各シェイプインスタンスを順序変更・ソート後も安定して識別する固有ID
     pub(crate) shape_id: ShapeId,
-    pub(crate) color: Color32,
-    pub(crate) exterior: Contour,
-    pub(crate) holes: Vec<Contour>,
+    /// 色・外周・穴（外からは読むだけ：`color`・`exterior`・`holes`。変えるのは `FillShape` の関数だけで、そこで版を上げ、
+    /// メッシュ・当たり判定・外枠の写しを捨てる：約束の棚卸し 5616fcc の B の C9）
+    color: Color32,
+    exterior: Contour,
+    holes: Vec<Contour>,
     /// このシェイプが所属するタイムラインレイヤーの固有ID（デフォルト `1`）
     pub(crate) layer_id: LayerId,
     /// 外側のグループIDから内側のグループIDへの階層パス（空 `[]` ならルート階層の生シェイプ）
@@ -368,6 +370,21 @@ pub(crate) struct FillShape {
 }
 
 impl FillShape {
+    /// 色
+    pub(crate) fn color(&self) -> Color32 {
+        self.color
+    }
+
+    /// 外周の輪郭
+    pub(crate) fn exterior(&self) -> &Contour {
+        &self.exterior
+    }
+
+    /// 穴の輪郭
+    pub(crate) fn holes(&self) -> &[Contour] {
+        &self.holes
+    }
+
     pub(crate) fn new(color: Color32, exterior: Contour, holes: Vec<Contour>) -> Self {
         let mut shape = Self {
             shape_id: next_shape_id(),

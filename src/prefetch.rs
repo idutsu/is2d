@@ -101,7 +101,7 @@ pub(crate) fn wanted_maps(tl: &Timeline, first: usize, last: usize, both: bool, 
             None
         };
         for kf in ahead.into_iter().chain(behind) {
-            out.extend(layer.keyframes[kf].cel.maps.iter().cloned());
+            out.extend(layer.keyframes[kf].cel.maps().iter().cloned());
         }
     }
     out

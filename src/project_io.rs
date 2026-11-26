@@ -100,8 +100,7 @@ fn surrender_focused_widget(ctx: &egui::Context) {
 /// タブ切り替えやプロジェクト保存・動画書き出しの前に、選択状態・`Floating`・カスタムピボットを保持したまま
 /// 進行中再生・ドラッグの中断と連続編集フラグのリセットを行う
 pub(crate) fn prepare_active_tab_for_switch_or_save(ws: &mut impl ProjectWorkspace) {
-    ws.stop_playback();
-    crate::doc_actions::apply(ws, crate::doc_actions::Action::EndCoalesce { key: None });
+    ws.begin_operation();
     cancel_active_drag(ws.tab_mut());
     ws.tab_mut().view.pan_last_screen_pos = None;
 }
@@ -117,16 +116,26 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
     }
 }
 
-/// アクティブタブのドキュメント・履歴・作業セッション・ビュー表示を一括初期化し、
-/// 現在フレームの土台キャッシュを構築する共通ヘルパー
-fn reset_active_document_state(tab: &mut Tab, doc: Document) {
-    let selected_library_symbol = doc.library.first().map(|s| s.id);
+/// 今のタブに文書 `doc` を入れる（タブに新しい文書を入れる道はみなここを通る：新規作成・開く・まっさらなタブに開く・
+/// 最後のタブを閉じる）。文書・履歴・作業の状態・表示を作り直し、画面の土台を作り、貼り付けのずらし・選択の小さなモード・
+/// 入力欄の的を初めに戻す（前は道ごとに後片付けが違い、まっさらなタブに開いたときと最後のタブを閉じたときは貼り付けの
+/// ずらしが前の作品の続きになった：約束の棚卸し 5616fcc の C の B2・D2）
+fn install_document(ws: &mut impl ProjectWorkspace, doc: Document, ctx: Option<&egui::Context>) {
+    install_document_in_tab(ws.tab_mut(), doc);
+    ws.clipboard_mut().paste_count = 0;
+    ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
+    ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
+    if let Some(c) = ctx {
+        surrender_focused_widget(c);
+    }
+}
 
+/// タブ `tab` に文書 `doc` を入れる所のうち、タブの中の分（`install_document` の一部）
+fn install_document_in_tab(tab: &mut Tab, doc: Document) {
     tab.doc = doc;
     tab.history = UndoHistory::default();
     tab.session = Session::default();
     tab.view = View::default();
-    tab.view.selected_library_symbol = selected_library_symbol;
     tab.refresh_scene_base();
 }
 
@@ -154,12 +163,20 @@ pub(crate) fn handle_viewport_close_request(ws: &mut impl ProjectWorkspace, ctx:
     if ws.allow_viewport_close() {
         return;
     }
-    if ws.pending_close_confirm().is_some() {
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        return;
-    }
+    // もうアプリを終える確認をしているなら、その確認を続ける。1つのタブを閉じる確認の最中なら、アプリ全体を終える確認に
+    // 切り替える（終了はどのダイアログでも効く：持ち主が決めた 2026-11-27。前はタブを閉じる確認の最中に終了を押しても何も
+    // 起きなかった：約束の棚卸し 5616fcc の C の D6）
+    let orig_active = match ws.pending_close_confirm() {
+        Some(PendingCloseConfirm::ViewportClose { .. }) => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
+        Some(PendingCloseConfirm::SingleTab { orig_active }) => *orig_active,
+        None => ws.active_index(),
+    };
+    *ws.pending_close_confirm_mut() = None;
     if (0..ws.tabs().len()).any(|i| is_tab_dirty(ws, i)) {
-        advance_viewport_close_confirm(ws, ws.active_index(), HashSet::new(), ctx);
+        advance_viewport_close_confirm(ws, orig_active, HashSet::new(), ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
     }
 }
@@ -308,11 +325,7 @@ fn close_tab_immediately(
         ws.tab_mut().id = doc_id;
         ws.tab_mut().untitled_number = untitled_num;
         ws.tab_mut().file = None;
-        reset_active_document_state(ws.tab_mut(), Document::default());
-        ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
-        if let Some(c) = ctx {
-            surrender_focused_widget(c);
-        }
+        install_document(ws, Document::default(), ctx);
         return;
     }
 
@@ -478,10 +491,10 @@ impl SavedKeyframe {
             start_frame,
             tween: kf.tween,
             tween_rotate: kf.tween_rotate,
-            maps: kf.cel.maps.iter().map(ScopeMap::saved_form).collect(),
+            maps: kf.cel.maps().iter().map(ScopeMap::saved_form).collect(),
             instances: kf
                 .cel
-                .instances
+                .instances()
                 .iter()
                 .map(SavedSymbolInstance::from)
                 .collect(),
@@ -814,7 +827,7 @@ impl ProjectDocument {
             stage_size: [doc.stage_size.x, doc.stage_size.y],
             timeline: saved_timeline,
             library: doc
-                .library
+                .library()
                 .iter()
                 .map(|s| SavedSymbolDef::from(&**s))
                 .collect(),
@@ -861,7 +874,7 @@ impl<T: Serialize> ProjectDocument<T> {
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
     pub(crate) fn apply_to_app(self, tab: &mut Tab) {
         let doc = self.into_document().expect("正しい地図の文書");
-        reset_active_document_state(tab, doc);
+        install_document_in_tab(tab, doc);
     }
 }
 
@@ -962,10 +975,10 @@ impl ProjectDocument<ReadTiles> {
             .flat_map(|kf| {
                 let maps = kf
                     .cel
-                    .maps
+                    .maps()
                     .iter()
                     .flat_map(|m| m.group_path.iter().copied());
-                let insts = kf.cel.instances.iter().flat_map(|inst| {
+                let insts = kf.cel.instances().iter().flat_map(|inst| {
                     inst.parent_scope
                         .iter()
                         .copied()
@@ -985,10 +998,10 @@ impl ProjectDocument<ReadTiles> {
                     let kf = layer.keyframe_mut(i);
                     let needs_remap = kf
                         .cel
-                        .maps
+                        .maps()
                         .iter()
                         .any(|m| m.group_path.iter().any(|&gid| !is_safe_id(gid)))
-                        || kf.cel.instances.iter().any(|inst| {
+                        || kf.cel.instances().iter().any(|inst| {
                             sym_id_remap.contains_key(&inst.binding.symbol_id)
                                 || !is_safe_id(inst.binding.instance_gid)
                                 || inst.parent_scope.iter().any(|&gid| !is_safe_id(gid))
@@ -1008,7 +1021,7 @@ impl ProjectDocument<ReadTiles> {
                     }
                     if kf
                         .cel
-                        .instances
+                        .instances()
                         .iter()
                         .any(|inst| !seen_sym_ids.contains(&inst.binding.symbol_id))
                     {
@@ -1033,18 +1046,16 @@ impl ProjectDocument<ReadTiles> {
             return Err("プロジェクトファイルの音が壊れています".to_owned());
         }
         let fresh_sound_ids = FreshIds::after(sounds.iter().map(|s| s.id));
-        let doc = Document {
-            root: timeline,
-            library: library.into_iter().map(Arc::new).collect(),
-            sounds: Arc::new(sounds),
+        let doc = Document::loaded(
+            timeline,
+            library.into_iter().map(Arc::new).collect(),
+            Arc::new(sounds),
             stage_size,
             fps,
-            next_symbol_id: sym_ids.next_to_save(self.next_symbol_id),
-            next_group_id: gids.next_to_save(self.next_group_id),
-            next_sound_id: fresh_sound_ids.next_to_save(self.next_sound_id),
-            revision: crate::vector_engine::next_mesh_revision(),
-            broken_maps: Default::default(),
-        };
+            sym_ids.next_to_save(self.next_symbol_id),
+            gids.next_to_save(self.next_group_id),
+            fresh_sound_ids.next_to_save(self.next_sound_id),
+        );
         doc.watch_broken_maps();
         Ok(doc)
     }
@@ -1427,6 +1438,7 @@ pub(crate) fn read_project_document(path: &Path) -> Result<ProjectDocument<ReadT
 pub(crate) fn open_document_in_new_tab(
     ws: &mut impl ProjectWorkspace,
     doc: Document,
+    ctx: Option<&egui::Context>,
 ) -> Result<(), String> {
     if doc.symbol_nest_exceeded() {
         return Err("シンボルの入れ子が8段を超えているか、循環しています".to_owned());
@@ -1453,8 +1465,7 @@ pub(crate) fn open_document_in_new_tab(
         ws.set_next_untitled_number(max_untitled + 1);
     }
 
-    reset_active_document_state(ws.tab_mut(), doc);
-    ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
+    install_document(ws, doc, ctx);
     // テストでは裏で確かめない（まだ確かめていない地図を調べるテストが、裏のスレッドと競わないように。裏で確かめる
     // テストは `check_maps_in_background` を直接呼ぶ）
     #[cfg(not(test))]
@@ -1485,7 +1496,7 @@ pub(crate) fn open_project_in_tab(
     // 2. ファイル内容を先に検証・パース（エラー時にタブを増やさない）
     let mut trimmed = false;
     let doc = read_project_document(path)?.into_document_noting(&mut trimmed)?;
-    open_document_in_new_tab(ws, doc)?;
+    open_document_in_new_tab(ws, doc, ctx)?;
 
     ws.tab_mut().file = Some(path.to_path_buf());
     if trimmed {
@@ -1513,8 +1524,7 @@ pub(crate) fn new_project(ws: &mut impl ProjectWorkspace, ctx: &egui::Context) {
     ws.tabs_mut()
         .insert(insert_idx, Tab::new_empty(doc_id, untitled_num));
     activate_tab_index(ws, insert_idx);
-
-    surrender_focused_widget(ctx);
+    install_document(ws, Document::default(), Some(ctx));
     ws.notify_info(format!("新規タブ「無題-{untitled_num}」を作成しました"));
 }
 

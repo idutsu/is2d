@@ -109,15 +109,19 @@ pub(crate) fn prepare_convert_selection_to_symbol(
     .into_iter()
     .collect();
     finish_cel_writes(tab, &written);
+    // 持ち上げた片（`keep`）は外さない：今の階層の地図は、浮いた片の残りの確定（`rest_plan`）が書く（片を切り抜いた地図
+    // から作ってある）。ここで外すと、計画を作ったときの地図と違う地図に書くことになり、書く入口が断る（`Cel::put_local`：
+    // 約束の棚卸し 5616fcc の A の P-07）。外すのは、持ち上げない深い階層の図形（選んだグループの中）とインスタンス
+    let deeper: HashSet<u64> = selection.shapes.difference(&keep).copied().collect();
     write_cels(tab, &[target_lid], |_, cel, held| {
-        Ok(cel.remove(&scope, &selection.shapes, &selection.instances, held)?)
+        Ok(cel.remove(&scope, &deeper, &selection.instances, held)?)
     });
     // 書けなければ断る（それまでに書いたもの・登録したシンボルは、断った操作を `apply` が操作の前に戻す）
     if tab.session.refusal.is_some() {
         return None;
     }
     if let Some(plan) = rest_plan {
-        crate::canvas_tool::write_commit(tab, plan);
+        crate::canvas_tool::write_commit(tab, plan)?;
     }
 
     let mut placed = crate::canvas_tool::Selection::default();
@@ -134,12 +138,12 @@ fn content_center(tab: &Tab, content: &Content) -> Point {
     let instances: HashSet<u64> = content
         .layers
         .iter()
-        .flat_map(|(_, c)| c.instances.iter().map(|i| i.binding.instance_gid))
+        .flat_map(|(_, c)| c.instances().iter().map(|i| i.binding.instance_gid))
         .collect();
     let maps = content.layers.iter().filter_map(|(_, c)| c.map_bounds());
     let insts = tab
         .session
-        .base_cache
+        .base_cache()
         .shapes()
         .iter()
         .filter(|s| {
@@ -211,7 +215,7 @@ pub(crate) fn prepare_place_symbol_instance(
     let Some(first_shapes) = tab
         .doc
         .find_symbol(symbol_id)
-        .map(|s| s.first_non_empty_local_shapes(&tab.doc.library))
+        .map(|s| s.first_non_empty_local_shapes(tab.doc.library()))
     else {
         return false;
     };
@@ -285,7 +289,7 @@ fn instance_binding_now(tab: &Tab, instance_gid: u64) -> Option<SymbolInstanceBi
         }
         layer
             .cel_at(f)?
-            .instances
+            .instances()
             .iter()
             .find(|i| i.binding.instance_gid == instance_gid)
             .map(|i| i.binding)
@@ -337,7 +341,7 @@ fn enter_symbol_level(
         return false;
     }
     tab.session.replace_selection(crate::canvas_tool::Selection::default());
-    tab.view.selected_library_symbol = Some(symbol_id);
+    tab.view.select_library_symbol(symbol_id);
 
     let (act_l, act_f) = {
         let tl = tab.active_timeline();

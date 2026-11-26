@@ -1319,8 +1319,8 @@ impl LocalMap<'_> {
                 std::collections::hash_map::Entry::Vacant(v) => {
                     let shape = orig_shape(src)?;
                     let mut at: SegAt = IntMap::default();
-                    let all = std::iter::once((None, &shape.exterior))
-                        .chain(shape.holes.iter().enumerate().map(|(i, c)| (Some(i), c)));
+                    let all = std::iter::once((None, shape.exterior()))
+                        .chain(shape.holes().iter().enumerate().map(|(i, c)| (Some(i), c)));
                     for (ci, c) in all {
                         for (k, q) in c.segments.iter().enumerate() {
                             at.entry(seg_bits(q)).or_insert((ci, k));
@@ -1331,8 +1331,8 @@ impl LocalMap<'_> {
             };
             let &(ci, k) = at.get(&seg_bits(&quads[0]))?;
             let c = match ci {
-                None => &shape.exterior,
-                Some(i) => &shape.holes[i],
+                None => shape.exterior(),
+                Some(i) => &shape.holes()[i],
             };
             (c.segments.len() == quads.len()
                 && (0..quads.len()).all(|i| c.segments[(k + i) % quads.len()] == quads[i]))

@@ -74,12 +74,12 @@ fn layer_eval_frame(
     let all_single_frame = !has_tween
         && kf
             .cel
-            .instances
+            .instances()
             .iter()
             .filter(|i| keep(i))
             .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
     let has_dyn = !all_single_frame
-        && kf.cel.instances.iter().filter(|i| keep(i)).any(|inst| {
+        && kf.cel.instances().iter().filter(|i| keep(i)).any(|inst| {
             library
                 .iter()
                 .any(|sym| sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library))
@@ -219,6 +219,9 @@ impl SceneBaseCache {
         library: &Library,
         world_xform: Affine,
     ) -> bool {
+        // 渡された使い回しの写し（`offer`）は、この1回の作り直しで使うか、作り直さないなら捨てる（前は作り直さずに早く戻ると
+        // 残った：約束の棚卸し 5616fcc の B の C8）
+        let offered = self.offered.take();
         if self.is_fresh(tl, library, world_xform) {
             return false;
         }
@@ -302,7 +305,7 @@ impl SceneBaseCache {
                     donors = old_shapes;
                 }
             }
-            if let Some(offered) = &self.offered {
+            if let Some(offered) = &offered {
                 if offered.world == xform_bits {
                     for (lid, src, f) in &offered.placed {
                         if *lid == layer.id {
@@ -367,7 +370,6 @@ impl SceneBaseCache {
         self.layers = new_layers;
         self.flat_shapes = new_flat;
         self.layer_order_ids = new_order_ids;
-        self.offered = None;
         true
     }
 }
@@ -383,14 +385,14 @@ fn same_screen_shapes(a: &[Arc<FillShape>], sources: &[Option<Arc<FillShape>>], 
     a.len() == b.len()
         && a.iter().zip(sources).zip(b).all(|((x, src), y)| {
             (src.is_none() || x.shape_id == y.shape_id)
-                && x.color == y.color
+                && x.color() == y.color()
                 && x.layer_id == y.layer_id
                 && x.group_path == y.group_path
                 && x.line == y.line
                 && x.symbol_instance.is_some() == y.symbol_instance.is_some()
-                && same_contour(&x.exterior, &y.exterior)
-                && x.holes.len() == y.holes.len()
-                && x.holes.iter().zip(&y.holes).all(|(h, k)| same_contour(h, k))
+                && same_contour(x.exterior(), y.exterior())
+                && x.holes().len() == y.holes().len()
+                && x.holes().iter().zip(y.holes()).all(|(h, k)| same_contour(h, k))
         })
 }
 
@@ -546,7 +548,7 @@ impl CelMeshCache {
             .iter()
             .rev()
             .find(|s| s.contains_point(pt))
-            .map(|s| (s.color, s.line))
+            .map(|s| (s.color(), s.line))
     }
 
     /// 写しの番号（無ければワールド座標の結合メッシュを作って入れる）。この描画で使った印を付ける
@@ -702,7 +704,7 @@ impl CelKey {
         // 計算に使う写しを先に手に入れて持つ（組み立てはこの写しを使い、面と線の図形の表がこの写しに残る）
         let bases = tl.layers[self.layer_idx].keyframes[self.kf_idx]
             .cel
-            .maps
+            .maps()
             .iter()
             .map(|m| m.base())
             .collect();

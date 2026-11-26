@@ -307,6 +307,14 @@ impl ActionHost for Is2dApp {
     fn stop_playback(&mut self) {
         self.timeline_ui.stop_playback(&mut self.tabs[self.active]);
     }
+
+    fn restart_playback(&mut self) {
+        self.timeline_ui.restart_playback(&self.tabs[self.active]);
+    }
+
+    fn dialog_shown(&self) -> bool {
+        self.shown_dialog().is_some()
+    }
 }
 
 impl ProjectWorkspace for Is2dApp {
@@ -518,9 +526,8 @@ impl Is2dApp {
     fn apply_dialog_action(&mut self, action: UiAction, ctx: &egui::Context) {
         match action {
             UiAction::RestoreRecovered => {
-                let mut recovery = std::mem::take(&mut self.recovery);
-                recovery.restore_found(self);
-                self.recovery = recovery;
+                let found = std::mem::take(&mut self.recovery.found);
+                recovery::Recovery::restore_found(found, self, ctx);
             }
             UiAction::DiscardRecovered => self.recovery.discard_found(),
             UiAction::CancelVideoExport => self.cancel_active_video_export(),
@@ -568,6 +575,7 @@ impl Is2dApp {
     /// ダイアログが出ていないときの `UiAction` の適用
     fn apply_action_without_dialog(&mut self, action: UiAction, ctx: &egui::Context) {
         match action {
+            UiAction::SelectLibrarySymbol(id) => self.tab_mut().view.select_library_symbol(id),
             UiAction::NewProject => project_io::new_project(self, ctx),
             UiAction::ResetView => self.tab_mut().view.reset_view(),
             UiAction::FitStageToWindow => self.fit_stage_to_window(),
@@ -843,8 +851,7 @@ impl Is2dApp {
                 || response.drag_started_by(egui::PointerButton::Primary)
                 || response.clicked_by(egui::PointerButton::Primary);
             if canvas_interacted {
-                self.stop_playback();
-                apply(self, Action::EndCoalesce { key: None });
+                self.begin_operation();
             } else {
                 return;
             }
@@ -1037,7 +1044,7 @@ impl Is2dApp {
         }
 
         panels::draw_right_properties_panel(
-            &mut self.tabs[self.active],
+            &self.tabs[self.active],
             &mut self.tool,
             &mut self.right_panel_tab,
             &mut actions,

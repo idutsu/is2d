@@ -239,9 +239,10 @@ impl TimelineUiState {
         self.drag_generation = dragging.then_some(generation);
     }
 
-    pub(crate) fn reset_for_timeline_switch(&mut self) {
-        self.is_playing = false;
-        self.audio.stop();
+    /// 見ているタイムラインが変わったとき：再生を止め（止める道は `stop_playback` の1本。前はここで別に止め、止めたコマの
+    /// 土台の作り直しと編集の階層の整えを飛ばした：約束の棚卸し 5616fcc の C の B4）、スクロールとドラッグを初めに戻す
+    fn reset_for_timeline_switch(&mut self, tab: &mut Tab) {
+        self.stop_playback(tab);
         self.scroll_x = 0.0;
         self.scroll_y = 0.0;
         self.last_ensured_frame = usize::MAX;
@@ -258,6 +259,13 @@ impl TimelineUiState {
         self.is_playing = true;
     }
 
+    /// 再生中なら、今のコマから鳴らし直す（fps・くり返しを変えたとき）
+    pub(crate) fn restart_playback(&mut self, tab: &Tab) {
+        if self.is_playing {
+            self.start_playback(tab);
+        }
+    }
+
     /// 再生中であれば停止し、停止時点のフレームの状態に合わせて編集スコープを整合させる
     pub(crate) fn stop_playback(&mut self, tab: &mut Tab) {
         if self.is_playing {
@@ -270,11 +278,11 @@ impl TimelineUiState {
 
     /// `tab` の現在のタイムライン識別キー `(id, edit_stack_len, active_symbol_id)` を読み取り、
     /// シンボル進入/退出やタブ切り替えが発生していればスクロール・ドラッグ状態を自動リセットする
-    pub(crate) fn ensure_timeline_context(&mut self, tab: &Tab) {
+    pub(crate) fn ensure_timeline_context(&mut self, tab: &mut Tab) {
         let key = timeline_key(tab);
         if self.last_timeline_key != key {
             self.last_timeline_key = key;
-            self.reset_for_timeline_switch();
+            self.reset_for_timeline_switch(tab);
         }
     }
 
@@ -731,10 +739,8 @@ fn draw_control_bar_transport_buttons(host: &mut impl TimelineHost, ui: &mut egu
         .clicked()
     {
         host.timeline_ui_mut().loop_playback = !loop_pb;
-        if host.timeline_ui().is_playing {
-            let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-            timeline_ui.start_playback(tab);
-        }
+        let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
+        timeline_ui.restart_playback(tab);
     }
 }
 
@@ -753,10 +759,7 @@ fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::U
     ui.label("FPS");
     if fps_resp.changed() {
         let next_fps = fps_val.clamp(1, crate::symbol::MAX_FPS);
-        if apply(host, Action::SetFps { fps: next_fps }) && host.timeline_ui().is_playing {
-            let (tab, timeline_ui) = host.tab_and_timeline_ui_mut();
-            timeline_ui.start_playback(tab);
-        }
+        apply(host, Action::SetFps { fps: next_fps });
     }
     if editing_idle(&[&fps_resp]) {
         apply(
@@ -1041,7 +1044,7 @@ fn handle_timeline_click_start(
 
         // 音の波形の端のつまみ：コマの選択・移動より先に見るので、つまみの細い範囲の上だけはつまみが優先される
         if let Some((layer, kf_start, edge, from)) = sound_handle_at(host, layout, pos, handle_w) {
-            host.stop_playback();
+            host.begin_operation();
             host.timeline_ui_mut().grid_drag = TimelineGridDrag::TrimSound {
                 layer,
                 kf_start,
@@ -1100,8 +1103,7 @@ fn handle_timeline_click_start(
                 let orig_sel = if let Some(sel) =
                     tl.cell_selection.filter(|s| s.contains(target_layer, col))
                 {
-                    host.stop_playback();
-                    apply(host, Action::EndCoalesce { key: None });
+                    host.begin_operation();
                     sel
                 } else {
                     apply(
@@ -2428,8 +2430,7 @@ pub(crate) fn go_to_frame(host: &mut impl TimelineHost, frame: usize) {
 /// 再生 / 一時停止を切り替える（`Enter` キーまたは Play ボタン）
 pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
     if host.timeline_ui().is_playing {
-        host.stop_playback();
-        apply(host, Action::EndCoalesce { key: None });
+        host.begin_operation();
     } else {
         // 浮いた片の確定を断られたら、再生を始めない（確定は再生を始める前に行う。断った理由は `apply` が知らせている。
         // レビュー 41766f9 の N-5001：前は断られても再生を始めてコマが進み、止めたあとに確定すると、浮いた片と持ち上げた元の

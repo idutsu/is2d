@@ -119,7 +119,7 @@ pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point, add: bool) -> bool {
         return false;
     };
     let (layer_id, id) = hit;
-    let Some(base) = tab.session.base_cache.cel(layer_id).map(|c| c.scope_base(&scope)) else {
+    let Some(base) = tab.session.base_cache().cel(layer_id).map(|c| c.scope_base(&scope)) else {
         return false;
     };
     let ids = base.connected_ids(id, &scope);
@@ -336,7 +336,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
     // 矩形の中にあるときだけ選ぶ
     let hidden_now: HashSet<ShapeId> = tab.session.floating_view().hidden().clone();
     let mut selection = tab.session.selection().clone();
-    for shape in tab.session.base_cache.shapes() {
+    for shape in tab.session.base_cache().shapes() {
         if selection.contains_shape(shape)
             || hidden_now.contains(&shape.shape_id)
             || !editable_lids.contains(&shape.layer_id)
@@ -570,7 +570,7 @@ pub(crate) fn prepare_group_selected_shapes(
     let mut group_path = tab.session.editing_group_path().to_vec();
     group_path.push(new_gid);
     let piece_plan: Option<crate::canvas_tool::CommitPlan> = {
-        let cache = &tab.session.base_cache;
+        let cache = &tab.session.base_cache();
         pieces
             .into_iter()
             .map(|(layer_id, map)| {
@@ -625,9 +625,13 @@ pub(crate) fn prepare_group_selected_shapes(
     }
     // 浮いた片の地図を、新しいグループの階層の地図にする（図形はその面。番号は片の番号のまま。選んだ生の図形はみな片に
     // なっているので、この階層に図形の並びで書いたものは無い）
-    crate::canvas_tool::write_maps(tab, &group_path, piece_plan);
+    if crate::canvas_tool::write_maps(tab, &group_path, piece_plan).is_none() {
+        return false;
+    }
     if let Some(plan) = rest_plan {
-        crate::canvas_tool::write_commit(tab, plan);
+        if crate::canvas_tool::write_commit(tab, plan).is_none() {
+            return false;
+        }
     }
     // 選択は、できた新しいグループ（今の階層から見て、新しいグループに入っている図形とインスタンス：`expand_to_group_unit`
     // と同じ見分け方）。前の選択の番号では選び直さない（線の番号は線の形と階層から決まるので、浮いた片を動かした先に置いた
@@ -675,7 +679,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                 continue;
             };
             let kf = &layer.keyframes[kf_idx];
-            for inst in kf.cel.instances.iter() {
+            for inst in kf.cel.instances().iter() {
                 if inst.parent_scope != scope
                     || !tab
                         .session
@@ -694,7 +698,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
                             inst.binding,
                             layer.start_of(kf_idx),
                             frame,
-                            &tab.doc.library,
+                            tab.doc.library(),
                         )
                         .into_iter()
                         .map(|c| (layer.id, c))
@@ -718,7 +722,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
     // グループの生の図形の地図（浮いた片にする。セル画の地図の写しは正しい地図なので、確かめ直さない：`checked_part`）
     let mut group_maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)> = Vec::new();
     let mut group_raw: Vec<(LayerId, Vec<u64>)> = Vec::new();
-    for s in tab.session.base_cache.shapes() {
+    for s in tab.session.base_cache().shapes() {
         if tab.session.selection().contains_shape(s)
             && s.symbol_instance.is_none()
             && s.is_in_editing_scope(&scope)
@@ -731,7 +735,7 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         }
     }
     for (layer_id, path) in &group_raw {
-        let Some(cel) = tab.session.base_cache.cel(*layer_id) else {
+        let Some(cel) = tab.session.base_cache().cel(*layer_id) else {
             continue;
         };
         group_maps.push((
@@ -849,13 +853,13 @@ pub(crate) fn prepare_arrange_selected(
         return false;
     }
     let target_lids: Vec<LayerId> = layer_orders.iter().map(|(lid, _)| *lid).collect();
+    // 書いたかは書いた答えのまま返す（前は書けたかを見ずに `true` を返した：約束の棚卸し 5616fcc の A の P-04）
     write_cels(tab, &target_lids, |lid, cel, _| {
         Ok(layer_orders
             .iter()
             .find(|(l, _)| *l == lid)
             .is_some_and(|(_, order)| cel.rearrange(scope, order)))
-    });
-    true
+    })
 }
 
 /// 選択中のオブジェクトをキャンバスから削除する
@@ -914,6 +918,5 @@ pub(crate) fn prepare_clear_active_frame_shapes(
         return false;
     }
     let scope = tab.session.editing_group_path().to_vec();
-    write_cels(tab, &layer_ids, |_, cel, _| Ok(cel.clear(&scope)));
-    true
+    write_cels(tab, &layer_ids, |_, cel, _| Ok(cel.clear(&scope)))
 }

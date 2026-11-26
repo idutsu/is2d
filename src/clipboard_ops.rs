@@ -38,7 +38,7 @@ impl Content {
     fn symbol_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.layers
             .iter()
-            .flat_map(|(_, c)| c.instances.iter().map(|i| i.binding.symbol_id))
+            .flat_map(|(_, c)| c.instances().iter().map(|i| i.binding.symbol_id))
     }
 }
 
@@ -54,8 +54,8 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
     let scope = session.editing_group_path();
     let tl = tab.active_timeline();
     let mut layers = Vec::new();
-    for &layer_id in session.base_cache.layer_order_ids() {
-        let Some(cel) = session.base_cache.cel(layer_id) else {
+    for &layer_id in session.base_cache().layer_order_ids() {
+        let Some(cel) = session.base_cache().cel(layer_id) else {
             continue;
         };
         let float = session
@@ -203,7 +203,7 @@ pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: imp
                     }
                     tab.session.add_to_selection(
                         nested.shape_ids(),
-                        nested.instances.iter().map(|i| i.binding.instance_gid),
+                        nested.instances().iter().map(|i| i.binding.instance_gid),
                     );
                 }
             }
@@ -294,8 +294,8 @@ pub(crate) fn remap_timeline_ids(
             });
             let cel = &kf.cel;
             if sound == kf.sound
-                && cel.maps.iter().all(|m| m.group_path.is_empty())
-                && cel.instances.is_empty()
+                && cel.maps().iter().all(|m| m.group_path.is_empty())
+                && cel.instances().is_empty()
             {
                 continue;
             }
@@ -323,7 +323,7 @@ pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
         .flat_map(Content::symbol_ids)
         .collect();
     for id in ids {
-        collect_symbol_and_descendants(id, &tab.doc.library, &mut visited, &mut clipboard.symbols);
+        collect_symbol_and_descendants(id, tab.doc.library(), &mut visited, &mut clipboard.symbols);
     }
     clipboard.sounds = sounds_used_by(&tab.doc.sounds, &clipboard.symbols)
         .cloned()
@@ -480,7 +480,7 @@ pub(crate) fn pasteable_content(tab: &Tab, clipboard: &Clipboard) -> (Option<Con
     let mut content = content.clone();
     for (_, cel) in &mut content.layers {
         if cel
-            .instances
+            .instances()
             .iter()
             .all(|i| can_paste_clipboard_symbol(tab, clipboard, i.binding.symbol_id))
         {
@@ -531,7 +531,6 @@ pub(crate) fn import_clipboard_symbols(
         .map(|s| (s.id, tab.doc.adopt_sound(s)))
         .collect();
 
-    let mut any_imported = false;
     for idx in 0..clipboard.symbols.len() {
         let src_sym_id = clipboard.symbols[idx].id;
         if !needed_imports.contains(&src_sym_id) {
@@ -567,16 +566,9 @@ pub(crate) fn import_clipboard_symbols(
             &sound_map,
         );
 
-        tab.doc.library.push(Arc::new(imported));
-        if tab.view.selected_library_symbol.is_none() {
-            tab.view.selected_library_symbol = Some(new_id);
-        }
-        any_imported = true;
+        tab.doc.add_symbol(None, imported);
     }
 
-    if any_imported {
-        tab.doc.bump_revision();
-    }
     local_sym_map
 }
 

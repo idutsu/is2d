@@ -194,12 +194,12 @@ fn decompose_affine_trs(affine: Affine) -> (f64, f64, f64, f64) {
 pub(crate) struct Cel {
     /// 階層（グループの番号の列。ルートは空）ごとの生の図形の地図。下から順で、階層の地図は、その階層の中身（入れ子の
     /// 階層の地図・インスタンス）より前にある。どの地図にも面がある（面の無くなった階層は外す）
-    pub(crate) maps: Arc<Vec<ScopeMap>>,
+    maps: Arc<Vec<ScopeMap>>,
     /// シンボルインスタンス（`instance_gid` で重複なし、CoW `Arc` 共有）。重なりの順に並び、重なり位置 `order` は
     /// `maps` の何番目の手前に描くか
-    pub(crate) instances: Arc<Vec<SymbolInstance>>,
+    instances: Arc<Vec<SymbolInstance>>,
     /// セル内容が更新されるたびにインクリメントされるリビジョン番号（Undo履歴の $O(1)$ CoW 共有用）
-    pub(crate) revision: u64,
+    revision: u64,
 }
 
 /// セル画の1つの階層の地図：塊の番号の並び（文書の塊の表 `ProjectDocument::map_tiles` の番号。升目の順）。塊はしまう形
@@ -686,6 +686,22 @@ fn test_scope_map_from_shapes(
 }
 
 impl Cel {
+    /// 階層ごとの生の図形の地図（読むだけ。書くのは `Cel` の関数だけで、そこで版を上げる：約束の棚卸し 5616fcc の B の C3・
+    /// A の P-22）
+    pub(crate) fn maps(&self) -> &Arc<Vec<ScopeMap>> {
+        &self.maps
+    }
+
+    /// シンボルインスタンス（読むだけ。書くのは `instances_mut` などの `Cel` の関数）
+    pub(crate) fn instances(&self) -> &Arc<Vec<SymbolInstance>> {
+        &self.instances
+    }
+
+    /// セル画の版（中身を書く `Cel` の関数が上げる）
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// テスト用：図形の並び `all_shapes`（下から順。インスタンスは図形の印）から作る（図形から地図を作る）。`Err`：地図に
     /// できない形がある
     #[cfg(test)]
@@ -733,7 +749,7 @@ impl Cel {
         mut shapes: Vec<FillShape>,
         mut instances: Vec<SymbolInstance>,
     ) {
-        shapes.retain(|s| s.symbol_instance.is_none() && !s.exterior.segments.is_empty());
+        shapes.retain(|s| s.symbol_instance.is_none() && !s.exterior().segments.is_empty());
         instances.sort_by_key(|i| i.order);
         let mut parts = Vec::with_capacity(shapes.len() + instances.len());
         let mut insts = instances.into_iter().peekable();
@@ -1360,24 +1376,34 @@ impl Cel {
         match f(&base) {
             LocalEdit::Same => Ok(None),
             LocalEdit::Refused(r) => Err(r),
-            LocalEdit::Changed(w) => Ok(Some(MapWritten(self.put_local(group_path, w, &base)))),
+            LocalEdit::Changed(w) => Ok(Some(MapWritten(self.put_local(group_path, w, &base)?))),
         }
     }
 
     /// 触った所だけで行った編集の書くもの `w` を入れる（階層の地図を新しいしまう形にする。面の無くなった階層は外し、
-    /// 新しい階層は決まりどおりの所に入れる）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る）
+    /// 新しい階層は決まりどおりの所に入れる）。戻り値は新しい地図の写し（`LayerBase::of_local`。前の写し `prev` から升目の索引を作る。
+    /// `None`：面の無くなった階層を外した）。`w` は前の写し `prev` の地図から作ったものなので、今の地図が `prev` の地図でなければ
+    /// （先に作った計画が古い）、何も変えずに断る（`Unwritable`。前は呼ぶ側が同じ地図から作ったことに頼っていた：約束の棚卸し
+    /// 5616fcc の A の P-07）
     pub(crate) fn put_local(
         &mut self,
         group_path: &[u64],
         w: crate::planar_map::LocalWrite,
         prev: &LayerBase,
-    ) -> Option<Arc<LayerBase>> {
+    ) -> Result<Option<Arc<LayerBase>>, crate::planar_map::LocalRefusal> {
         let at = self.maps.iter().position(|m| m.group_path == group_path);
+        let from_prev = match at {
+            Some(i) => self.maps[i].stored().same(&prev.stored),
+            None => prev.stored.is_empty(),
+        };
+        if !from_prev {
+            return Err(crate::planar_map::LocalRefusal::Unwritable);
+        }
         let Some(m) = ScopeMap::of_checked_stored(group_path.to_vec(), w.stored) else {
             let mut items = Self::items_of(&self.maps, &self.instances);
             items.retain(|it| !matches!(it, Item::Raw(p, _) if p == group_path));
             self.arrange(items);
-            return None;
+            return Ok(None);
         };
         let base = LayerBase::of_local(m.stored().clone(), group_path, w.faces, prev);
         match at {
@@ -1391,7 +1417,7 @@ impl Cel {
                 self.arrange(items);
             }
         }
-        Some(base)
+        Ok(Some(base))
     }
 
     /// テスト用：地図と重なりの順が決まりどおりか（どの地図も正しい地図で辺があり（線だけの地図は面が無い）、面に1つずつ別の番号が記してある。
@@ -1478,7 +1504,7 @@ impl Cel {
                         order: 0,
                     }));
                 }
-            } else if !s.exterior.segments.is_empty() {
+            } else if !s.exterior().segments.is_empty() {
                 parts.push(Part::Shape(Arc::new(s)));
             }
         }
@@ -1751,7 +1777,7 @@ impl Layer {
 
     /// 指定フレーム `frame` にキーフレームを挿入する（`clone_prev == true`: `F6` 複製 / `false`: `F7` 空白）
     /// （`fps`：作品の fps。音の区間を分けた位置を、音の中の位置にする：`SoundClip::advanced`）
-    pub(crate) fn insert_keyframe(&mut self, frame: usize, clone_prev: bool, fps: u32) -> bool {
+    fn insert_keyframe(&mut self, frame: usize, clone_prev: bool, fps: u32) -> bool {
         let mut changed = false;
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
@@ -1799,7 +1825,7 @@ impl Layer {
 
     /// 指定フレーム `frame` の保持尺を1フレーム延長し、後続のキーフレームを +1 フレーム後ろへずらす（`F5`）。
     /// ずらすのは、後ろのキーフレームの塊の基準だけ（列の長さによらない：`ChunkedList::shift_keys_from`）
-    pub(crate) fn insert_frame_at(&mut self, frame: usize) {
+    fn insert_frame_at(&mut self, frame: usize) {
         if frame >= self.frame_count {
             self.frame_count = frame + 1;
         } else {
@@ -1810,7 +1836,7 @@ impl Layer {
     }
 
     /// Adobe Animate 仕様のフレーム削除（`Shift+F5`）を1コマ分：`remove_frames(frame, 1, fps)`
-    pub(crate) fn remove_frame_at(&mut self, frame: usize, fps: u32) -> bool {
+    fn remove_frame_at(&mut self, frame: usize, fps: u32) -> bool {
         self.remove_frames(frame, 1, fps)
     }
 
@@ -1822,7 +1848,7 @@ impl Layer {
     ///   `first` から続く）。
     /// - 後ろのキーフレームは `count` コマ左へ詰める。
     /// - コマを全部消すときは、1コマだけ残し、最後のキーフレームを空白にしてコマ 1 に置く。
-    pub(crate) fn remove_frames(&mut self, first: usize, count: usize, fps: u32) -> bool {
+    fn remove_frames(&mut self, first: usize, count: usize, fps: u32) -> bool {
         let n = self.frame_count;
         if first >= n || count == 0 {
             return false;
@@ -1930,7 +1956,7 @@ impl Layer {
 
     /// 抽出された相対キーフレーム群 `kfs`（相対の始まりのコマと組）を `[dst_min_frame..=dst_max_frame]` に配置する（区間にあったキーフレームは
     /// 置き換える）。Adobe Animate と同じく、区間の後ろのコマには、置いた最後のキーフレームの絵が次のキーフレームまで続く
-    pub(crate) fn place_keyframes_at(
+    fn place_keyframes_at(
         &mut self,
         dst_min_frame: usize,
         dst_max_frame: usize,

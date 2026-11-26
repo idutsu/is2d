@@ -299,7 +299,7 @@ impl PlanarMap {
                             a,
                             b,
                             q: *q,
-                            color: f.color,
+                            color: f.color(),
                             src: f.shape_id,
                         });
                     }
@@ -2364,7 +2364,7 @@ impl LayerBase {
                     .collect()
             };
             (
-                s.color.to_array(),
+                s.color().to_array(),
                 s.contours().map(bits).collect::<Vec<_>>(),
             )
         };
@@ -3233,7 +3233,7 @@ fn placed(mut d: FillShape, xform: Affine) -> FillShape {
 
 /// 地図にする生の図形か：階層 `scope` の生の図形（シンボルの図形でない）で、輪郭がある
 pub(crate) fn is_map_shape(s: &FillShape, scope: &[u64]) -> bool {
-    s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior.segments.is_empty()
+    s.is_raw_at_scope(scope) && s.symbol_instance.is_none() && !s.exterior().segments.is_empty()
 }
 
 /// 輪郭の変形の1回分（どの辺・頂点かは、形と位置で探す）。確定もドラッグ中の表示も、重ね合わせに渡すものは
@@ -3883,7 +3883,7 @@ pub(crate) fn region_map(part: &PlanarMap, rect: Option<&FillShape>) -> Option<P
     if let Some(r) = rect {
         m = m.overlay(
             MapInput::Shapes(std::slice::from_ref(r)),
-            MapRule::Paint(Some(r.color)),
+            MapRule::Paint(Some(r.color())),
         )?;
     }
     Some(m)
@@ -3980,7 +3980,7 @@ impl LayerBase {
                         }
                     },
                     f.color,
-                    |s| shape(s).map(|x| x.color),
+                    |s| shape(s).map(|x| x.color()),
                     // 元の図形の辺がみな片にあるか
                     |s| {
                         !shape(s).is_some_and(|x| {
@@ -4005,7 +4005,7 @@ impl LayerBase {
 #[cfg(test)]
 fn painted_map(shapes: &[&FillShape]) -> Option<PlanarMap> {
     shapes.iter().try_fold(PlanarMap::default(), |m, s| {
-        m.overlay(MapInput::Shapes(std::slice::from_ref(*s)), MapRule::Paint(Some(s.color)))
+        m.overlay(MapInput::Shapes(std::slice::from_ref(*s)), MapRule::Paint(Some(s.color())))
     })
 }
 

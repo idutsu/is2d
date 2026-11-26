@@ -138,7 +138,7 @@ type Rendered = (Vec<u8>, Vec<Arc<LayerBase>>);
 /// `render_frame` と、塗るときに展開したセル画の地図の計算に使う写し。写しを次のコマを塗る間まで持てば、同じキーフレームの
 /// 地図を作り直さない（写しは、それを使う所が持つ：レビュー「軽量化・高速化」の★1）。`None`：その大きさの画像を作れない
 fn render_frame_holding(doc: &Document, frame: usize, width: u32, height: u32) -> Option<Rendered> {
-    let ctx = crate::symbol::SymbolEvalCtx::new(&doc.library).without_mesh();
+    let ctx = crate::symbol::SymbolEvalCtx::new(doc.library()).without_mesh();
     let rgba = paint_frame(doc, frame, width, height, &ctx)?;
     Some((rgba, ctx.into_state().take_held()))
 }
@@ -171,7 +171,7 @@ fn paint_frame(
             } else {
                 tiny_skia::FillRule::EvenOdd
             };
-            fill_contours(&mut pixmap, shape.contours(), shape.color, rule, (origin_x, origin_y));
+            fill_contours(&mut pixmap, shape.contours(), shape.color(), rule, (origin_x, origin_y));
         }
     }
 

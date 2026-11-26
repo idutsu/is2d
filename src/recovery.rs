@@ -201,18 +201,22 @@ impl Recovery {
         });
     }
 
-    /// 見つかった復旧ファイルを古い順に未保存タブとして開き、復旧ファイルと一覧を消す
-    pub(crate) fn restore_found(&mut self, ws: &mut impl ProjectWorkspace) {
+    /// 見つかった復旧ファイル（`take_found` で取り出した一覧 `found`）を古い順に未保存タブとして開き、全部開き終えてから
+    /// 復旧ファイルと一覧を消す。係（`Recovery`）は取り出さないので、開いている途中で止まっても、落ちる前の控え書きは
+    /// 置き場を知っていて、開いたタブを書ける（前は係を丸ごと取り出して開き、1件開けるごとに復旧ファイルを消したので、
+    /// 途中で止まると開いた作業が消えた：約束の棚卸し 5616fcc の C の C5）
+    pub(crate) fn restore_found(found: Vec<Found>, ws: &mut impl ProjectWorkspace, ctx: &eframe::egui::Context) {
         let mut restored = 0usize;
         let mut broken_paths = Vec::new();
+        let mut opened = Vec::new();
 
-        for item in self.found.drain(..) {
+        for item in found {
             let res = read_project_document(&item.recovery_path).and_then(|mut proj_doc| {
                 let src = proj_doc
                     .recovery_source
                     .take()
                     .ok_or_else(|| "復旧ファイルに元のファイル場所がありません".to_owned())?;
-                open_document_in_new_tab(ws, proj_doc.into_document()?)?;
+                open_document_in_new_tab(ws, proj_doc.into_document()?, Some(ctx))?;
                 ws.tab_mut().file = Some(src);
                 ws.tab_mut().history.mark_unsaved();
                 Ok(())
@@ -220,8 +224,7 @@ impl Recovery {
 
             match res {
                 Ok(()) => {
-                    let _ = std::fs::remove_file(&item.recovery_path);
-                    let _ = std::fs::remove_file(&item.entry_path);
+                    opened.push(item);
                     restored += 1;
                 }
                 Err(_) => {
@@ -231,6 +234,11 @@ impl Recovery {
                     broken_paths.push(broken_path.display().to_string());
                 }
             }
+        }
+
+        for item in opened {
+            let _ = std::fs::remove_file(&item.recovery_path);
+            let _ = std::fs::remove_file(&item.entry_path);
         }
 
         if !broken_paths.is_empty() {

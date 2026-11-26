@@ -125,21 +125,17 @@ struct SymbolPreview {
 pub(crate) struct SymbolPreviews(SyncCache<Option<SymbolPreview>>);
 
 impl SymbolPreviews {
-    /// シンボル `sym` のプレビューの外接矩形とメッシュ（シンボルの座標）を `f` に渡す。鍵が変わっていれば作り直す。
-    /// `None`：中身が空
+    /// 文書 `doc` のシンボル `sym` のプレビューの外接矩形とメッシュ（シンボルの座標）を `f` に渡す。鍵（シンボルの版・
+    /// ライブラリの版・見ているコマ）が変わっていれば作り直す。鍵はここで文書から取る（呼ぶ側に渡させない：約束の棚卸し
+    /// 5616fcc の B の D4）。`None`：中身が空
     pub(crate) fn with<R>(
         &self,
         sym: &SymbolDef,
-        library_revision: u64,
-        library: &Library,
+        doc: &Document,
         f: impl FnOnce(kurbo::Rect, &egui::Mesh) -> R,
     ) -> Option<R> {
-        let key = (
-            sym.id,
-            sym.revision,
-            library_revision,
-            sym.timeline.current_frame,
-        );
+        let library = &doc.library;
+        let key = (sym.id, sym.revision, doc.revision, sym.timeline.current_frame);
         let mut held = self.0.lock();
         if held.as_ref().is_none_or(|p| p.key != key) {
             let mut shapes = sym.evaluated_local_shapes_at(sym.timeline.current_frame, library);
@@ -218,18 +214,26 @@ pub(crate) struct SymbolEvalState {
 }
 
 impl SymbolEvalState {
-    /// 1回の描画の始めに呼ぶ
+    /// 1回の描画の始めに呼ぶ：直前の回に使ったものを、この回で使えば残すものにする（ライブラリが変わっていれば捨てる：
+    /// `fit_library`）
     pub(crate) fn start_pass(&mut self, library: &Library) {
         self.held.clear();
+        self.fit_library(library);
+        self.prev = std::mem::take(&mut self.memo);
+    }
+
+    /// メモを使う前に呼ぶ（使う入口 `Tab::with_symbol_eval` が毎回呼ぶ）：ライブラリのどれかのシンボルが変わっていたら
+    /// （ID と世代番号の並びが違えば）全部捨てる。前は描画の始めにしか確かめなかったので、同じ1コマのうちにライブラリを
+    /// 変える操作（取り消しなど）のあとでスポイト・バケツがメモを使うと、古い中身で色を拾った（約束の棚卸し 5616fcc の
+    /// B の D1・E1）。手間はシンボルの数の分（ライトなアニメでは数十〜数百）
+    pub(crate) fn fit_library(&mut self, library: &Library) {
         let same_library = self.library_sig.len() == library.len()
             && self
                 .library_sig
                 .iter()
                 .zip(library)
                 .all(|(&(id, rev), s)| id == s.id && rev == s.revision);
-        if same_library {
-            self.prev = std::mem::take(&mut self.memo);
-        } else {
+        if !same_library {
             self.memo.clear();
             self.prev.clear();
             self.library_sig = library.iter().map(|s| (s.id, s.revision)).collect();
@@ -337,7 +341,7 @@ pub(crate) fn resolve_cel_with_library(
     ctx: SymbolEvalCtx<'_>,
 ) -> Vec<CelShape> {
     let mut out = Vec::new();
-    for m in cel.maps.iter() {
+    for m in cel.maps().iter() {
         ctx.hold(m.base());
     }
     for part in cel.parts() {
@@ -368,7 +372,7 @@ pub(crate) fn resolve_cel_with_library(
 impl SymbolDef {
     /// セル画 `cel`（シンボルの座標）を、1枚目のレイヤーの最初のキーフレームの中身にしたシンボル（シンボル化）
     pub(crate) fn from_cel(id: u64, name: String, mut cel: Cel) -> Self {
-        if !cel.instances.is_empty() {
+        if !cel.instances().is_empty() {
             for inst in cel.instances_mut() {
                 inst.layer_id = 1;
             }
@@ -546,7 +550,7 @@ impl SymbolDef {
                 }
                 None => kf.cel.clone(),
             };
-            if !cel.instances.is_empty() {
+            if !cel.instances().is_empty() {
                 for inst in cel.instances_mut() {
                     let b = &mut inst.binding;
                     let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
@@ -678,8 +682,11 @@ pub(crate) fn stage_size_of(size: Vec2) -> Option<Vec2> {
 #[derive(Clone, Debug)]
 pub(crate) struct Document {
     pub(crate) root: Timeline,
-    /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）
-    pub(crate) library: Library,
+    /// Undo の控えと共有する（書く所だけ `Arc::make_mut` で写す。控えを取る・戻すは `Arc` の入れ替えだけ）。外からは
+    /// 書けない：足すのは `add_symbol`、中身を書くのは `write_symbol_timeline`、消すのは `remove_symbol_and_instances`
+    /// （どれも文書の版を上げる）、見ているコマ・レイヤーは `symbol_view_mut`（版は上げない）、取り消しで入れ替えるのは
+    /// `replace_content`（設計 claude/約束を入口で守る設計_5616fcc.md の 6.）
+    library: Library,
     /// 音のライブラリ（キーフレームの音 `SoundClip` が番号で指す。Undo の控えと共有する）
     pub(crate) sounds: crate::sound::SoundLibrary,
     /// いつも `stage_size_of` で決めた大きさ
@@ -693,6 +700,115 @@ pub(crate) struct Document {
     pub(crate) revision: u64,
     /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
     pub(crate) broken_maps: crate::timeline::BrokenMaps,
+}
+
+/// 取り消しの控えにする文書の中身（`Document::content`・`replace_content`）。番号の数え札（取り消しても戻さない：番号を
+/// 使い回すと、別の中身と番号がぶつかる）と、壊れていた地図の知らせ先は入れない
+#[derive(Clone)]
+pub(crate) struct DocContent {
+    pub(crate) root: Timeline,
+    pub(crate) library: Library,
+    pub(crate) sounds: crate::sound::SoundLibrary,
+    pub(crate) stage_size: Vec2,
+    pub(crate) fps: u32,
+    pub(crate) revision: u64,
+}
+
+impl Document {
+    /// 読み込んだ中身から文書を作る（番号の数え札を合わせて渡す。版は新しくする）
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn loaded(
+        root: Timeline,
+        library: Library,
+        sounds: crate::sound::SoundLibrary,
+        stage_size: Vec2,
+        fps: u32,
+        next_symbol_id: u64,
+        next_group_id: u64,
+        next_sound_id: u64,
+    ) -> Self {
+        Self {
+            root,
+            library,
+            sounds,
+            stage_size,
+            fps,
+            next_symbol_id,
+            next_group_id,
+            next_sound_id,
+            revision: crate::vector_engine::next_mesh_revision(),
+            broken_maps: Default::default(),
+        }
+    }
+
+    /// シンボルのライブラリ（読むだけ）
+    #[inline]
+    pub(crate) fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// 取り消しの控えにする中身（項目は全部書く：文書に項目を足すと、ここが組み立てで止まるので、控えに入れるかを必ず決める）
+    pub(crate) fn content(&self) -> DocContent {
+        let Self {
+            root,
+            library,
+            sounds,
+            stage_size,
+            fps,
+            revision,
+            next_symbol_id: _,
+            next_group_id: _,
+            next_sound_id: _,
+            broken_maps: _,
+        } = self;
+        DocContent {
+            root: root.clone(),
+            library: library.clone(),
+            sounds: sounds.clone(),
+            stage_size: *stage_size,
+            fps: *fps,
+            revision: *revision,
+        }
+    }
+
+    /// 中身を `content` に入れ替え、前の中身を返す（取り消し・やり直し。項目は全部書く）
+    pub(crate) fn replace_content(&mut self, content: DocContent) -> DocContent {
+        let Self {
+            root,
+            library,
+            sounds,
+            stage_size,
+            fps,
+            revision,
+            next_symbol_id: _,
+            next_group_id: _,
+            next_sound_id: _,
+            broken_maps: _,
+        } = self;
+        DocContent {
+            root: std::mem::replace(root, content.root),
+            library: std::mem::replace(library, content.library),
+            sounds: std::mem::replace(sounds, content.sounds),
+            stage_size: std::mem::replace(stage_size, content.stage_size),
+            fps: std::mem::replace(fps, content.fps),
+            revision: std::mem::replace(revision, content.revision),
+        }
+    }
+
+    /// シンボル `def` をライブラリの `at` 番目（`None` なら最後）に足し、文書の版を上げる（シンボルを足す所はみなここ）
+    pub(crate) fn add_symbol(&mut self, at: Option<usize>, def: SymbolDef) {
+        match at {
+            Some(i) => self.library.insert(i, Arc::new(def)),
+            None => self.library.push(Arc::new(def)),
+        }
+        self.bump_revision();
+    }
+
+    /// ライブラリの `i` 番目のシンボルの、見ているコマ・選んでいるレイヤーなど中身でない状態を書くためのタイムライン
+    /// （版は上げない。中身を書くのは `write_symbol_timeline`）
+    pub(crate) fn symbol_view_mut(&mut self, i: usize) -> &mut Timeline {
+        &mut Arc::make_mut(&mut self.library[i]).timeline
+    }
 }
 
 impl Default for Document {
@@ -761,7 +877,7 @@ impl Document {
     }
 
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
-    pub(crate) fn bump_revision(&mut self) {
+    fn bump_revision(&mut self) {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
@@ -787,8 +903,7 @@ impl Document {
                 .chain(1..)
                 .map(|n| format!("Symbol {n}")),
         );
-        self.library.push(Arc::new(sym_def));
-        self.bump_revision();
+        self.add_symbol(None, sym_def);
     }
 
     /// 名前の候補 `names` のうち、ライブラリのどのシンボルも使っていない最初の名前。シンボルに名前を付ける所（作る・別の
@@ -799,20 +914,27 @@ impl Document {
             .expect("名前の候補は尽きない")
     }
 
-    /// ライブラリの `i` 番目のシンボルのタイムラインを `f(タイムライン, 文書)` で書き、そのシンボルの版とライブラリの版を
-    /// 上げる。シンボルの中身を書く入口はこれ1つ（版で中身を見分ける所：クリップボードの使い回し・写しの鍵が、書いた後の
-    /// 中身を古い中身と取り違えない）。書いている間、タイムラインは文書から外してある
+    /// ライブラリの `i` 番目のシンボルのタイムラインを `f(タイムライン, 文書)` で書き、中身が変わったら、そのシンボルの版と
+    /// ライブラリの版を上げる。シンボルの中身を書く入口はこれ1つ（版で中身を見分ける所：クリップボードの使い回し・写しの
+    /// 鍵が、書いた後の中身を古い中身と取り違えない）。中身が変わらなければ版はそのまま（前は何も変えない書き込みでも版を
+    /// 上げ、写しを作り直させ、別のタブへの使い回しを外した：約束の棚卸し 5616fcc の B）。比べるのは書く前の写し（塊を
+    /// 分け合うので、写すのも比べるのもレイヤーと塊の数だけ：`Timeline::same_content`）。書いている間、タイムラインは
+    /// 文書から外してある
     pub(crate) fn write_symbol_timeline<R>(
         &mut self,
         i: usize,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
+        let before = self.library[i].timeline.clone();
         let mut tl = std::mem::take(&mut Arc::make_mut(&mut self.library[i]).timeline);
         let res = f(&mut tl, self);
+        let changed = !tl.same_content(&before);
         let sym = Arc::make_mut(&mut self.library[i]);
         sym.timeline = tl;
-        sym.revision = crate::vector_engine::next_mesh_revision();
-        self.bump_revision();
+        if changed {
+            sym.revision = crate::vector_engine::next_mesh_revision();
+            self.bump_revision();
+        }
         res
     }
 
@@ -826,7 +948,7 @@ impl Document {
 
     /// 指定した `symbol_id` のシンボル定義を可変参照する（Undo の控えと共有していれば、そのシンボルと、それが入っている
     /// ライブラリの塊だけを写す）
-    pub(crate) fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
+    fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
         let i = self.library.iter().position(|s| s.id == symbol_id)?;
         Some(Arc::make_mut(&mut self.library[i]))
     }
@@ -1008,7 +1130,7 @@ impl Document {
                 for i in 0..layer.keyframes.len() {
                     if layer.keyframes[i]
                         .cel
-                        .instances
+                        .instances()
                         .iter()
                         .any(|inst| inst.binding.symbol_id == symbol_id)
                     {
@@ -1126,7 +1248,7 @@ impl ResolvedCelSig {
         } else {
             None
         };
-        self.cel_revision == kf.cel.revision
+        self.cel_revision == kf.cel.revision()
             && self.start_frame == layer.start_of(kf_idx)
             && self.tween == kf.tween
             && self.tween_rotate == kf.tween_rotate
@@ -1172,7 +1294,7 @@ pub(crate) fn compute_resolved_cel_signature(
     let kf = &layer.keyframes[kf_idx];
     let mut visited_syms: Vec<u64> = Vec::new();
     let mut referenced_symbols: Vec<(u64, u64)> = Vec::new();
-    for inst in kf.cel.instances.iter() {
+    for inst in kf.cel.instances().iter() {
         if excluded_instance_gid == Some(inst.binding.instance_gid) {
             continue;
         }
@@ -1206,7 +1328,7 @@ pub(crate) fn compute_resolved_cel_signature(
         }
     }
     ResolvedCelSig {
-        cel_revision: kf.cel.revision,
+        cel_revision: kf.cel.revision(),
         start_frame: layer.start_of(kf_idx),
         tween: kf.tween,
         tween_rotate: kf.tween_rotate,
@@ -1303,7 +1425,7 @@ impl Timeline {
         let has_tween = layer.interpolated_tween_binding_at(frame).is_some();
         let mut batch = Mesh::default();
         let shapes: Vec<Arc<FillShape>> =
-            if !has_tween && kf.cel.instances.is_empty() && world_xform == Affine::IDENTITY {
+            if !has_tween && kf.cel.instances().is_empty() && world_xform == Affine::IDENTITY {
                 let shapes = kf.cel.shapes();
                 for s in &shapes {
                     s.append_fill_mesh_to(&mut batch);

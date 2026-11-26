@@ -329,10 +329,10 @@ fn collect_voices(
             let bindings: Vec<crate::vector_engine::SymbolInstanceBinding> =
                 match layer.interpolated_tween_binding_at(frame) {
                     Some(b) => vec![b],
-                    None => kf.cel.instances.iter().map(|i| i.binding).collect(),
+                    None => kf.cel.instances().iter().map(|i| i.binding).collect(),
                 };
             for b in bindings {
-                let Some(sym) = doc.library.iter().find(|s| s.id == b.symbol_id) else {
+                let Some(sym) = doc.library().iter().find(|s| s.id == b.symbol_id) else {
                     continue;
                 };
                 if let Some(inner) = sym.playing_internal_frame(b, kf_start, frame) {

@@ -432,8 +432,8 @@ pub(crate) struct View {
     pub(crate) onion_next_frames: usize,
     /// プロパティパネルの下部表示対象（`true`: タイムラインのフレーム/トゥイーン属性、`false`: キャンバス上のシンボル属性）
     pub(crate) inspect_timeline_frame: bool,
-    /// ライブラリパネルで現在選択中のシンボルID
-    pub(crate) selected_library_symbol: Option<u64>,
+    /// ライブラリパネルで選んだシンボルの番号（無い番号のこともある。見せるのは `library_symbol` が決める）
+    selected_library_symbol: Option<u64>,
     /// ライブラリのシンボルのミニプレビューの写し
     pub(crate) symbol_previews: crate::symbol::SymbolPreviews,
     /// キャンバスでの前の主ボタンのクリック（画面の位置と時刻）。ダブルクリックを位置も比べて決めるため（`double_clicked`）
@@ -485,14 +485,18 @@ impl View {
         len * self.zoom as f64 > MIN_DRAG_SCREEN_PX
     }
 
-    /// ライブラリで選択中のシンボルIDが有効か検証し、未選択または削除済みの場合は先頭シンボルを選択する
-    pub(crate) fn ensure_valid_library_selection(&mut self, library: &Library) {
-        if self
-            .selected_library_symbol
-            .is_none_or(|id| !library.iter().any(|s| s.id == id))
-        {
-            self.selected_library_symbol = library.first().map(|s| s.id);
-        }
+    /// ライブラリ `library` で選んでいるシンボル：選んだシンボルがライブラリにあればそれ、無ければ（選んでいない・消した・
+    /// 取り消しで無くなった）先頭。決める所はここだけ（前は消す・取り消す・入れ子の戻し・パネルの描画の4か所で直していた：
+    /// 約束の棚卸し 5616fcc の A の P-19）
+    pub(crate) fn library_symbol(&self, library: &Library) -> Option<u64> {
+        self.selected_library_symbol
+            .filter(|&id| library.iter().any(|s| s.id == id))
+            .or_else(|| library.first().map(|s| s.id))
+    }
+
+    /// ライブラリでシンボル `id` を選ぶ
+    pub(crate) fn select_library_symbol(&mut self, id: u64) {
+        self.selected_library_symbol = Some(id);
     }
 
     /// ワールド座標 `p` を現在のズーム・パンに応じたスクリーン座標 `Pos2` へ変換する
@@ -1383,7 +1387,8 @@ pub(crate) use crate::floating::{Floating, FloatingView};
 use crate::floating::Stage;
 
 /// 親の背景を描く文書の写し：（鍵, 浮いた片を確定した後の文書。確定できなければ `None`）
-type BackdropDoc = ((u64, u64), Option<Arc<Document>>);
+/// 親の背景を描く文書の写しと、その鍵（浮いた片の番号・ライブラリの版・見ている場所）
+type BackdropDoc = ((u64, u64, EditPath, Vec<u64>), Option<Arc<Document>>);
 
 /// タブごとの編集セッション状態（土台キャッシュ・上乗せ・選択・変形・排他ドラッグ・編集階層、保存しない）
 #[derive(Default)]
@@ -1405,16 +1410,17 @@ pub(crate) struct Session {
     pub(crate) cel_cache: SyncCache<CelMeshCache>,
     /// 描くたびのシンボルの評価（オニオンスキン・再生・ロック中のレイヤー）で使い回す、シンボルの中身のメモ
     pub(crate) symbol_memo: SyncCache<SymbolEvalState>,
-    /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ
-    pub(crate) base_cache: SceneBaseCache,
-    /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示）
-    pub(crate) overlay: Overlay,
+    /// `Document` から構築されるレイヤー別の読み取り専用土台キャッシュ（外からは読むだけ：`base_cache`。作り直す・捨てる
+    /// のは `Session`・`Tab` の関数で、そこで並びの写しも捨てる：約束の棚卸し 5616fcc の B の A1）
+    base_cache: SceneBaseCache,
+    /// 土台図形列に対する上乗せ図形状態（Floating およびドラッグ中の仮表示。書くのは `Session` の関数だけ）
+    overlay: Overlay,
     /// `Alt` 複製ドラッグ中など、`Overlay` 内の可動図形のみを選択表示・境界枠対象とするフラグ
     pub(crate) overlay_only_selected: bool,
     /// `overlay.add` のうちドラッグで移動・変形する図形の開始インデックス（`0..overlay_movable_start` はスライス残り等の固定背景）
     pub(crate) overlay_movable_start: usize,
     /// `Scene` の合成順序リストキャッシュ（土台または上乗せが変わったときだけ再構築する）
-    pub(crate) scene_order: std::sync::OnceLock<Vec<SceneEntry>>,
+    scene_order: std::sync::OnceLock<Vec<SceneEntry>>,
     /// キャンバス上で進行中のドラッグ操作（ブラシ/消しゴム・選択・自由変形の排他的状態マシン）
     pub(crate) drag: ActiveCanvasDrag,
     /// 選択（書くのは `Session` の選ぶ・外す関数だけ：設計 claude/約束を入口で守る設計_5616fcc.md の 5.）
@@ -1489,6 +1495,17 @@ impl Session {
     #[inline]
     pub(crate) fn invalidate_scene_order(&mut self) {
         let _ = self.scene_order.take();
+    }
+
+    /// 画面の土台（読むだけ）
+    pub(crate) fn base_cache(&self) -> &SceneBaseCache {
+        &self.base_cache
+    }
+
+    /// 画面の土台を捨てる（途中で止まった操作のあと：次の `refresh_scene_base` が全部作り直す）。並びの写しも捨てる
+    pub(crate) fn drop_scene_base(&mut self) {
+        self.base_cache = Default::default();
+        self.invalidate_scene_order();
     }
 
     /// シンボルインプレイス編集の経路（空ならルート）
@@ -2558,8 +2575,10 @@ pub(crate) fn committed_document(
         *g = editing_group_path.to_vec();
     });
     debug_assert!(moved);
-    temp_tab.session.set_floating(Some(fl.clone()));
+    // 画面の土台を先に作る（浮いた片を入れる入口が、土台のレイヤーの順で浮いた片を並べるため：約束の棚卸し 5616fcc の
+    // B の B3）
     temp_tab.refresh_scene_base();
+    temp_tab.session.set_floating(Some(fl.clone()));
     commit_floating(&mut temp_tab).then_some(temp_tab.doc)
 }
 
@@ -2588,7 +2607,7 @@ impl Tab {
     /// 編集中のシンボルのライブラリでの位置を返す（ルートを編集中なら `None`）
     fn active_symbol_index(&self) -> Option<usize> {
         let last = self.session.edit_path.last()?;
-        self.doc.library.iter().position(|s| s.id == last.symbol_id)
+        self.doc.library().iter().position(|s| s.id == last.symbol_id)
     }
 
     /// テスト用：画面の土台が最新か（`refresh_scene_base` で作り直すものが無い）
@@ -2596,7 +2615,7 @@ impl Tab {
     pub(crate) fn scene_base_is_fresh(&self) -> bool {
         self.session.base_cache.is_fresh(
             self.active_timeline(),
-            &self.doc.library,
+            self.doc.library(),
             self.session.edit_path.world_xform(),
         )
     }
@@ -2605,13 +2624,13 @@ impl Tab {
     pub(crate) fn refresh_scene_base(&mut self) {
         let world_xform = self.session.edit_path.world_xform();
         let tl = match self.active_symbol_index() {
-            Some(idx) => &self.doc.library[idx].timeline,
+            Some(idx) => &self.doc.library()[idx].timeline,
             None => &self.doc.root,
         };
         if self
             .session
             .base_cache
-            .rebuild(tl, &self.doc.library, world_xform)
+            .rebuild(tl, self.doc.library(), world_xform)
         {
             self.session.invalidate_scene_order();
         }
@@ -2621,7 +2640,7 @@ impl Tab {
     #[inline]
     pub(crate) fn active_timeline(&self) -> &Timeline {
         match self.active_symbol_index() {
-            Some(idx) => &self.doc.library[idx].timeline,
+            Some(idx) => &self.doc.library()[idx].timeline,
             None => &self.doc.root,
         }
     }
@@ -2631,7 +2650,7 @@ impl Tab {
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
         match self.active_symbol_index() {
-            Some(idx) => &mut Arc::make_mut(&mut self.doc.library[idx]).timeline,
+            Some(idx) => self.doc.symbol_view_mut(idx),
             None => &mut self.doc.root,
         }
     }
@@ -2764,7 +2783,7 @@ impl Tab {
             }
         };
         match &committed {
-            Some(doc) => draw(doc, SymbolEvalCtx::new(&doc.library)),
+            Some(doc) => draw(doc, SymbolEvalCtx::new(doc.library())),
             None => self.with_symbol_eval(|ctx| draw(&self.doc, ctx)),
         }
         meshes
@@ -2772,14 +2791,20 @@ impl Tab {
 
     /// 親の背景を描く文書：シンボルの中を編集していて、動かした浮いた片（`modified`）があれば、それを確定した後の文書
     /// （`committed_document`）。それ以外は `None`（今の文書から描く）。確定した後の文書は、浮いた片か文書が変わったとき
-    /// だけ作り直す（`Session::floating_rev`・`Document::revision` を鍵に持つ）。浮いた片を確定できないとき（置けない）は、
-    /// 確定する前の今の文書のまま
+    /// だけ作り直す（`Session::floating_rev`・`Document::revision`・見ている場所を鍵に持つ。前は見ている場所を鍵に入れず、
+    /// 見る場所を変える前に貼り戻す決まりに頼っていた：約束の棚卸し 5616fcc の B の B6）。浮いた片を確定できないとき
+    /// （置けない）は、確定する前の今の文書のまま
     fn backdrop_document(&self) -> Option<Arc<Document>> {
         let fl = self.session.floating().filter(|fl| fl.modified())?;
         if self.session.edit_path.levels.is_empty() {
             return None;
         }
-        let key = (self.session.floating_rev, self.doc.revision);
+        let key = (
+            self.session.floating_rev,
+            self.doc.revision,
+            self.session.edit_path.clone(),
+            self.session.editing_group_path.clone(),
+        );
         let mut slot = self.session.backdrop_doc.lock();
         if let Some((k, doc)) = &*slot {
             if *k == key {
@@ -2925,7 +2950,7 @@ impl Tab {
         self.session
             .symbol_memo
             .lock()
-            .start_pass(&self.doc.library);
+            .start_pass(self.doc.library());
         self.session.onion_cache.lock().start_pass();
         self.session.cel_cache.lock().start_pass();
         self.session.backdrop_cache.lock().start_pass();
@@ -2933,8 +2958,9 @@ impl Tab {
 
     /// 描くたびのシンボルの評価を、セッションのメモ（`Session::symbol_memo`）を使って行う
     pub(crate) fn with_symbol_eval<R>(&self, f: impl FnOnce(SymbolEvalCtx<'_>) -> R) -> R {
-        let state = std::mem::take(&mut *self.session.symbol_memo.lock());
-        let ctx = SymbolEvalCtx::with_state(&self.doc.library, state);
+        let mut state = std::mem::take(&mut *self.session.symbol_memo.lock());
+        state.fit_library(self.doc.library());
+        let ctx = SymbolEvalCtx::with_state(self.doc.library(), state);
         let out = f(ctx.clone());
         *self.session.symbol_memo.lock() = ctx.into_state();
         out
@@ -2984,9 +3010,30 @@ impl Tab {
             .can_place_symbol_in_current_context(&self.session.edit_path, symbol_id)
     }
 
-    /// ライブラリ選択中のシンボルIDが存在しない場合に先頭シンボルへ補正する
-    pub(crate) fn ensure_valid_library_selection(&mut self) {
-        self.view.ensure_valid_library_selection(&self.doc.library);
+    /// ライブラリで選んでいるシンボル（`View::library_symbol`）
+    pub(crate) fn library_symbol(&self) -> Option<u64> {
+        self.view.library_symbol(self.doc.library())
+    }
+
+    /// シンボル `sym_id` とそのインスタンスをみな消す（シンボルを消す入口はこれ1つ）。消すシンボルの段にいれば出て、選択を
+    /// 外してから消す（前は消す操作が段から出るのを手で書いた：約束の棚卸し 5616fcc の A の P-19。ライブラリで選んでいる
+    /// シンボルは、読む所 `View::library_symbol` が決めるので直さない）。段から出られない・選択を外せない（浮いた片の確定が
+    /// 断られた）ときは、文書を変えずに断る
+    pub(crate) fn remove_symbol(&mut self, sym_id: u64) -> bool {
+        if self.doc.find_symbol(sym_id).is_none() {
+            return false;
+        }
+        while self.session.edit_path.levels.iter().any(|lvl| lvl.symbol_id == sym_id) {
+            if !crate::symbol_ops::exit_symbol_timeline(self) {
+                return false;
+            }
+        }
+        if !clear_selection(self) {
+            return false;
+        }
+        self.doc.remove_symbol_and_instances(sym_id);
+        self.refresh_scene_base();
+        reset_session_after_timeline_change(self)
     }
 
     /// 浮いている片（`Floating`）がある場合は一時タブ上で確定した `Document` の写しを返し、元のタブや文書には触れない。
@@ -3020,22 +3067,19 @@ impl Tab {
             symbols_revision,
             commit_id,
         } = entry;
-        let Document {
-            root: doc_root,
-            library: doc_library,
-            sounds: doc_sounds,
-            stage_size: doc_stage_size,
-            fps: doc_fps,
-            revision: doc_revision,
-            next_symbol_id: _,
-            next_group_id: _,
-            next_sound_id: _,
-            broken_maps: _,
-        } = &mut self.doc;
+        // 文書の中身を入れ替える（項目は全部書く：`Document::replace_content`）
+        let prev_doc = self.doc.replace_content(crate::symbol::DocContent {
+            root: timeline,
+            library,
+            sounds,
+            stage_size,
+            fps,
+            revision: symbols_revision,
+        });
         let prev_entry = UndoEntry {
-            timeline: std::mem::replace(doc_root, timeline),
-            library: std::mem::replace(doc_library, library),
-            sounds: std::mem::replace(doc_sounds, sounds),
+            timeline: prev_doc.root,
+            library: prev_doc.library,
+            sounds: prev_doc.sounds,
             floating: prev_floating,
             selection: std::mem::replace(&mut self.session.selection, selection),
             edit_path: std::mem::replace(&mut self.session.edit_path, edit_path),
@@ -3043,16 +3087,15 @@ impl Tab {
                 &mut self.session.editing_group_path,
                 editing_group_path,
             ),
-            stage_size: std::mem::replace(doc_stage_size, stage_size),
-            fps: std::mem::replace(doc_fps, fps),
-            symbols_revision: std::mem::replace(doc_revision, symbols_revision),
+            stage_size: prev_doc.stage_size,
+            fps: prev_doc.fps,
+            symbols_revision: prev_doc.revision,
             commit_id: std::mem::replace(&mut self.history.current_commit_id, commit_id),
         };
         self.doc.validate_edit_path(
             &mut self.session.edit_path,
             &mut self.session.editing_group_path,
         );
-        self.ensure_valid_library_selection();
         cancel_active_drag(self);
         self.session.transform_pivot = None;
         self.refresh_scene_base();

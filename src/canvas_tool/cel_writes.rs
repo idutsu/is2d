@@ -371,22 +371,38 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     Some(plan)
 }
 
-/// `plan_commit` で決めたものを、今の階層の地図に書く（`write_maps`）。戻り値は、セル画を書き換えたか
-pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> bool {
+/// `plan_commit` で決めたものを、今の階層の地図に書く（`write_maps`）。戻り値は、セル画を書き換えたか（`None`：断った）
+#[must_use]
+pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> Option<bool> {
     let scope = tab.session.editing_group_path.clone();
     write_maps(tab, &scope, plan)
 }
 
-/// 先に決めた地図と面の図形 `plan`（レイヤーごと）を、階層 `scope` の地図に書く。戻り値は、セル画を書き換えたか
-pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> bool {
+/// 先に決めた地図と面の図形 `plan`（レイヤーごと）を、階層 `scope` の地図に書く。戻り値は、セル画を書き換えたか。計画が
+/// 今の地図から作ったものでなければ（`Cel::put_local` が断る）、そこで止めて知らせを記し（`Session::refusal`）、`None` を
+/// 返す（それまでに書いたレイヤーは、断った操作を `apply` が操作の前に戻す）
+#[must_use]
+pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> Option<bool> {
     let mut written: Vec<LayerId> = Vec::new();
     for (layer_id, w, prev) in plan {
         let mut held = None;
-        if write_cel(tab, layer_id, |cel| {
-            held = cel.put_local(scope, w, &prev);
-            true
+        let mut refused = None;
+        if write_cel(tab, layer_id, |cel| match cel.put_local(scope, w, &prev) {
+            Ok(base) => {
+                held = base;
+                true
+            }
+            Err(r) => {
+                refused = Some(r);
+                false
+            }
         }) {
             written.push(layer_id);
+        }
+        if let Some(r) = refused {
+            tab.session.refusal = Some(r.into());
+            finish_cel_writes(tab, &written);
+            return None;
         }
         // 新しい地図の写し（面の図形は、変わらない面は前の図形）は、画面の土台が持つ
         if let Some(base) = held {
@@ -394,14 +410,14 @@ pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> bool
         }
     }
     finish_cel_writes(tab, &written);
-    !written.is_empty()
+    Some(!written.is_empty())
 }
 
 /// 浮いた片 `fl` を確定する（`plan_commit`・`write_commit`）。`None`：書けない（何も書かず、知らせを記す）。`Some`：
 /// セル画を書き換えたか
 pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
     let plan = plan_commit(tab, fl)?;
-    Some(write_commit(tab, plan))
+    write_commit(tab, plan)
 }
 
 /// `tab.session.floating` のうち `keep_indices`（`Scene` インデックス）に含まれない選択図形を確定
