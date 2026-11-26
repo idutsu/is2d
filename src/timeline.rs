@@ -112,9 +112,10 @@ pub(crate) fn interpolate_affine_with_pivot(
     }
 
     let cw_delta = (rot1 - rot0).rem_euclid(std::f64::consts::TAU);
-    // 同じ向きとみなす角度の差（ラジアン）。向きが同じなら、回す向きを決めたトゥイーンは1回転する
-    const SAME_ANGLE: f64 = 1e-5;
-    let same_angle = cw_delta < SAME_ANGLE || std::f64::consts::TAU - cw_delta < SAME_ANGLE;
+    // 向きが同じなら、回す向きを決めたトゥイーンは1回転する。同じ向きかは、計算の丸めの差だけなら同じとみなす決まり
+    // `SAME_TOL` で決める（角度の差（ラジアン）は、拡大率 1 の変換の係数の差と同じ桁。レビュー de92ceb の N-2002）
+    let same_angle = cw_delta <= crate::vector_engine::SAME_TOL
+        || std::f64::consts::TAU - cw_delta <= crate::vector_engine::SAME_TOL;
     let delta_rot = match rotate_mode {
         TweenRotate::Auto => {
             if cw_delta > std::f64::consts::PI {

@@ -2426,21 +2426,12 @@ pub(super) fn window_edges(
 /// 振る（設計 段2b の 7. の 2b-7a。写しの通し番号の一覧を使わない）
 pub(super) fn tile_window(ix: MapIndex<'_>, edges: &[usize]) -> (PlanarMap, Vec<Poly>) {
     let stored = ix.stored;
-    let mut node_of: IntMap<[u64; 2], usize> = IntMap::default();
-    let mut nodes: Vec<Point> = Vec::new();
-    let mut id = |p: Point, nodes: &mut Vec<Point>| -> usize {
-        *node_of
-            .entry([p.x.to_bits(), p.y.to_bits()])
-            .or_insert_with(|| {
-                nodes.push(p);
-                nodes.len() - 1
-            })
-    };
+    let mut nodes = Nodes::default();
     let mut list: Vec<MapEdge> = Vec::with_capacity(edges.len());
     let mut polys: Vec<Poly> = Vec::with_capacity(edges.len());
     for &e in edges {
         let te = stored.edge_at(e);
-        let (a, b) = (id(te.a, &mut nodes), id(te.b, &mut nodes));
+        let (a, b) = (nodes.id(te.a), nodes.id(te.b));
         list.push(MapEdge {
             a,
             b,
@@ -2454,7 +2445,7 @@ pub(super) fn tile_window(ix: MapIndex<'_>, edges: &[usize]) -> (PlanarMap, Vec<
         });
         polys.push(Arc::clone(ix.poly(e)));
     }
-    (PlanarMap { nodes, edges: list }, polys)
+    (PlanarMap { nodes: nodes.at, edges: list }, polys)
 }
 
 /// 同じ線の組（前からある辺, 重ねる地図の辺, 同じ向きか）の並びと、組の端の重ねる地図の頂点 → 前からある頂点

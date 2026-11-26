@@ -2841,7 +2841,7 @@ impl Tab {
         out
     }
 
-    /// ダーティマーク（` *`）を除いたタブのベース表示名を返す
+    /// ダーティマーク（` *`）を除いたタブのベース表示名を返す（ファイル名。無ければ `name_stem` の「無題-番号」）
     pub(crate) fn base_title(&self) -> String {
         match self
             .file
@@ -2850,6 +2850,20 @@ impl Tab {
             .and_then(|n| n.to_str())
         {
             Some(name) if !name.is_empty() => name.to_owned(),
+            _ => self.name_stem(),
+        }
+    }
+
+    /// タブの名前の元：ファイル名の拡張子を除いた所。無ければ「無題-番号」。保存と動画の書き出しの初めのファイル名は、
+    /// これに拡張子を付ける（無題の名前の決まりはこれ1つ：レビュー de92ceb の N-5003）
+    pub(crate) fn name_stem(&self) -> String {
+        match self
+            .file
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .and_then(|s| s.to_str())
+        {
+            Some(stem) if !stem.is_empty() => stem.to_owned(),
             _ => format!("無題-{}", self.untitled_number.max(1)),
         }
     }

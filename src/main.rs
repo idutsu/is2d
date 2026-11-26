@@ -156,19 +156,23 @@ enum Dialog {
 }
 
 impl Dialog {
-    /// このダイアログが出ている間も受け付ける操作か（ダイアログのボタンと、動画の書き出し中にタブを閉じること）。
+    /// このダイアログが出ている間も受け付ける操作か（ダイアログのボタンと、動画の書き出し中にタブを閉じること、どの
+    /// ダイアログでも終了：持ち主が決めた 2026-11-26。Mac の OS のメニューの終了と同じ）。
     /// 操作を受け付けるか（`Is2dApp::apply_action`）と、メニューの項目を使えるか（`Is2dApp::menu_item_state`）は、
     /// これ1つで決める
     fn accepts(self, action: &UiAction) -> bool {
         match self {
             Dialog::VideoExport => matches!(
                 action,
-                UiAction::CancelVideoExport | UiAction::CloseActiveTab | UiAction::CloseTab(_)
+                UiAction::CancelVideoExport
+                    | UiAction::CloseActiveTab
+                    | UiAction::CloseTab(_)
+                    | UiAction::Quit
             ),
             Dialog::Recovery => {
                 matches!(
                     action,
-                    UiAction::RestoreRecovered | UiAction::DiscardRecovered
+                    UiAction::RestoreRecovered | UiAction::DiscardRecovered | UiAction::Quit
                 )
             }
             Dialog::CloseConfirm => matches!(
@@ -176,6 +180,7 @@ impl Dialog {
                 UiAction::ConfirmPendingCloseSave
                     | UiAction::ConfirmPendingCloseDiscard
                     | UiAction::ConfirmPendingCloseCancel
+                    | UiAction::Quit
             ),
         }
     }
@@ -419,16 +424,7 @@ impl Is2dApp {
         }
         project_io::prepare_active_tab_for_switch_or_save(self);
 
-        let stem = self
-            .tab()
-            .file
-            .as_deref()
-            .and_then(std::path::Path::file_stem)
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| self.tab().base_title());
-        let default_name = format!("{stem}.mp4");
+        let default_name = format!("{}.mp4", self.tab().name_stem());
 
         let Some(path) =
             project_io::pick_save_path(self.tab(), "MP4 動画 (*.mp4)", "mp4", &default_name)
@@ -543,6 +539,7 @@ impl Is2dApp {
             UiAction::ConfirmPendingCloseCancel => {
                 project_io::confirm_pending_close_cancel(self, ctx)
             }
+            UiAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             _ => {}
         }
     }
@@ -583,6 +580,7 @@ impl Is2dApp {
             UiAction::CancelVideoExport => self.cancel_active_video_export(),
             UiAction::CloseActiveTab => project_io::close_active_tab(self, Some(ctx)),
             UiAction::CloseTab(idx) => project_io::close_tab(self, idx, Some(ctx)),
+            UiAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             UiAction::SwitchToTab(idx) => {
                 project_io::switch_to_tab(self, idx, Some(ctx));
             }
@@ -610,15 +608,9 @@ impl Is2dApp {
             self.run_menu_key(shortcut, repeat, typing, ctx);
         }
         let cmd = input.modifiers.command || input.modifiers.ctrl;
-        match self.shown_dialog() {
-            Some(Dialog::VideoExport) => {
-                if cmd && key_pressed_no_repeat(&input, Key::Q) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                return;
-            }
-            Some(Dialog::Recovery | Dialog::CloseConfirm) => return,
-            None => {}
+        // ダイアログが出ている間に受け付けるキーは、表のキー（上の `run_menu_key`。`Dialog::accepts` で決める）だけ
+        if self.shown_dialog().is_some() {
+            return;
         }
         if typing {
             return;
@@ -630,7 +622,7 @@ impl Is2dApp {
             )
         });
 
-        self.handle_command_shortcuts(ctx, &input, cmd);
+        self.handle_command_shortcuts(&input, cmd);
 
         if !cmd && !clipboard_event {
             self.handle_single_key_shortcuts(&input, input.modifiers.shift);
@@ -788,10 +780,8 @@ impl Is2dApp {
     }
 
     /// 表（`menu::COMMANDS`）に無い `Cmd` のショートカット
-    fn handle_command_shortcuts(&mut self, ctx: &egui::Context, i: &egui::InputState, cmd: bool) {
-        if cmd && key_pressed_no_repeat(i, Key::Q) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if let Some(key) = plus_minus_pressed(&i.events).filter(|_| cmd) {
+    fn handle_command_shortcuts(&mut self, i: &egui::InputState, cmd: bool) {
+        if let Some(key) = plus_minus_pressed(&i.events).filter(|_| cmd) {
             let factor = match key {
                 PlusMinus::Plus => 1.25,
                 PlusMinus::Minus => 0.8,

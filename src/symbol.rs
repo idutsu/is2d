@@ -903,7 +903,8 @@ impl Document {
                 .all(|lvl| !self.would_create_symbol_cycle(lvl.symbol_id, candidate_child_id))
     }
 
-    /// 指定した `symbol_id` のシンボル名を変更する（変更があった場合のみ `true` を返す）
+    /// 指定した `symbol_id` のシンボル名を変更する（変更があった場合のみ `true` を返す）。版は上げない（版は中身の世代で、
+    /// 上げるのは中身を書く入口 `write_symbol_timeline` だけ。名前は版の付いた写しからは出さない：レビュー de92ceb の N-4002）
     pub(crate) fn rename_symbol(&mut self, symbol_id: u64, new_name: String) -> bool {
         let Some(sym) = self.find_symbol_mut(symbol_id) else {
             return false;
@@ -912,8 +913,6 @@ impl Document {
             return false;
         }
         sym.name = new_name;
-        sym.revision = crate::vector_engine::next_mesh_revision();
-        self.bump_revision();
         true
     }
 

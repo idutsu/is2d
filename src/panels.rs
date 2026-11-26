@@ -160,6 +160,8 @@ pub(crate) enum UiAction {
     ConfirmPendingCloseCancel,
     RestoreRecovered,
     DiscardRecovered,
+    /// アプリを終える（窓を閉じる流れ：保存していない作品があれば聞く）
+    Quit,
 
     // 表示
     /// 100%表示（ズーム 100%・初期位置）
@@ -206,7 +208,7 @@ pub(crate) fn draw_top_menu_bar(
                     ui.menu_button(menu.label(), |ui| {
                         ui.set_min_width(menu_min_width(menu));
                         for (command, state) in COMMANDS.iter().zip(states) {
-                            if command.menu != menu {
+                            if command.menu.in_window_bar() != menu {
                                 continue;
                             }
                             if command.separator_before {
@@ -227,7 +229,7 @@ pub(crate) fn draw_top_menu_bar(
 #[cfg(not(target_os = "macos"))]
 const fn menu_min_width(menu: Menu) -> f32 {
     match menu {
-        Menu::File => 210.0,
+        Menu::App | Menu::File => 210.0,
         Menu::Edit => 230.0,
         Menu::View => 220.0,
     }

@@ -6134,6 +6134,21 @@ fn test_symbol_rename_consecutive_keystrokes_grouped_into_single_undo() {
     );
 }
 
+/// シンボルの名前を変えても、シンボルの版とライブラリの版は変わらない（版は中身の世代。名前を1文字打つたびに、その
+/// シンボルを使う画面の写しを作り直さない：レビュー de92ceb の N-4002）
+#[test]
+fn renaming_a_symbol_keeps_its_content_version() {
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, make_stroke(Point::new(100.0, 100.0), Point::new(240.0, 100.0), 16.0, Color32::BLUE));
+    app.session.set_selected_indices(vec![0]);
+    let sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
+    let versions = |app: &Is2dApp| (app.doc.find_symbol(sym_id).unwrap().revision, app.doc.revision);
+    let before = versions(&app);
+    assert!(doc_actions::rename_symbol_in_library(&mut app, sym_id, "Hero"));
+    assert_eq!(app.doc.find_symbol(sym_id).unwrap().name, "Hero");
+    assert_eq!(versions(&app), before, "名前を変えただけで版が上がった");
+}
+
 #[test]
 fn test_step_frame_loop_mode_and_total_frames_over_600() {
     let mut app = Is2dApp::default();
@@ -33317,6 +33332,28 @@ fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
     assert!((after.x1 - (bbox.x1 + 50.0)).abs() < 0.5);
 }
 
+/// `Alt` で、中心点をハンドルにほとんど重ねて拡大しても、倍率が飛ばない：中心とハンドルが画面で重なっている向きは
+/// 拡大しない（`View::moves_on_screen`。直す前は文書の座標で 0.001 より離れていれば割り、0.002 離れていると 5px 動かす
+/// だけで 2500 倍になった：レビュー de92ceb の N-3003）
+#[test]
+fn alt_scaling_with_the_pivot_on_the_handle_does_not_jump() {
+    let red = Color32::from_rgb(235, 75, 75);
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, make_stroke(Point::new(100.0, 100.0), Point::new(200.0, 100.0), 10.0, red));
+    doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
+    select_ops::apply_marquee_selection(&mut app, Point::new(50.0, 50.0), Point::new(250.0, 150.0), false);
+    let (bbox, _) = app.session.selection_bbox_and_pivot(app.view.zoom()).unwrap();
+    let right = Point::new(bbox.x1, bbox.center().y);
+    app.session.transform_pivot = Some(right - KVec2::new(0.002, 0.0));
+    tool_transform::start_transform_drag(&mut app, right, false, true);
+    tool_transform::update_transform_drag(&mut app, right + KVec2::new(5.0, 0.0), false, true);
+    let canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Scale { last_affine, .. }) = &app.session.drag else {
+        panic!("拡大のドラッグになっていない");
+    };
+    let sx = last_affine.as_coeffs()[0];
+    assert!((sx - 1.0).abs() < 1e-9, "横の倍率が {sx} に飛んだ");
+}
+
 /// S-5：格子の外（±65,536px）にかかるブラシ・輪郭の変形は、断って画面の下に知らせる
 #[test]
 fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
@@ -40637,7 +40674,8 @@ fn menu_table_keys_are_unique_and_command_keys_are_single_characters() {
 }
 
 /// メニューの見せ方：表の決まり（今と同じ）で使えるかが決まり、表示の切り替えにはチェックが付く。入力欄に文字を
-/// 入れている最中は、文字の操作のある項目はいつも使える。復旧のダイアログが出ている間は、アプリへ渡す項目は使えない
+/// 入れている最中は、文字の操作のある項目はいつも使える。復旧のダイアログが出ている間は、アプリへ渡す項目は終了の
+/// ほかは使えない（終了はどのダイアログでも受け付ける：持ち主が決めた 2026-11-26、レビュー de92ceb の N-5002）
 #[test]
 fn menu_states_follow_table_rules_typing_and_dialogs() {
     let ctx = egui::Context::default();
@@ -40680,9 +40718,14 @@ fn menu_states_follow_table_rules_typing_and_dialogs() {
     });
     menu_test_frame(&ctx, &mut app, egui::Modifiers::NONE, vec![], |_, _| {});
     let states = app.menu_states(&ctx);
+    let quit = menu::COMMANDS
+        .iter()
+        .position(|c| matches!(c.action, panels::UiAction::Quit))
+        .expect("終了の項目");
+    assert!(states[quit].enabled, "復旧のダイアログの間も終了できる");
     assert!(
-        states.iter().all(|s| !s.enabled),
-        "復旧のダイアログの間は使えない"
+        states.iter().enumerate().all(|(i, s)| i == quit || !s.enabled),
+        "復旧のダイアログの間は、終了のほかは使えない"
     );
 }
 

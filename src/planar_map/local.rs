@@ -11,26 +11,6 @@
 
 use super::*;
 
-/// 頂点の番号の控え：座標ごとに番号を振る
-#[derive(Default)]
-struct Nodes {
-    of: IntMap<[u64; 2], usize>,
-    at: Vec<Point>,
-}
-
-impl Nodes {
-    fn id(&mut self, p: Point) -> usize {
-        let at = &mut self.at;
-        *self
-            .of
-            .entry([p.x.to_bits(), p.y.to_bits()])
-            .or_insert_with(|| {
-                at.push(p);
-                at.len() - 1
-            })
-    }
-}
-
 /// 前の地図に差分を当てた地図
 pub(crate) struct LocalMap<'a> {
     index: MapIndex<'a>,
@@ -232,15 +212,6 @@ impl<'a> LocalMap<'a> {
 
     /// 頂点 `v` から出ていく向きのある辺を、角度の順に並べたもの（`face_cycles_with` と同じ並べ方）
     pub(crate) fn out_sorted(&self, v: usize) -> Vec<(usize, bool)> {
-        let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
-        let dir = |h: (usize, bool)| -> IPt {
-            let p = self.poly(h.0);
-            let n = p.len();
-            let at = |k: usize| if h.1 { p[k] } else { p[n - 1 - k] };
-            let a = if n > 0 { at(0) } else { (0, 0) };
-            let b = if n > 1 { at(1) } else { a };
-            (b.0 - a.0, b.1 - a.1)
-        };
         let mut list: Vec<(usize, bool)> = Vec::new();
         for e in self.edges_at(v) {
             let ed = self.edge(e);
@@ -251,7 +222,7 @@ impl<'a> LocalMap<'a> {
                 list.push((e, false));
             }
         }
-        list.sort_by(|&x, &y| cmp_dir(wide(dir(x)), wide(dir(y))).then(idx(x).cmp(&idx(y))));
+        sort_around(&mut list, |e| self.poly(e));
         list
     }
 
@@ -535,15 +506,10 @@ impl LocalMap<'_> {
         Ring::new(&polys, &local)
     }
 
-    /// 輪郭の調べる点（最初の向きのある辺の、判定の形の最初の区間の真ん中。2倍の座標：`half_mid2` と同じ）
+    /// 輪郭の調べる点（最初の向きのある辺の、判定の形の最初の区間の真ん中。2倍の座標：`first_mid2`）
     fn probe(&self, cycle: &[(usize, bool)]) -> IPt {
         let (e, f) = cycle[0];
-        let p = self.poly(e);
-        let n = p.len();
-        let at = |k: usize| if f { p[k] } else { p[n - 1 - k] };
-        let a = if n > 0 { at(0) } else { (0, 0) };
-        let b = if n > 1 { at(1) } else { a };
-        (a.0 + b.0, a.1 + b.1)
+        first_mid2(self.poly(e), f)
     }
 
     /// 点 `p2`（2倍の座標）から右へ伸ばした半直線が横切る辺（`crossing` で数える区間がある辺）を、横切る所の升目の列の順に

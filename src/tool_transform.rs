@@ -187,8 +187,13 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 ..
             } => {
                 let eff_anchor = if alt_held { *orig_pivot } else { *anchor };
+                // 倍率は、中心からつかんだハンドルまでの長さに対する、中心から今の点までの長さ。中心とハンドルが画面で重なって
+                // いる向き（画面で動いたとみなす量より近い：`View::moves_on_screen`）は、長さが測れないので拡大しない（どの
+                // ズームでも画面で同じ決まり。前は文書の座標で 0.001 の決め打ちで、その少し外では倍率が何百倍にも飛んだ：
+                // レビュー de92ceb の N-3003）
+                let view = &tab.view;
                 let axis_scale = |affects: bool, hs: f64, p: f64, a: f64| {
-                    if affects && (hs - a).abs() > 1e-3 {
+                    if affects && view.moves_on_screen((hs - a).abs()) {
                         (p - a) / (hs - a)
                     } else {
                         1.0

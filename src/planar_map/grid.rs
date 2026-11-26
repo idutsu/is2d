@@ -1567,12 +1567,56 @@ pub(super) fn starts_order(a: &[QuadBez], b: &[QuadBez]) -> std::cmp::Ordering {
         .unwrap_or_else(|| a.len().cmp(&b.len()))
 }
 
-/// 向きのある辺 `h` の判定の形の最初の区間の真ん中の点（2倍の座標）
-pub(super) fn half_mid2(polys: &[Poly], h: (usize, bool)) -> IPt {
-    let mut it = half_points(polys, h);
-    let a = it.next().unwrap_or((0, 0));
-    let b = it.next().unwrap_or(a);
+/// 向きのある辺（判定の形 `p`、辺の向きにたどるか `forward`）の、頂点から出る最初の区間の2つの端（点が1つなら同じ点を
+/// 2つ、無ければ原点）
+fn first_segment(p: &Poly, forward: bool) -> (IPt, IPt) {
+    let n = p.len();
+    let at = |k: usize| if forward { p[k] } else { p[n - 1 - k] };
+    let a = if n > 0 { at(0) } else { (0, 0) };
+    let b = if n > 1 { at(1) } else { a };
+    (a, b)
+}
+
+/// 向きのある辺の最初の区間の真ん中の点（2倍の座標）：輪郭の調べる点（地図全体の版 `face_cycles_with` の後の穴の入れ先と、
+/// 前の地図＋差分の版 `LocalMap::probe` が使う決まりはこれ1つ：レビュー de92ceb の N-1005）
+pub(super) fn first_mid2(p: &Poly, forward: bool) -> IPt {
+    let (a, b) = first_segment(p, forward);
     (a.0 + b.0, a.1 + b.1)
+}
+
+/// 頂点から出ていく向きのある辺 `list` を、角度の順に並べる（角度は判定の形の最初の区間の整数の向き。正しい地図では同じ
+/// 向きの2本は無いが、並べ方を1つに決めるため、同じ向きは番号の順）。`poly(e)`：辺 `e` の判定の形。地図全体の版
+/// （`PlanarMap::face_cycles_with`）と、前の地図＋差分の版（`LocalMap::out_sorted`）が使う決まりはこれ1つ（レビュー
+/// de92ceb の N-1005）
+pub(super) fn sort_around<'p>(list: &mut [(usize, bool)], poly: impl Fn(usize) -> &'p Poly) {
+    let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
+    let dir = |h: (usize, bool)| -> IPt {
+        let (a, b) = first_segment(poly(h.0), h.1);
+        (b.0 - a.0, b.1 - a.1)
+    };
+    list.sort_by(|&x, &y| cmp_dir(wide(dir(x)), wide(dir(y))).then(idx(x).cmp(&idx(y))));
+}
+
+/// 頂点の番号の控え：座標ごとに、初めて見たときに番号を振る（座標がビットまで同じなら同じ頂点）。辺から小さな地図を作る
+/// 所はみなこれを使う（`LayerBase::replace_local`・`only_faces_map`・`tile_window`・`LocalMap`。レビュー de92ceb の N-1005）
+#[derive(Default)]
+pub(super) struct Nodes {
+    of: IntMap<[u64; 2], usize>,
+    /// 番号ごとの座標
+    pub(super) at: Vec<Point>,
+}
+
+impl Nodes {
+    pub(super) fn id(&mut self, p: Point) -> usize {
+        let at = &mut self.at;
+        *self
+            .of
+            .entry([p.x.to_bits(), p.y.to_bits()])
+            .or_insert_with(|| {
+                at.push(p);
+                at.len() - 1
+            })
+    }
 }
 
 /// テスト用：図形 `s` の点（端と制御点）がみな格子に置けるか（`on_grid`。図形から地図を作る下ごしらえ）

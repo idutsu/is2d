@@ -90,8 +90,8 @@ pub(crate) fn pasteboard_text() -> String {
     text.map(|t| t.to_string()).unwrap_or_default()
 }
 
-/// macOS のメニューバーに、アプリメニュー（「is2d について」「is2d を隠す」「is2d を終了」）と、表から作る「ファイル」
-/// 「編集」「表示」を設定する。項目を押すと、その番号を受け箱に入れて egui `ctx` に描き直しを頼む
+/// macOS のメニューバーに、アプリメニュー（「is2d について」「is2d を隠す」と、表のアプリのメニューの項目「終了」）と、
+/// 表から作る「ファイル」「編集」「表示」を設定する。表の項目を押すと、その番号を受け箱に入れて egui `ctx` に描き直しを頼む
 pub(crate) fn install(ctx: &egui::Context) -> Option<OsMenu> {
     let mtm = MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(mtm);
@@ -103,8 +103,7 @@ pub(crate) fn install(ctx: &egui::Context) -> Option<OsMenu> {
     let empty_key = NSString::new();
 
     // SAFETY: `MainThreadMarker` でメインスレッド実行が保証されており、
-    // `orderFrontStandardAboutPanel:` / `hide:` / `performClose:` は `NSApplication`・`NSWindow` の標準セレクタであり、
-    // ターゲットに設定する `window` も `app.windows()` から取得した有効な `NSWindow` インスタンスであるため安全。
+    // `orderFrontStandardAboutPanel:` / `hide:` は `NSApplication` の標準セレクタであるため安全。
     unsafe {
         let about_item = NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
@@ -122,60 +121,18 @@ pub(crate) fn install(ctx: &egui::Context) -> Option<OsMenu> {
             &NSString::from_str("h"),
         );
         app_menu.addItem(&hide_item);
-        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-
-        let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
-            mtm.alloc(),
-            &NSString::from_str("is2d を終了"),
-            Some(sel!(performClose:)),
-            &NSString::from_str("q"),
-        );
-        if let Some(window) = app.windows().firstObject() {
-            quit_item.setTarget(Some(&window));
-        }
-        app_menu.addItem(&quit_item);
     }
-    app_menu_item.setSubmenu(Some(&app_menu));
-
+    // 使えるかどうかは、毎コマ表の決まりで決めて写す（`OsMenu::show_states`）
+    app_menu.setAutoenablesItems(false);
     let target = MenuTarget::new(mtm, ctx.clone());
     let mut items = Vec::with_capacity(COMMAND_COUNT);
+    add_table_items(mtm, &app_menu, crate::menu::Menu::App, &target, &mut items);
+    app_menu_item.setSubmenu(Some(&app_menu));
+
     for menu in crate::menu::Menu::ALL {
         let submenu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(menu.label()));
-        // 使えるかどうかは、毎コマ表の決まりで決めて写す（`OsMenu::show_states`）
         submenu.setAutoenablesItems(false);
-        for (index, command) in COMMANDS.iter().enumerate() {
-            if command.menu != menu {
-                continue;
-            }
-            if command.separator_before {
-                submenu.addItem(&NSMenuItem::separatorItem(mtm));
-            }
-            // `Cmd` の付くショートカットだけを OS のメニューに付ける（`MenuCommand::shortcut`）
-            let shortcut = command.shortcut.filter(|s| s.command);
-            let key = shortcut.map_or_else(String::new, |s| s.key.name().to_lowercase());
-            // SAFETY: `chooseCommand:` は受け手 `MenuTarget` が持つ、押した項目を受け取るメソッド。受け手は
-            // `OsMenu` が持ち続けるので、項目が指す間は無くならない
-            let item = unsafe {
-                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                    mtm.alloc(),
-                    &NSString::from_str(command.label),
-                    Some(sel!(chooseCommand:)),
-                    &NSString::from_str(&key),
-                );
-                item.setTarget(Some(AsRef::<AnyObject>::as_ref(&*target)));
-                item
-            };
-            if let Some(shortcut) = shortcut {
-                let mut mask = NSEventModifierFlags::Command;
-                if shortcut.shift {
-                    mask |= NSEventModifierFlags::Shift;
-                }
-                item.setKeyEquivalentModifierMask(mask);
-            }
-            item.setTag(index as isize);
-            submenu.addItem(&item);
-            items.push(item);
-        }
+        add_table_items(mtm, &submenu, menu, &target, &mut items);
         let menu_item = NSMenuItem::new(mtm);
         menu_item.setSubmenu(Some(&submenu));
         menubar.addItem(&menu_item);
@@ -183,4 +140,48 @@ pub(crate) fn install(ctx: &egui::Context) -> Option<OsMenu> {
 
     app.setMainMenu(Some(&menubar));
     Some(OsMenu { items, target })
+}
+
+/// 表（`menu::COMMANDS`）のメニュー `menu` の項目を、OS のメニュー `submenu` に足す（押すと受け手 `target` が番号を受け取る）。
+/// 足した項目は `items` に入れる（使えるかどうかを毎コマ写す：`OsMenu::show_states`）
+fn add_table_items(
+    mtm: MainThreadMarker,
+    submenu: &NSMenu,
+    menu: crate::menu::Menu,
+    target: &Retained<MenuTarget>,
+    items: &mut Vec<Retained<NSMenuItem>>,
+) {
+    for (index, command) in COMMANDS.iter().enumerate() {
+        if command.menu != menu {
+            continue;
+        }
+        if command.separator_before {
+            submenu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        // `Cmd` の付くショートカットだけを OS のメニューに付ける（`MenuCommand::shortcut`）
+        let shortcut = command.shortcut.filter(|s| s.command);
+        let key = shortcut.map_or_else(String::new, |s| s.key.name().to_lowercase());
+        // SAFETY: `chooseCommand:` は受け手 `MenuTarget` が持つ、押した項目を受け取るメソッド。受け手は
+        // `OsMenu` が持ち続けるので、項目が指す間は無くならない
+        let item = unsafe {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str(command.label),
+                Some(sel!(chooseCommand:)),
+                &NSString::from_str(&key),
+            );
+            item.setTarget(Some(AsRef::<AnyObject>::as_ref(&**target)));
+            item
+        };
+        if let Some(shortcut) = shortcut {
+            let mut mask = NSEventModifierFlags::Command;
+            if shortcut.shift {
+                mask |= NSEventModifierFlags::Shift;
+            }
+            item.setKeyEquivalentModifierMask(mask);
+        }
+        item.setTag(index as isize);
+        submenu.addItem(&item);
+        items.push(item);
+    }
 }

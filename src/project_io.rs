@@ -1589,17 +1589,7 @@ pub(crate) fn save_project(ws: &mut impl ProjectWorkspace) {
 
 /// OS標準の「名前を付けて保存」ダイアログを表示し、選択されたパスへ `.is2d` ファイルを保存する
 pub(crate) fn save_project_as_dialog(ws: &mut impl ProjectWorkspace) {
-    let name = ws
-        .tab()
-        .file
-        .as_deref()
-        .and_then(Path::file_name)
-        .and_then(|n| n.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            let num = ws.tab().untitled_number.max(1);
-            format!("untitled-{num}.is2d")
-        });
+    let name = format!("{}.{PROJECT_FILE_EXTENSION}", ws.tab().name_stem());
 
     let Some(path) = pick_save_path(ws.tab(), PROJECT_FILTER, PROJECT_FILE_EXTENSION, &name) else {
         return;

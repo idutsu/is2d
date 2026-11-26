@@ -147,7 +147,8 @@ impl SymbolInstanceBinding {
 /// 座標の変換で、逆にできるとみなす行列式の大きさの下限
 const MIN_DET: f64 = 1e-12;
 
-/// 計算の丸めの差だけなら同じとみなす差の大きさ（文書の px・変換の係数）。位置・中心点・変換が同じかの判定はこれを使う
+/// 計算の丸めの差だけなら同じとみなす差の大きさ（文書の px・変換の係数・向きの角度（ラジアン））。位置・中心点・変換・
+/// トゥイーンの向きが同じかの判定はこれを使う
 pub(crate) const SAME_TOL: f64 = 1e-6;
 
 /// 割る前に、長さ 0 とみなす長さの上限（px）。向きを取る・長さで割る所はこれを使う
@@ -633,7 +634,7 @@ impl FillShape {
             self.transform(affine);
             return;
         };
-        if !affine.is_finite() || world.determinant() == 0.0 {
+        if !affine.is_finite() || !invertible(world) {
             self.transform(affine);
             return;
         }

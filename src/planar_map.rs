@@ -291,16 +291,8 @@ impl PlanarMap {
     /// 作らないので、テストの下ごしらえだけで使う
     #[cfg(test)]
     pub(crate) fn from_faces<'a>(faces: impl IntoIterator<Item = &'a FillShape>) -> Self {
-        let mut nodes: Vec<Point> = Vec::new();
-        let mut index: HashMap<[u64; 2], usize> = HashMap::new();
-        let mut node = |p: Point| {
-            *index
-                .entry([p.x.to_bits(), p.y.to_bits()])
-                .or_insert_with(|| {
-                    nodes.push(p);
-                    nodes.len() - 1
-                })
-        };
+        let mut nodes = Nodes::default();
+        let mut node = |p: Point| nodes.id(p);
         // 1. 向きのある区間（左が面の色）。端を頂点にまとめる
         let mut segs: Vec<Seg> = Vec::new();
         for f in faces {
@@ -370,7 +362,10 @@ impl PlanarMap {
                 line_id: None,
             });
         }
-        Self { nodes, edges }
+        Self {
+            nodes: nodes.at,
+            edges,
+        }
     }
 
     /// 向きのある辺の左側の色
@@ -459,7 +454,7 @@ impl PlanarMap {
             .iter()
             .enumerate()
             .filter(|(_, c)| !c.is_empty() && self.side_color(c[0]).is_none())
-            .map(|(ci, c)| (ci, half_mid2(&polys, c[0])))
+            .map(|(ci, c)| (ci, first_mid2(&polys[c[0].0], c[0].1)))
             .collect();
         if !to_check.is_empty() {
             let mut edge_faces: Vec<[usize; 2]> = vec![[usize::MAX; 2]; self.edges.len()];
@@ -689,7 +684,8 @@ impl PlanarMap {
         // 穴を含む同じ色の外周のうち、いちばん小さいもの（同じなら組の順で前）。調べる点は、穴の最初の区間の真ん中（正しい
         // 地図では、ほかの輪郭の上に無い）
         for (color, k) in holes {
-            let probe = half_mid2(polys, out.cycles[k][0]);
+            let (e, f) = out.cycles[k][0];
+            let probe = first_mid2(&polys[e], f);
             let owner = out
                 .groups_at(probe)
                 .filter(|&g| {
@@ -756,12 +752,6 @@ impl PlanarMap {
     /// （正しい地図では、同じ向きの2本は無い）
     fn face_cycles_with(&self, polys: &[Poly]) -> Vec<Cycle> {
         let idx = |h: (usize, bool)| 2 * h.0 + h.1 as usize;
-        let dir = |h: (usize, bool)| -> IPt {
-            let mut it = half_points(polys, h);
-            let a = it.next().unwrap_or((0, 0));
-            let b = it.next().unwrap_or(a);
-            (b.0 - a.0, b.1 - a.1)
-        };
         let mut out_of: Vec<Cycle> = vec![Vec::new(); self.nodes.len()];
         for (i, e) in self.edges.iter().enumerate() {
             out_of[e.a].push((i, true));
@@ -772,7 +762,7 @@ impl PlanarMap {
         #[cfg(test)]
         VERTICES_SORTED.with(|n| n.set(n.get() + out_of.len()));
         for list in &mut out_of {
-            list.sort_by(|&x, &y| cmp_dir(wide(dir(x)), wide(dir(y))).then(idx(x).cmp(&idx(y))));
+            sort_around(list, |e| &polys[e]);
             for (k, &h) in list.iter().enumerate() {
                 pos[idx(h)] = k;
             }
@@ -2044,15 +2034,9 @@ impl LayerBase {
     pub(crate) fn replace_local(&self, next: &StoredMap, group_path: &[u64]) -> LocalEdit {
         let (removed, added) = self.stored.diff_tiles(next);
         let mut m = PlanarMap::default();
-        let mut at: IntMap<[u64; 2], usize> = IntMap::default();
-        let mut node = |p: Point, m: &mut PlanarMap| -> usize {
-            *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
-                m.nodes.push(p);
-                m.nodes.len() - 1
-            })
-        };
+        let mut nodes = Nodes::default();
         for te in &added {
-            let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
+            let (a, b) = (nodes.id(te.a), nodes.id(te.b));
             m.edges.push(MapEdge {
                 a,
                 b,
@@ -2065,6 +2049,7 @@ impl LayerBase {
                 line_id: te.line_id,
             });
         }
+        m.nodes = nodes.at;
         let added: Vec<usize> = (0..m.edges.len()).collect();
         self.apply_diff(&m, &removed, &added, group_path)
     }
@@ -2653,13 +2638,7 @@ impl LayerBase {
     /// 残す面の輪郭の辺だけを塊から引いて作る（手間は残す面の大きさの分）
     pub(crate) fn only_faces_map(&self, ids: &HashSet<ShapeId>, group_path: &[u64]) -> PlanarMap {
         let mut m = PlanarMap::default();
-        let mut at: HashMap<[u64; 2], usize> = HashMap::new();
-        let mut node = |p: Point, m: &mut PlanarMap| -> usize {
-            *at.entry([p.x.to_bits(), p.y.to_bits()]).or_insert_with(|| {
-                m.nodes.push(p);
-                m.nodes.len() - 1
-            })
-        };
+        let mut nodes = Nodes::default();
         for e in self.selected_edges(ids, group_path) {
             let te = self.stored.edge_at(e);
             let Some(([l, r], stroke)) = restricted_sides(
@@ -2670,7 +2649,7 @@ impl LayerBase {
             ) else {
                 continue;
             };
-            let (a, b) = (node(te.a, &mut m), node(te.b, &mut m));
+            let (a, b) = (nodes.id(te.a), nodes.id(te.b));
             m.edges.push(MapEdge {
                 a,
                 b,
@@ -2683,6 +2662,7 @@ impl LayerBase {
                 line_id: stroke.and(te.line_id),
             });
         }
+        m.nodes = nodes.at;
         m
     }
 

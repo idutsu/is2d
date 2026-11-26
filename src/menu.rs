@@ -10,20 +10,32 @@ use crate::doc_actions::Action;
 use crate::panels::UiAction;
 use crate::panels::MOD_KEY;
 
-/// メニューバーに並ぶメニュー
+/// メニュー。`App` はアプリのメニュー（終了）：Mac では OS のアプリメニュー（「is2d」）に、Windows・Linux では窓の中の
+/// メニューバーにアプリのメニューが無いので「ファイル」の一番下に出す（`in_window_bar`）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Menu {
+    App,
     File,
     Edit,
     View,
 }
 
 impl Menu {
-    /// メニューバーに並べる順
+    /// メニューバーに並べる順（アプリのメニューは、Mac では OS が先頭に置き、Windows・Linux では「ファイル」に入れる）
     pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
+
+    /// 窓の中のメニューバー（Windows・Linux）で、このメニューの項目を出すメニュー
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) const fn in_window_bar(self) -> Self {
+        match self {
+            Self::App => Self::File,
+            m => m,
+        }
+    }
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::App => "is2d",
             Self::File => "ファイル",
             Self::Edit => "編集",
             Self::View => "表示",
@@ -197,7 +209,7 @@ fn can_paste(tab: &Tab, clipboard: &Clipboard) -> bool {
 }
 
 /// 項目の数
-pub(crate) const COMMAND_COUNT: usize = 19;
+pub(crate) const COMMAND_COUNT: usize = 20;
 
 /// メニューの項目の表（メニューバーの順・メニューの中の上からの順）。番号（並びの位置）で項目を指す
 pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
@@ -278,6 +290,23 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         enabled: always,
         text_op: None,
         action: UiAction::CloseActiveTab,
+    },
+    // アプリ（Windows・Linux では「ファイル」の一番下：`Menu::in_window_bar`）
+    MenuCommand {
+        menu: Menu::App,
+        separator_before: true,
+        // Mac の OS のアプリメニューの決まりの名前（前と同じ）
+        label: if cfg!(target_os = "macos") {
+            "is2d を終了"
+        } else {
+            "終了"
+        },
+        shortcut: Some(Shortcut::command(Key::Q)),
+        aliases: &[],
+        repeats: false,
+        enabled: always,
+        text_op: None,
+        action: UiAction::Quit,
     },
     // 編集
     MenuCommand {
