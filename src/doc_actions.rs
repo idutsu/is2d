@@ -515,32 +515,46 @@ fn set_active_keyframe_sound(
 ) -> bool {
     mutate_timeline_with_undo(tab, |tl, doc| {
         let Some((l, k)) = tl.active_sound_slot() else {
-            return false;
+            return;
         };
         if tl.layers[l].keyframes[k].sound == clip {
-            return false;
+            return;
         }
         tl.layers[l].keyframe_mut(k).sound = clip;
         if let Some(s) = added {
             doc.add_sound(s);
         }
-        true
     })
 }
 
 fn mutate_timeline_with_undo(
     tab: &mut Tab,
-    mutate: impl FnOnce(&mut Timeline, &mut Document) -> bool,
+    mutate: impl FnOnce(&mut Timeline, &mut Document),
 ) -> bool {
     if !commit_floating(tab) {
         return false;
     }
-    push_undo(tab, None);
-    let changed = tab.with_active_timeline_mut(mutate);
+    // 中身が変わったかは、書き換えの前と後の中身を比べて決める（決めるのはこの1か所：`Timeline::same_content` と音の
+    // ライブラリ。書き換える関数ごとには答えない：空のキーフレームを空のキーフレームの上に写すなど、書いても同じ中身に
+    // なる場面を、書く関数からは見分けられない）。取り消しの控えは、中身が変わったときだけ積む（控えに入るのは、`apply`
+    // が操作の前に取った写し：`UndoHistory::before`）。中身が変わらず、今のコマ・レイヤーだけが動いたときは、控えを積まずに
+    // 「した」と答える（コマを選ぶ操作と同じ。前は控えを積んだので、取り消しても絵は変わらず、コマの位置が戻るだけ
+    // だった：設計 claude/取り消しの約束を入口で守る設計_43c2564.md の 2.1）。どちらのときも後始末をする（選択・浮いた片は
+    // コマごとのもの）
+    let at = |tl: &Timeline| (tl.current_frame, tl.active_layer);
+    let before_tl = tab.active_timeline().clone();
+    let before_sounds = tab.doc.sounds.clone();
+    tab.with_active_timeline_mut(mutate);
+    let changed = !tab.active_timeline().same_content(&before_tl)
+        || !std::sync::Arc::ptr_eq(&tab.doc.sounds, &before_sounds);
+    let moved = at(tab.active_timeline()) != at(&before_tl);
     if changed {
+        push_undo(tab, None);
+    }
+    if changed || moved {
         reset_session_after_timeline_change(tab);
     }
-    changed
+    changed || moved
 }
 
 // ============================================================================
@@ -948,12 +962,12 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             frame,
         } => mutate_timeline_with_undo(tab, |tl, doc| {
             let Some(l) = tl.layers.get_mut(layer).filter(|l| l.accepts_frame_ops()) else {
-                return false;
+                return;
             };
             let Some(k) = l.keyframe_index_starting_at(kf_start) else {
-                return false;
+                return;
             };
-            l.trim_sound(k, edge, frame, &doc.sounds, doc.fps)
+            l.trim_sound(k, edge, frame, &doc.sounds, doc.fps);
         }),
         Action::InsertKeyframe { copy_prev } => apply_timeline_insert_keyframe(tab, copy_prev),
         Action::DeleteKeyframe => apply_timeline_delete_keyframe(tab),
@@ -1801,7 +1815,6 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
     let next_tween = !is_currently_tweened;
     let changed = mutate_timeline_with_undo(tab, |tl, _| {
         let curr_f = tl.current_frame;
-        let mut changed = false;
         for &l_idx in &targets {
             let layer = &mut tl.layers[l_idx];
             if let Some(kf_idx) = layer.keyframe_index_at(curr_f) {
@@ -1809,15 +1822,12 @@ fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -
                 if next_tween {
                     if kf.cel.single_symbol_instance().is_some() && !kf.tween {
                         layer.keyframe_mut(kf_idx).tween = true;
-                        changed = true;
                     }
                 } else if kf.tween {
                     layer.keyframe_mut(kf_idx).tween = false;
-                    changed = true;
                 }
             }
         }
-        changed
     });
 
     if changed {
@@ -1846,10 +1856,8 @@ fn apply_set_tween_rotate(tab: &mut Tab, rotate_mode: TweenRotate) -> bool {
         if let Some(layer_mut) = tl.layers.get_mut(tl.active_layer) {
             if kf_idx < layer_mut.keyframes.len() {
                 layer_mut.keyframe_mut(kf_idx).tween_rotate = rotate_mode;
-                return true;
             }
         }
-        false
     });
     if changed {
         select_shapes_for_timeline_selection(tab);
@@ -1999,13 +2007,13 @@ fn apply_timeline_insert_keyframe(tab: &mut Tab, clone_prev: bool) -> bool {
     if targets.is_empty() {
         return false;
     }
-    let changed = mutate_timeline_with_undo(tab, |tl, doc| {
-        tl.insert_keyframe_on_targets(&targets, clone_prev, doc.fps)
+    let done = mutate_timeline_with_undo(tab, |tl, doc| {
+        tl.insert_keyframe_on_targets(&targets, clone_prev, doc.fps);
     });
-    if changed && clone_prev {
+    if done && clone_prev {
         select_shapes_for_timeline_selection(tab);
     }
-    changed
+    done
 }
 
 fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
@@ -2022,10 +2030,7 @@ fn apply_timeline_delete_keyframe(tab: &mut Tab) -> bool {
     {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| {
-        tl.delete_keyframe_on_targets(&targets);
-        true
-    })
+    mutate_timeline_with_undo(tab, |tl, _| tl.delete_keyframe_on_targets(&targets))
 }
 
 fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
@@ -2033,10 +2038,7 @@ fn apply_timeline_extend_frame(tab: &mut Tab) -> bool {
     if targets.is_empty() {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| {
-        tl.extend_frame_on_targets(&targets);
-        true
-    })
+    mutate_timeline_with_undo(tab, |tl, _| tl.extend_frame_on_targets(&targets))
 }
 
 fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
@@ -2050,7 +2052,9 @@ fn apply_timeline_remove_frame(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_remove_frame_on_targets(&targets) {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, doc| tl.remove_frame_on_targets(&targets, doc.fps))
+    mutate_timeline_with_undo(tab, |tl, doc| {
+        tl.remove_frame_on_targets(&targets, doc.fps);
+    })
 }
 
 fn apply_timeline_move_or_copy_frames(
@@ -2066,33 +2070,26 @@ fn apply_timeline_move_or_copy_frames(
     else {
         return false;
     };
-    mutate_timeline_with_undo(tab, |tl, doc| {
+    let done = mutate_timeline_with_undo(tab, |tl, doc| {
         let fps = doc.fps;
         tl.move_or_copy_frames(sel, dst_sel, actual_dl, copy_mode, fps, || doc.alloc_group_id());
-        true
     });
     select_shapes_for_timeline_selection(tab);
-    true
+    done
 }
 
 fn apply_timeline_add_layer(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_add_layer() {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| {
-        tl.add_layer_above_active();
-        true
-    })
+    mutate_timeline_with_undo(tab, |tl, _| tl.add_layer_above_active())
 }
 
 fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {
     if tab.active_timeline().layers.len() <= 1 {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| {
-        tl.delete_active_layer();
-        true
-    })
+    mutate_timeline_with_undo(tab, |tl, _| tl.delete_active_layer())
 }
 
 fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -> bool {
@@ -2100,10 +2097,7 @@ fn apply_timeline_reorder_layer(tab: &mut Tab, from_idx: usize, to_idx: usize) -
     if from_idx >= len || to_idx >= len || from_idx == to_idx {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| {
-        tl.reorder_layer(from_idx, to_idx);
-        true
-    })
+    mutate_timeline_with_undo(tab, |tl, _| tl.reorder_layer(from_idx, to_idx))
 }
 
 /// レイヤー `layer_idx` の表示・ロックの印（`get` で読み、`get_mut` で書く）を `value` にする
@@ -2126,7 +2120,6 @@ fn apply_set_layer_flag(
         if let Some(layer) = tl.layers.get_mut(layer_idx) {
             *get_mut(layer) = value;
         }
-        true
     })
 }
 

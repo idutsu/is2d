@@ -1683,6 +1683,32 @@ impl Layer {
         self.keyframes.iter_keyed()
     }
 
+    /// 中身が `other` と同じか（`Timeline::same_content`）：名前・表示・ロック・コマの数と、キーフレームの列（始まりのコマ・
+    /// トゥイーン・音・セル画。セル画は地図とインスタンスの並びが同じもの（番地が同じか、どちらも空））
+    fn same_content(&self, other: &Layer) -> bool {
+        let same_cel = |a: &Cel, b: &Cel| {
+            (Arc::ptr_eq(&a.maps, &b.maps) || (a.maps.is_empty() && b.maps.is_empty()))
+                && (Arc::ptr_eq(&a.instances, &b.instances)
+                    || (a.instances.is_empty() && b.instances.is_empty()))
+        };
+        let same_keyframe = |a: &Keyframe, b: &Keyframe| {
+            a.tween == b.tween
+                && a.tween_rotate == b.tween_rotate
+                && a.sound == b.sound
+                && same_cel(&a.cel, &b.cel)
+        };
+        self.id == other.id
+            && self.name == other.name
+            && self.visible == other.visible
+            && self.locked == other.locked
+            && self.frame_count == other.frame_count
+            && (self.keyframes.ptr_eq(&other.keyframes)
+                || (self.keyframes.len() == other.keyframes.len()
+                    && self.keyframes_with_start().zip(other.keyframes_with_start()).all(
+                        |((sa, a), (sb, b))| sa == sb && (Arc::ptr_eq(a, b) || same_keyframe(a, b)),
+                    )))
+    }
+
     /// 始まりのコマが `frame` より前のキーフレームの数（`frame` に入れるキーフレームの番号）
     fn keyframes_before(&self, frame: usize) -> usize {
         self.keyframes.partition_point_key(|s| s < frame)
@@ -2183,6 +2209,17 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    /// 中身（今のコマ・選んでいるレイヤー・タイムラインの選択を除いたもの）が `other` と同じか（中身が変わったかの決まりは
+    /// これ1つ：取り消しの控えを積むか `doc_actions::mutate_timeline_with_undo`）。書き換えていないレイヤーは、キーフレームの
+    /// 列を共有したままなので番地を見るだけ。書き換えたレイヤーも、変わっていないキーフレームは番地が同じ（手間は触った
+    /// レイヤーのキーフレームの数の分）
+    pub(crate) fn same_content(&self, other: &Timeline) -> bool {
+        self.total_frames == other.total_frames
+            && self.next_layer_id == other.next_layer_id
+            && self.layers.len() == other.layers.len()
+            && self.layers.iter().zip(&other.layers).all(|(a, b)| a.same_content(b))
+    }
+
     /// まだ確かめていない地図に、壊れていたときの知らせ先 `sink` と場所（`place` に続けて、レイヤーの名前とキーフレームの
     /// コマの番号）を付ける（`Document::watch_broken_maps`）
     pub(crate) fn watch_broken_maps(&self, sink: &BrokenMaps, place: &str) {
@@ -2325,13 +2362,14 @@ impl Timeline {
             .is_some_and(|l| l.is_editable_at(self.current_frame))
     }
 
-    /// 対象レイヤー群 `targets` に対して現在フレーム（または直後フレーム）へキーフレームを挿入する（`F6` / `F7`）
+    /// 対象レイヤー群 `targets` に対して現在フレーム（または直後フレーム）へキーフレームを挿入する（`F6` / `F7`。中身が
+    /// 変わったかは、呼ぶ側が前後を比べて決める：`Timeline::same_content`）
     pub(crate) fn insert_keyframe_on_targets(
         &mut self,
         targets: &[usize],
         clone_prev: bool,
         fps: u32,
-    ) -> bool {
+    ) {
         let curr_f = self.current_frame;
         let should_advance = if clone_prev {
             targets.iter().all(|&l_idx| {
@@ -2358,13 +2396,12 @@ impl Timeline {
                 })
             });
 
-        let mut changed = should_advance || shift_for_blank;
         for &l_idx in targets {
             if let Some(layer) = self.layers.get_mut(l_idx) {
                 if shift_for_blank {
                     layer.insert_frame_at(curr_f);
                 }
-                changed |= layer.insert_keyframe(target_frame, clone_prev, fps);
+                layer.insert_keyframe(target_frame, clone_prev, fps);
             }
         }
         self.sync_total_frames();
@@ -2373,7 +2410,6 @@ impl Timeline {
             sel.min_frame = target_frame;
             sel.max_frame = target_frame;
         }
-        changed
     }
 
     /// 対象レイヤー群 `targets` の現在フレームに削除可能なキーフレームが存在するかを返す

@@ -18492,6 +18492,7 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             let before_undo = app.tab().history.undo_stack.len();
             let before_redo = app.tab().history.redo_stack.len();
             let before_dirty = app.tab().history.is_dirty();
+            let before_floating = app.session.floating().cloned();
             let coalesce_key = action.coalesce_key(app.tab());
             let was_coalesced =
                 coalesce_key.is_some() && app.tab().history.last_coalesce_key == coalesce_key;
@@ -18546,8 +18547,11 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                 } else {
                     (before_undo + 1).min(100)
                 };
-                // 2. ProjectDocument::from_app の JSON が変わったときは、Undo が 1 件増え（連続操作のまとめ中は 0 件）、is_dirty() が true になる
-                if after_json != before_json {
+                // 2. 作品の中身（ProjectDocument::from_app の JSON から、今のコマ・選んでいるレイヤーを除いたもの）が変わったときは、
+                //    Undo が 1 件増え（連続操作のまとめ中は 0 件）、is_dirty() が true になる。今のコマ・レイヤーだけが動いたときは、
+                //    コマを選ぶ操作と同じく取り消しの1手にしない（下の 4.。持ち主が決めた：2026-11-26、設計
+                //    claude/取り消しの約束を入口で守る設計_43c2564.md の 2.1）
+                if after_no_act_layer_json != before_no_act_layer_json {
                     assert_eq!(
                         after_undo, expected_undo,
                         "seed={seed:#x} step={step} op={op_name}: undo count did not increase as expected on JSON change"
@@ -18556,7 +18560,18 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                         after_dirty,
                         "seed={seed:#x} step={step} op={op_name}: is_dirty must be true on JSON change"
                     );
-                } else if after_undo == expected_undo {
+                } else if match (&before_floating, app.session.floating()) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.matches_undo_snapshot(b),
+                    _ => false,
+                } {
+                    // 4. 作品の中身も浮いた片も変わらなければ、Undo は増えない（取り消しても何も起きない1手を作らない。取り消しが
+                    //    戻すのは、作品の中身と浮いた片：浮いた片が同じかは `Floating::matches_undo_snapshot`。その場に貼り付けは、
+                    //    確定した中身が同じでも浮いた写しができるので、1手になる）
+                    assert_eq!(
+                        after_undo, before_undo,
+                        "seed={seed:#x} step={step} op={op_name}: undo step recorded without a content change"
+                    );
                     *true_without_json_change.entry(op_name).or_insert(0) += 1;
                 }
             }
@@ -25176,6 +25191,42 @@ fn dragging_after_mixed_selections_matches_the_drop() {
         }
     }
     assert!(bad.is_empty(), "ドラッグ中の見た目と離した後が違う：{bad:?}");
+}
+
+/// 中身を変えない操作は、取り消しの控えを積まない：キーフレームの上で F6 を押し、次のコマにもうキーフレームがあるとき
+/// （次のコマへ進むだけ）と、中身の無いコマを動かしたとき（選択とコマの位置が動くだけ）。前は「変わった」と答えて控えを
+/// 積んだので、取り消しても絵は何も変わらず、コマの位置が戻るだけだった（設計：claude/取り消しの約束を入口で守る設計_43c2564.md
+/// の 2.1）。コマは進む・動く（後始末も走る）
+#[test]
+fn operations_that_change_nothing_leave_no_undo_step() {
+    use crate::doc_actions::{apply, Action};
+    use crate::timeline::TimelineCellSelection;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 200.0, 200.0, Color32::RED)]);
+    // コマ 0 と 1 をキーフレームにする（コマ 0 で F6：次のコマへ進んで入れる）
+    assert!(apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 0 }));
+    assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true }));
+    assert_eq!(app.doc.root.current_frame, 1);
+    assert!(app.doc.root.layers[0].keyframe_index_starting_at(1).is_some());
+    // コマ 0 に戻って F6：次のコマ 1 はもうキーフレームなので、進むだけ
+    apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 0 });
+    let undo = app.history.undo_stack.len();
+    let keyframes = app.doc.root.layers[0].keyframes.clone();
+    apply(&mut app, Action::InsertKeyframe { copy_prev: true });
+    assert_eq!(app.doc.root.current_frame, 1, "次のコマへ進む");
+    assert!(app.doc.root.layers[0].keyframes.ptr_eq(&keyframes), "中身は変わらない");
+    assert_eq!(app.history.undo_stack.len(), undo, "中身を変えない F6 で取り消しの控えを積んだ");
+    // 中身の無いコマ（レイヤーのコマの外）を動かす：選択とコマの位置だけが動く
+    let frames = app.doc.root.layers[0].frame_count;
+    let undo = app.history.undo_stack.len();
+    apply(&mut app, Action::MoveOrCopyFrames {
+        sel: TimelineCellSelection::single(0, frames + 3),
+        layer_delta: 0,
+        frame_delta: -1,
+        copy_mode: false,
+    });
+    assert!(app.doc.root.layers[0].keyframes.ptr_eq(&keyframes), "中身は変わらない");
+    assert_eq!(app.history.undo_stack.len(), undo, "中身の無いコマを動かして取り消しの控えを積んだ");
 }
 
 /// 画面の上乗せの重なり順は、地図の描く順と同じ1つの決まり（`planar_map::draw_rank`：同じ地図から来た図形は塗りのあとに

@@ -180,8 +180,8 @@ impl<T> ChunkedList<T> {
         Self::restart(all);
     }
 
-    /// テスト用：`other` と塊の並びを共有しているか（複製してから書いていないか）
-    #[cfg(test)]
+    /// `other` と塊の並びを共有しているか（共有していれば中身は同じ。複製してから書いていないかの確かめと、中身が変わったか
+    /// の決まり `Layer::same_content`）
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.chunks, &other.chunks)
     }
