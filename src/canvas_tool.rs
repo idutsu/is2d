@@ -2850,25 +2850,50 @@ impl Tab {
     pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
         let prev_floating = self.history.snapshot_floating(self.session.floating());
+        // 控えと文書の項目は全部書く（どちらかに項目を足すと、ここが組み立てで止まるので、戻すか戻さないかを必ず決める。
+        // 控えを作る所 `doc_actions::undo_snapshot` も同じ：設計審査 de92ceb の D-5 の (3)）。戻さないもの：番号の数え札・
+        // 壊れていた地図の知らせ先（`undo_snapshot` を見よ）
+        let UndoEntry {
+            timeline,
+            library,
+            sounds,
+            floating,
+            selection,
+            edit_path,
+            editing_group_path,
+            stage_size,
+            fps,
+            symbols_revision,
+            commit_id,
+        } = entry;
+        let Document {
+            root: doc_root,
+            library: doc_library,
+            sounds: doc_sounds,
+            stage_size: doc_stage_size,
+            fps: doc_fps,
+            revision: doc_revision,
+            next_symbol_id: _,
+            next_group_id: _,
+            next_sound_id: _,
+            broken_maps: _,
+        } = &mut self.doc;
         let prev_entry = UndoEntry {
-            timeline: std::mem::replace(&mut self.doc.root, entry.timeline),
-            library: self.doc.library.clone(),
-            sounds: self.doc.sounds.clone(),
+            timeline: std::mem::replace(doc_root, timeline),
+            library: std::mem::replace(doc_library, library),
+            sounds: std::mem::replace(doc_sounds, sounds),
             floating: prev_floating,
-            selection: std::mem::replace(&mut self.session.selection, entry.selection),
-            edit_path: std::mem::replace(&mut self.session.edit_path, entry.edit_path),
+            selection: std::mem::replace(&mut self.session.selection, selection),
+            edit_path: std::mem::replace(&mut self.session.edit_path, edit_path),
             editing_group_path: std::mem::replace(
                 &mut self.session.editing_group_path,
-                entry.editing_group_path,
+                editing_group_path,
             ),
-            stage_size: std::mem::replace(&mut self.doc.stage_size, entry.stage_size),
-            fps: std::mem::replace(&mut self.doc.fps, entry.fps),
-            symbols_revision: self.doc.revision,
-            commit_id: std::mem::replace(&mut self.history.current_commit_id, entry.commit_id),
+            stage_size: std::mem::replace(doc_stage_size, stage_size),
+            fps: std::mem::replace(doc_fps, fps),
+            symbols_revision: std::mem::replace(doc_revision, symbols_revision),
+            commit_id: std::mem::replace(&mut self.history.current_commit_id, commit_id),
         };
-        self.doc.library = entry.library;
-        self.doc.sounds = entry.sounds;
-        self.doc.revision = entry.symbols_revision;
         self.doc.validate_edit_path(
             &mut self.session.edit_path,
             &mut self.session.editing_group_path,
@@ -2877,8 +2902,7 @@ impl Tab {
         cancel_active_drag(self);
         self.session.transform_pivot = None;
         self.refresh_scene_base();
-        self.session
-            .set_floating(entry.floating.map(Arc::unwrap_or_clone));
+        self.session.set_floating(floating.map(Arc::unwrap_or_clone));
         self.session.retain_existing_selection();
         if self.session.floating().is_some() {
             // 確定を断ったら、浮いた片と選択はそのまま（知らせは `apply`）

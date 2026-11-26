@@ -405,20 +405,36 @@ impl Action {
 
 /// 今の状態の控え（絵・浮いた片・選択・階層など。中身は文書と共有するので軽い）
 fn undo_snapshot(tab: &Tab) -> UndoEntry {
+    // 文書の項目は全部書く（文書に項目を足すと、ここが組み立てで止まるので、控えに入れるか入れないかを必ず決める。戻す所
+    // `Tab::restore_state_snapshot` も同じ。前は入れる項目だけを手で並べたので、足し忘れると、取り消しで戻らないのに
+    // 未保存の印だけ戻った：設計審査 de92ceb の D-5 の (3)）。入れないもの：番号の数え札（取り消しても戻さない：番号を
+    // 使い回すと、別の中身と番号がぶつかる）、壊れていた地図の知らせ先（読み込んだときの知らせ）
+    let Document {
+        root,
+        library,
+        sounds,
+        stage_size,
+        fps,
+        revision,
+        next_symbol_id: _,
+        next_group_id: _,
+        next_sound_id: _,
+        broken_maps: _,
+    } = &tab.doc;
     let floating = tab.history.snapshot_floating(tab.session.floating());
     UndoEntry {
-        timeline: tab.doc.root.clone(),
+        timeline: root.clone(),
         // ライブラリは文書と共有する（書く所だけ `Arc::make_mut` で写す）
-        library: tab.doc.library.clone(),
+        library: library.clone(),
         // 音のライブラリも文書と共有する
-        sounds: tab.doc.sounds.clone(),
+        sounds: sounds.clone(),
         floating,
         selection: tab.session.selection.clone(),
         edit_path: tab.session.edit_path.clone(),
         editing_group_path: tab.session.editing_group_path.clone(),
-        stage_size: tab.doc.stage_size,
-        fps: tab.doc.fps,
-        symbols_revision: tab.doc.revision,
+        stage_size: *stage_size,
+        fps: *fps,
+        symbols_revision: *revision,
         commit_id: tab.history.current_commit_id,
     }
 }
