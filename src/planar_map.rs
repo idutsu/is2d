@@ -256,24 +256,19 @@ impl PlanarMap {
         };
         let mut edges = Vec::new();
         for e in &self.edges {
-            let Some(([l, r], stroke)) = restricted_sides(
-                [(e.left, e.left_src), (e.right, e.right_src)],
-                e.stroke,
-                line_id_of(&tile_edge(self, e)),
-                &keep,
-            ) else {
+            let Some(t) = restricted_sides(&tile_edge(self, e), &keep) else {
                 continue;
             };
             edges.push(MapEdge {
                 a: node(e.a),
                 b: node(e.b),
                 ctrl: e.ctrl,
-                left: l.0,
-                right: r.0,
-                left_src: l.1,
-                right_src: r.1,
-                stroke,
-                line_id: stroke.and(e.line_id),
+                left: t.left,
+                right: t.right,
+                left_src: t.left_src,
+                right_src: t.right_src,
+                stroke: t.stroke,
+                line_id: t.line_id,
             });
         }
         PlanarMap { nodes, edges }
@@ -1277,21 +1272,27 @@ pub(crate) fn label_of_face(color: Option<Color32>, src: Option<ShapeId>) -> Opt
 /// `LayerBase::only_faces_map`・`restricted_local`）。`keep` は面の番号と線の番号（`line_id`）に答える。色のある側は、その面を
 /// 残すなら残し、外すなら何も無いにする。線は、その辺の線の図形の番号 `line` を残すなら残し、外すなら外す（Animate と
 /// 同じく、面と線は別々に選ぶ。設計：claude/線の設計_68a596e.md の 6.4）。線を残した辺の色の無い側には、線のラベル
-/// （`line_label`。外した面の側は、その面の番号）を残す。残す辺でなければ `None`
-#[allow(clippy::type_complexity)]
+/// （`line_label`。外した面の側は、その面の番号）を残す。辺 `te` を、両側と線と線の番号を替えた辺にして返す（両端と制御点は
+/// そのまま）。残す辺でなければ `None`
 fn restricted_sides(
-    sides: [Label; 2],
-    stroke: Option<EdgeStroke>,
-    line: Option<ShapeId>,
+    te: &crate::stored_map::TileEdge,
     keep: impl Fn(ShapeId) -> bool,
-) -> Option<([Label; 2], Option<EdgeStroke>)> {
-    let stroke = stroke.filter(|_| line.is_some_and(&keep));
+) -> Option<crate::stored_map::TileEdge> {
+    let stroke = te.stroke.filter(|_| line_id_of(te).is_some_and(&keep));
     let side = |(color, src): Label| match color {
         Some(_) if src.is_some_and(&keep) => (color, src),
         _ => (None, line_label(None, label_of_face(color, src), stroke)),
     };
-    let out = [side(sides[0]), side(sides[1])];
-    edge_needed(out[0].0, out[1].0, stroke).then_some((out, stroke))
+    let (l, r) = (side((te.left, te.left_src)), side((te.right, te.right_src)));
+    edge_needed(l.0, r.0, stroke).then_some(crate::stored_map::TileEdge {
+        left: l.0,
+        right: r.0,
+        left_src: l.1,
+        right_src: r.1,
+        stroke,
+        line_id: stroke.and(te.line_id),
+        ..*te
+    })
 }
 
 /// 頂点を位置の順（`point_order`）に並べる鍵（2本のまとめ `merge_degree2` の調べる順）
@@ -2640,26 +2641,20 @@ impl LayerBase {
         let mut m = PlanarMap::default();
         let mut nodes = Nodes::default();
         for e in self.selected_edges(ids, group_path) {
-            let te = self.stored.edge_at(e);
-            let Some(([l, r], stroke)) = restricted_sides(
-                [(te.left, te.left_src), (te.right, te.right_src)],
-                te.stroke,
-                line_id_of(&te),
-                |id| ids.contains(&id),
-            ) else {
+            let Some(t) = restricted_sides(&self.stored.edge_at(e), |id| ids.contains(&id)) else {
                 continue;
             };
-            let (a, b) = (nodes.id(te.a), nodes.id(te.b));
+            let (a, b) = (nodes.id(t.a), nodes.id(t.b));
             m.edges.push(MapEdge {
                 a,
                 b,
-                ctrl: te.ctrl,
-                left: l.0,
-                right: r.0,
-                left_src: l.1,
-                right_src: r.1,
-                stroke,
-                line_id: stroke.and(te.line_id),
+                ctrl: t.ctrl,
+                left: t.left,
+                right: t.right,
+                left_src: t.left_src,
+                right_src: t.right_src,
+                stroke: t.stroke,
+                line_id: t.line_id,
             });
         }
         m.nodes = nodes.at;
@@ -2708,24 +2703,7 @@ impl LayerBase {
                 let touched = self.selected_edges(ids, group_path);
                 let added: Vec<crate::stored_map::TileEdge> = touched
                     .iter()
-                    .filter_map(|&e| {
-                        let te = self.stored.edge_at(e);
-                        let ([l, r], stroke) = restricted_sides(
-                            [(te.left, te.left_src), (te.right, te.right_src)],
-                            te.stroke,
-                            line_id_of(&te),
-                            |id| keep.keeps(id),
-                        )?;
-                        Some(crate::stored_map::TileEdge {
-                            left: l.0,
-                            right: r.0,
-                            left_src: l.1,
-                            right_src: r.1,
-                            stroke,
-                            line_id: stroke.and(te.line_id),
-                            ..te
-                        })
-                    })
+                    .filter_map(|&e| restricted_sides(&self.stored.edge_at(e), |id| keep.keeps(id)))
                     .collect();
                 self.stored.with_diff_tiles(&touched, &added)
             }
