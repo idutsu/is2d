@@ -88,7 +88,7 @@ pub(in crate::canvas_tool) fn exit_current_group(tab: &mut Tab) -> bool {
 }
 
 /// キャンバス上のダブルクリックによるグループ/シンボルへのインプレイス進入、または空白背景ダブルクリックによる親階層への復帰を処理する
-pub(crate) fn handle_canvas_double_click(host: &mut crate::doc_actions::ToolInput<'_, impl ActionHost>, pt: Point, shift_held: bool) {
+pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
     if apply(host, Action::EnterGroupAt { pt }) {
         return;
     }
@@ -145,7 +145,7 @@ pub(in crate::canvas_tool) fn select_connected_at(tab: &mut Tab, pt: Point, add:
 
 /// クリックした点 `pt` の図形に応じて選択を切り替える（選択ツール・自由変形ツール共通）
 pub(crate) fn apply_click_selection(
-    host: &mut crate::doc_actions::ToolInput<'_, impl ActionHost>,
+    host: &mut impl ActionHost,
     pt: Point,
     shift_held: bool,
     deselect_on_miss: bool,
@@ -228,17 +228,17 @@ pub(in crate::canvas_tool) fn select_single_shape_at(tab: &mut Tab, sub_mode: Se
 /// 浮いた片の確定を断られて選び直せなければ、何も始めない（浮いた片はみな選ばれたまま。輪郭の頂点・辺をつかむときと同じ
 /// 決まり：`tool_select::start_reshape_drag`。レビュー 41766f9 の N-3003：前は断られても移動を始め、つかんだ図形でなく
 /// 浮いた片が動いた）
-pub(crate) fn grab_and_move(host: &mut crate::doc_actions::ToolInput<'_, impl ActionHost>, pt: Point, selected: bool, alt: bool) {
+pub(crate) fn grab_and_move(host: &mut impl ActionHost, pt: Point, selected: bool, alt: bool) {
     if !selected && !apply(host, Action::SelectSingleAt { pt }) {
         return;
     }
-    let move_drag = crate::clipboard_ops::begin_move_selection_drag(host, pt, alt);
-    host.tab_mut().session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+    let tab = host.tab_mut();
+    let move_drag = crate::clipboard_ops::begin_move_selection_drag(tab, pt, alt);
+    tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
 }
 
 /// 進行中の選択の移動・矩形選択のドラッグを `pt` へ進める（選択ツール・自由変形ツール共通）
-pub(crate) fn update_selection_drag(host: &mut crate::doc_actions::ToolInput<'_, impl ActionHost>, pt: Point) -> bool {
-    let tab = host.tab_mut();
+pub(crate) fn update_selection_drag(tab: &mut Tab, pt: Point) -> bool {
     match &mut tab.session.drag {
         ActiveCanvasDrag::MoveSelection(drag) => {
             let delta = drag.step(pt);
@@ -254,7 +254,7 @@ pub(crate) fn update_selection_drag(host: &mut crate::doc_actions::ToolInput<'_,
 }
 
 /// 進行中の選択の移動・矩形選択のドラッグを確定する（離した位置 `mouse_pt` が無ければ最後のドラッグ位置）
-pub(crate) fn finish_selection_drag(host: &mut crate::doc_actions::ToolInput<'_, impl ActionHost>, mouse_pt: Option<Point>) -> bool {
+pub(crate) fn finish_selection_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) -> bool {
     let action = match host.tab().session.drag {
         ActiveCanvasDrag::MoveSelection(ref drag) => Action::FinishMoveSelectionDrag {
             total_delta: drag.total_delta,

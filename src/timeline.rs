@@ -342,8 +342,14 @@ impl UncheckedMaps {
                 break;
             };
             if let Some(m) = m.upgrade() {
-                m.get();
-                checked.fetch_add(1, Ordering::Relaxed);
+                // 地図1つが仕事の単位（止まったら、その地図を飛ばす。使うときに画面のスレッドで確かめる）
+                if crate::vector_engine::guarded(|| {
+                    m.get();
+                })
+                .is_some()
+                {
+                    checked.fetch_add(1, Ordering::Relaxed);
+                }
             }
         };
         let threads = std::thread::available_parallelism()
@@ -352,9 +358,9 @@ impl UncheckedMaps {
         std::thread::scope(|s| {
             // 作れなかったスレッドの分は、作れたスレッドが取って確かめる
             for _ in 1..threads {
-                let _ = std::thread::Builder::new()
-                    .name("is2d-map-check".to_owned())
-                    .spawn_scoped(s, work);
+                // 範囲の中のスレッド（止まったら呼んだ側へ伝える。仕事の単位の砦は `work` の中）
+                #[allow(clippy::disallowed_methods)]
+                let _ = std::thread::Builder::new().name("is2d-map-check".to_owned()).spawn_scoped(s, work);
             }
             work();
         });

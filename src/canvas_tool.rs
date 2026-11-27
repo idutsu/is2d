@@ -1478,13 +1478,13 @@ impl Session {
     }
 
     /// 中心点のドラッグ：中心点を `p` に置く
-    pub(crate) fn drag_pivot_to(&mut self, _: doc_actions::ToolProof, p: Point) {
+    pub(crate) fn drag_pivot_to(&mut self, p: Point) {
         self.transform_pivot = Some(p);
     }
 
     /// 拡大のドラッグ：置いた中心点があれば、ドラッグを始めたときの中心点 `orig` を変換 `affine` で動かした所へ運ぶ（真ん中
     /// のままなら真ん中のまま）
-    pub(crate) fn carry_pivot(&mut self, _: doc_actions::ToolProof, affine: Affine, orig: Point) {
+    pub(crate) fn carry_pivot(&mut self, affine: Affine, orig: Point) {
         if self.transform_pivot.is_some() {
             self.transform_pivot = Some(affine * orig);
         }
@@ -1643,7 +1643,6 @@ impl Session {
     /// 新しい形は、その階層の生の図形の置き場に置く（確定と同じ。生の図形どうしは重ならないので、並びは見た目に出ない）
     pub(crate) fn set_reshape_overlay(
         &mut self,
-        _: doc_actions::ToolProof,
         removed: &[ShapeId],
         added: Vec<FillShape>,
         layer_id: LayerId,
@@ -1760,7 +1759,7 @@ impl Session {
     }
 
     /// 自由変形（拡大・回転）の仮表示用に、選択中図形を `Overlay` に載せ、変形元のクローン列を返す
-    pub(crate) fn begin_transform_overlay(&mut self, _: doc_actions::ToolProof) -> Vec<FillShape> {
+    pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
         self.begin_selection_overlay(false, true, Vec::new())
     }
 
@@ -1890,7 +1889,7 @@ impl Session {
     }
 
     /// 自由変形ドラッグ中、`orig_shapes` に対してキャッシュ済みメッシュ頂点バッファを再利用して `affine` を `overlay.add` へ適用する
-    pub(crate) fn update_transform_overlay(&mut self, _: doc_actions::ToolProof, orig_shapes: &[FillShape], affine: Affine) {
+    pub(crate) fn update_transform_overlay(&mut self, orig_shapes: &[FillShape], affine: Affine) {
         let start = self.overlay_movable_start.min(self.overlay.add.len());
         let world = self.edit_path.world_xform();
         for ((_, overlay_shape), orig_shape) in
@@ -2623,24 +2622,19 @@ pub(crate) fn committed_document(
     let Some(fl) = floating.filter(|fl| fl.modified()) else {
         return Some(doc.clone());
     };
-    // 砦の中で置く（途中で止まったら、置けないのと同じ `None`：保存・書き出しは断って知らせ、復旧は持ち上げる前の文書を
-    // 書く。一時的なタブの上で置くので、止まっても元の文書と画面の写しは触っていない：設計審査 392e9af の D-1）
-    doc_actions::guarded(|| {
-        let mut temp_tab = Tab::with_identity(id, untitled_number);
-        temp_tab.doc = doc.clone();
-        // 浮いた片はまだ入れていないので、貼り戻すものは無い
-        let moved = temp_tab.move_view(|e, g| {
-            *e = edit_path.clone();
-            *g = editing_group_path.to_vec();
-        });
-        debug_assert!(moved);
-        // 画面の土台を先に作る（浮いた片を入れる入口が、土台のレイヤーの順で浮いた片を並べるため：約束の棚卸し 5616fcc の
-        // B の B3）
-        temp_tab.refresh_scene_base();
-        temp_tab.session.set_floating(Some(fl.clone()));
-        commit_floating(&mut temp_tab).then_some(temp_tab.doc)
-    })
-    .flatten()
+    let mut temp_tab = Tab::with_identity(id, untitled_number);
+    temp_tab.doc = doc.clone();
+    // 浮いた片はまだ入れていないので、貼り戻すものは無い
+    let moved = temp_tab.move_view(|e, g| {
+        *e = edit_path.clone();
+        *g = editing_group_path.to_vec();
+    });
+    debug_assert!(moved);
+    // 画面の土台を先に作る（浮いた片を入れる入口が、土台のレイヤーの順で浮いた片を並べるため：約束の棚卸し 5616fcc の
+    // B の B3）
+    temp_tab.refresh_scene_base();
+    temp_tab.session.set_floating(Some(fl.clone()));
+    commit_floating(&mut temp_tab).then_some(temp_tab.doc)
 }
 
 /// 新しいタブの番号（「どの作品か」の見分け：クリップボードの使い回し・復旧の書き手が使う）。作るのは番号を配る係

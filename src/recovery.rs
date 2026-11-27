@@ -139,7 +139,7 @@ struct WriterShared {
     /// 書く途中で止まった（内部の不具合）タブの名前（画面が毎コマ取り出して知らせる：`take_failures`。書いている間も待たず
     /// に取り出せるよう、書く係とは別に持つ）
     failed: Mutex<Vec<String>>,
-    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    thread: Mutex<Option<std::thread::JoinHandle<Option<()>>>>,
 }
 
 #[derive(Default)]
@@ -188,10 +188,7 @@ impl RecoveryWriter {
             thread: Mutex::new(None),
         });
         let worker = shared.clone();
-        let handle = std::thread::Builder::new()
-            .name("is2d-recovery".to_owned())
-            .spawn(move || run_writer(&worker))
-            .ok();
+        let handle = crate::vector_engine::spawn_guarded("is2d-recovery", move || run_writer(&worker)).ok();
         *shared.thread.lock().unwrap_or_else(PoisonError::into_inner) = handle;
         Self(shared)
     }
@@ -308,7 +305,7 @@ impl WriterCore {
             // タブ1つ分を砦の中で書く（途中で止まったら、そのタブだけを飛ばし（前に書けた控えは残る）、書き足すファイルは
             // 次の控えで作り直す。ほかのタブは続けて書き、止まったことは画面に知らせる：設計審査 392e9af の D-1。前は止まると
             // 書き手ごと黙っていなくなり、以後どのタブの控えも書かれなかった）
-            if crate::doc_actions::guarded(|| self.write_tab(item)).is_none() {
+            if crate::vector_engine::guarded(|| self.write_tab(item)).is_none() {
                 self.journals.remove(&item.id);
                 failed.push(item.name());
             }

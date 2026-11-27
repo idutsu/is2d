@@ -254,12 +254,13 @@ pub(crate) struct VideoExportJob {
     pub(crate) completed_frames: Arc<AtomicUsize>,
     pub(crate) total_frames: usize,
     pub(crate) cancel_flag: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<VideoExportOutcome>>,
+    handle: Option<std::thread::JoinHandle<Option<VideoExportOutcome>>>,
 }
 
 impl VideoExportJob {
     /// 文書の写し `doc` を受け取り、`target_path` へのバックグラウンド書き出しを開始する
-    pub(crate) fn start(doc: Document, target_path: PathBuf) -> Self {
+    /// 書き出しを裏のスレッドで始める（スレッドを作れなければ `Err`）
+    pub(crate) fn start(doc: Document, target_path: PathBuf) -> std::io::Result<Self> {
         let target_path = crate::project_io::resolve_target_path(&target_path);
         let tmp_path = tmp_export_path(&target_path);
         let total_frames = export_frames(&doc);
@@ -269,27 +270,26 @@ impl VideoExportJob {
         let thread_target = target_path.clone();
         let thread_done = Arc::clone(&completed_frames);
         let thread_cancel = Arc::clone(&cancel_flag);
-        let handle = std::thread::spawn(move || {
-            let res = run_video_export(
-                &doc,
-                &thread_target,
-                &tmp_path,
-                &thread_done,
-                &thread_cancel,
-            );
+        let handle = crate::vector_engine::spawn_guarded("is2d-video-export", move || {
+            // 書き出しは砦の中（途中で止まったら、書き出しを断って知らせ、作りかけの一時ファイルを消す：設計審査 392e9af の
+            // D-1。前は止まると書き出しの裏の仕事ごと終わり、一時ファイルが残った）
+            let res = crate::vector_engine::guarded(|| {
+                run_video_export(&doc, &thread_target, &tmp_path, &thread_done, &thread_cancel)
+            })
+            .unwrap_or_else(|| VideoExportOutcome::Failed("内部の不具合で書き出しを続けられませんでした".to_owned()));
             if res != VideoExportOutcome::Completed {
                 let _ = std::fs::remove_file(&tmp_path);
             }
             res
-        });
+        })?;
 
-        Self {
+        Ok(Self {
             target_path,
             completed_frames,
             total_frames,
             cancel_flag,
             handle: Some(handle),
-        }
+        })
     }
 
     /// 現在の進捗 `(完了したコマ数, 全コマ数)` を返す
@@ -312,7 +312,7 @@ impl VideoExportJob {
     /// 裏の処理が終わるまで待って結果を返す
     pub(crate) fn wait(&mut self) -> VideoExportOutcome {
         match self.handle.take() {
-            Some(handle) => handle.join().unwrap_or_else(|_| {
+            Some(handle) => handle.join().ok().flatten().unwrap_or_else(|| {
                 VideoExportOutcome::Failed("書き出し処理が異常終了しました".to_owned())
             }),
             None => VideoExportOutcome::Cancelled,
@@ -363,6 +363,8 @@ pub(crate) fn render_frames_in_order(
             return VideoExportOutcome::Cancelled;
         }
         let rendered: Option<Vec<Rendered>> = std::thread::scope(|scope| {
+            // 範囲の中のスレッド（止まったら書き出しのスレッドへ伝える。書き出し1回が仕事の単位）
+            #[allow(clippy::disallowed_methods)]
             let handles: Vec<_> = (first..(first + threads).min(total_frames))
                 .map(|frame| scope.spawn(move || render_frame_holding(doc, frame, width, height)))
                 .collect();

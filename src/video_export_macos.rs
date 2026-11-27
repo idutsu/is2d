@@ -484,8 +484,11 @@ impl VideoEncoder for MacosVideoEncoder<'_> {
 
     fn finish(mut self: Box<Self>) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel::<()>(1);
+        // OS から呼ばれる受け口（書き終えた知らせ。砦の中：設計 claude/最後の砦を仕事の入口に置く設計.md）
         let block = RcBlock::new(move || {
-            let _ = tx.send(());
+            let _ = crate::vector_engine::guarded(|| {
+                let _ = tx.send(());
+            });
         });
 
         // SAFETY: `writer` が `Writing` 状態であることを確認した上で `markAsFinished` / `finishWritingWithCompletionHandler` を呼び、

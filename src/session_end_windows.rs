@@ -55,19 +55,23 @@ unsafe extern "system" fn subclass_proc(
 ) -> LRESULT {
     // SAFETY: `data` は `install` で手放さないことにした `SessionEnd`（アプリが終わるまで生きる）
     let state = unsafe { &*(data as *const SessionEnd) };
+    // OS から呼ばれる受け口：書く仕事は砦の中（OS をまたいで止まると強制終了になる。止まったら、書けなかったことを捨てて
+    // 答える：設計 claude/最後の砦を仕事の入口に置く設計.md）
     match msg {
         // 終わってよいか：書いてから、よいと答える
         WM_QUERYENDSESSION => {
-            write_once(hwnd, state);
+            let _ = crate::vector_engine::guarded(|| write_once(hwnd, state));
             LRESULT(1)
         }
         // 終わる（wparam が 0 でない）なら、まだ書いていなければ書く。やめたなら、次の終わりに備える
         WM_ENDSESSION => {
-            if wparam.0 != 0 {
-                write_once(hwnd, state);
-            } else {
-                state.written.store(false, Ordering::Relaxed);
-            }
+            let _ = crate::vector_engine::guarded(|| {
+                if wparam.0 != 0 {
+                    write_once(hwnd, state);
+                } else {
+                    state.written.store(false, Ordering::Relaxed);
+                }
+            });
             LRESULT(0)
         }
         // SAFETY: 受け取らない知らせは、元の受け口へそのまま渡す

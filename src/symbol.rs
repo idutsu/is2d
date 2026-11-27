@@ -895,14 +895,11 @@ impl Document {
     /// コマで待たないように：`UncheckedMaps`。このスレッドを含めて、コア数から画面のスレッドの分の1つを引いた数までの
     /// スレッドで分けて確かめる）。ルートのタイムライン、ライブラリのシンボルの順。スレッドを作れなければ
     /// `None`（使うときに確かめる）。スレッドは確かめた地図の数を返す
-    pub(crate) fn check_maps_in_background(&self) -> Option<std::thread::JoinHandle<usize>> {
+    pub(crate) fn check_maps_in_background(&self) -> Option<std::thread::JoinHandle<Option<usize>>> {
         let maps = crate::timeline::UncheckedMaps::of(
             std::iter::once(&self.root).chain(self.library.iter_by_id().map(|s| &s.timeline)),
         );
-        std::thread::Builder::new()
-            .name("is2d-map-check".to_owned())
-            .spawn(move || maps.check())
-            .ok()
+        crate::vector_engine::spawn_guarded("is2d-map-check", move || maps.check()).ok()
     }
 
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する

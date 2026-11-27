@@ -138,6 +138,8 @@ struct Shared {
     idle: AtomicBool,
     /// 装置が使えない・使えなくなったわけ（画面が見て1回だけ知らせ、時計に切り替える）
     failed: Mutex<Option<String>>,
+    /// 混ぜる途中で止まった（内部の不具合）か（画面が取り出して知らせる：`AudioOut::tick`）
+    mix_failed: AtomicBool,
     /// 上の2つを、操作が無いときにも画面が見るよう、画面を起こす
     wake: Option<egui::Context>,
 }
@@ -151,6 +153,7 @@ impl Shared {
             ahead: AtomicU64::new(0),
             idle: AtomicBool::new(false),
             failed: Mutex::new(None),
+            mix_failed: AtomicBool::new(false),
             wake,
         }
     }
@@ -166,13 +169,10 @@ impl Shared {
     fn render(&self, out: &mut [f32], delay: u64, idle_after: impl FnOnce(usize) -> bool) {
         let job = self.job();
         let played = self.played.load(Ordering::Relaxed);
-        let covered = match &*job {
-            Some(j) => j.fill(played, self.rate, out),
-            None => {
-                out.fill(0.0);
-                0
-            }
-        };
+        let covered = job.as_ref().map_or(0, |j| j.fill(played, self.rate, out));
+        if job.is_none() {
+            out[2 * covered..].fill(0.0);
+        }
         self.ahead
             .store(delay + (out.len() / 2) as u64, Ordering::Relaxed);
         self.played
@@ -180,6 +180,15 @@ impl Shared {
         if idle_after(covered) && !self.idle.swap(true, Ordering::Relaxed) {
             self.wake_screen();
         }
+    }
+
+    /// 装置の呼び出しの途中で止まったとき（panic：装置の呼び出しの砦が受け止める。呼び出し1回が仕事の単位）：鳴らしている
+    /// 中身を外し（同じ所で止まり続けない）、渡した `frames` 個の数を進め、画面に知らせる。装置は使い続ける
+    fn stopped(&self, frames: usize) {
+        *self.job() = None;
+        self.played.fetch_add(frames as u64, Ordering::Relaxed);
+        self.mix_failed.store(true, Ordering::Relaxed);
+        self.wake_screen();
     }
 
     fn fail(&self, why: String) {
@@ -328,6 +337,9 @@ impl AudioOut {
 
     /// 画面の毎コマ：装置が鳴り終わっていれば止め、装置が使えなくなっていれば時計に切り替えて、わけを返す（1回だけ）
     pub(crate) fn tick(&mut self) -> Option<String> {
+        if self.shared.mix_failed.swap(false, Ordering::Relaxed) {
+            return Some("内部の不具合で、音を鳴らせなかった所があります（作品は変わっていません）".to_owned());
+        }
         let failed = self
             .shared
             .failed
@@ -422,33 +434,45 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
     let mut quiet_from: Option<cpal::StreamInstant> = None;
     device.build_output_stream(
         config,
+        // 装置の呼び出しの入口（呼び出し1回が仕事の単位。途中で止まったら、その分を無音にして `Shared::stopped`：設計
+        // claude/最後の砦を仕事の入口に置く設計.md。前は止まるとアプリごと落ちた）
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             let frames = data.len() / channels;
-            stereo.resize(2 * frames, 0.0);
-            let ts = info.timestamp();
-            // 渡す分を装置が鳴らし始めるまで（cpal が知らせる）と、耳に届くまで
-            let start = ts.playback.duration_since(&ts.callback).unwrap_or_default();
-            let delay = (start.as_secs_f64() * rate).round() as u64 + latency;
-            render.render(&mut stereo, delay, |covered| {
-                if covered > 0 || quiet_from.is_none() {
-                    quiet_from = ts
-                        .playback
-                        .add(Duration::from_secs_f64(covered as f64 / rate));
+            if crate::vector_engine::guarded(|| {
+                stereo.resize(2 * frames, 0.0);
+                let ts = info.timestamp();
+                // 渡す分を装置が鳴らし始めるまで（cpal が知らせる）と、耳に届くまで
+                let start = ts.playback.duration_since(&ts.callback).unwrap_or_default();
+                let delay = (start.as_secs_f64() * rate).round() as u64 + latency;
+                render.render(&mut stereo, delay, |covered| {
+                    if covered > 0 || quiet_from.is_none() {
+                        quiet_from = ts
+                            .playback
+                            .add(Duration::from_secs_f64(covered as f64 / rate));
+                    }
+                    covered < frames && quiet_from.is_some_and(|q| ts.callback >= q)
+                });
+                for (o, lr) in data.chunks_exact_mut(channels).zip(stereo.chunks_exact(2)) {
+                    for (c, x) in o.iter_mut().enumerate() {
+                        let v = match (channels, c) {
+                            (1, _) => (lr[0] + lr[1]) * 0.5,
+                            (_, 0 | 1) => lr[c],
+                            _ => 0.0,
+                        };
+                        *x = T::from_sample(v);
+                    }
                 }
-                covered < frames && quiet_from.is_some_and(|q| ts.callback >= q)
-            });
-            for (o, lr) in data.chunks_exact_mut(channels).zip(stereo.chunks_exact(2)) {
-                for (c, x) in o.iter_mut().enumerate() {
-                    let v = match (channels, c) {
-                        (1, _) => (lr[0] + lr[1]) * 0.5,
-                        (_, 0 | 1) => lr[c],
-                        _ => 0.0,
-                    };
-                    *x = T::from_sample(v);
-                }
+            })
+            .is_none()
+            {
+                data.fill(T::from_sample(0.0f32));
+                render.stopped(frames);
             }
         },
-        move |e| fail.fail(e.to_string()),
+        // 装置が使えなくなった知らせの入口（止まったら、その知らせを捨てる）
+        move |e| {
+            let _ = crate::vector_engine::guarded(|| fail.fail(e.to_string()));
+        },
         None,
     )
 }

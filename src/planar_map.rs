@@ -3497,6 +3497,9 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + 
     let mut out: Vec<Option<R>> = std::iter::repeat_with(|| None).take(items.len()).collect();
     std::thread::scope(|scope| {
         let (f, next) = (&f, &next);
+        // 範囲の中のスレッド（止まったら呼んだ側へそのまま伝える。呼んだ側は、かならず仕事の入口の砦の中：設計
+        // claude/最後の砦を仕事の入口に置く設計.md）
+        #[allow(clippy::disallowed_methods)]
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(move || {

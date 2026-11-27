@@ -30,8 +30,12 @@ define_class!(
         // SAFETY: メニューの項目の動き（`action`）の形（受け取るのは押した項目）どおり
         #[unsafe(method(chooseCommand:))]
         fn choose_command(&self, sender: &NSMenuItem) {
-            self.ivars().chosen.borrow_mut().push(sender.tag() as usize);
-            self.ivars().ctx.request_repaint();
+            // OS から呼ばれる受け口（砦の中。OS をまたいで止まると強制終了になる。止まったら、その1回を捨てる：設計
+            // claude/最後の砦を仕事の入口に置く設計.md）
+            let _ = crate::vector_engine::guarded(|| {
+                self.ivars().chosen.borrow_mut().push(sender.tag() as usize);
+                self.ivars().ctx.request_repaint();
+            });
         }
     }
 );

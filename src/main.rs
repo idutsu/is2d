@@ -69,29 +69,38 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "is2d",
         native_options,
+        // アプリの始まりの入口：手順ごとに砦の中で走らせる（止まった手順は飛ばして始め、知らせる：設計
+        // claude/最後の砦を仕事の入口に置く設計.md）
         Box::new(|cc| {
-            configure_japanese_fonts(&cc.egui_ctx);
-            configure_sharp_light_theme(&cc.egui_ctx);
             let mut app = Is2dApp::default();
+            let mut step = |name: &str, f: &mut dyn FnMut(&mut Is2dApp)| {
+                if vector_engine::guarded(|| f(&mut app)).is_none() {
+                    app.notify_warning(format!("内部の不具合で、始めるときの「{name}」を飛ばしました"));
+                }
+            };
+            step("文字と色の用意", &mut |_| {
+                configure_japanese_fonts(&cc.egui_ctx);
+                configure_sharp_light_theme(&cc.egui_ctx);
+            });
             #[cfg(target_os = "macos")]
-            {
-                app.os_menu = app_menu_macos::install(&cc.egui_ctx);
-            }
-            app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx);
-            app.recovery.dir = recovery::default_recovery_dir();
-            app.recovery.find_leftovers();
-            app.recovery_writer = app.recovery.dir.clone().map(recovery::RecoveryWriter::start);
+            step("メニュー", &mut |app| app.os_menu = app_menu_macos::install(&cc.egui_ctx));
+            step("音の装置", &mut |app| app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx));
+            step("復旧ファイルの用意", &mut |app| {
+                app.recovery.dir = recovery::default_recovery_dir();
+                app.recovery.find_leftovers();
+                app.recovery_writer = app.recovery.dir.clone().map(recovery::RecoveryWriter::start);
+            });
             // Windows のログアウト・再起動・シャットダウンでも、止められる前に復旧ファイルを書く（winit はその知らせを受け
             // 取らないので、窓の受け口を包む）
             #[cfg(target_os = "windows")]
-            {
+            step("終わるときの控え", &mut |app| {
                 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Some(RawWindowHandle::Win32(w)) = cc.window_handle().ok().map(|h| h.as_raw()) {
                     if let Some(writer) = app.recovery_writer.clone() {
                         session_end_windows::install(w.hwnd.get(), writer, app.tab_copies.clone());
                     }
                 }
-            }
+            });
             Ok(Box::new(app))
         }),
     )
@@ -225,6 +234,8 @@ pub(crate) struct Is2dApp {
     pub(crate) recovery_writer: Option<recovery::RecoveryWriter>,
     /// 先読みの係（次に見るセル画の写しを、裏で作って持つ：`prefetch`）
     pub(crate) prefetch: prefetch::Prefetch,
+    /// 砦の外まで止まって終わった裏のスレッドの記録を、どこまで読んだか（毎コマ読んで知らせる）
+    pub(crate) stopped_threads: vector_engine::StoppedThreads,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
     pub(crate) canvas_rect: egui::Rect,
     /// OS のメニューバーの「ファイル」「編集」「表示」（Mac。起動のときに作る。テストでは作らない）
@@ -254,6 +265,7 @@ impl Default for Is2dApp {
             tab_copies: recovery::TabCopies::default(),
             recovery_writer: None,
             prefetch: prefetch::Prefetch::default(),
+            stopped_threads: vector_engine::StoppedThreads::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
             os_menu: None,
@@ -456,7 +468,10 @@ impl Is2dApp {
             ));
             return;
         };
-        self.video_export = Some(video_export::VideoExportJob::start(doc, path));
+        match video_export::VideoExportJob::start(doc, path) {
+            Ok(job) => self.video_export = Some(job),
+            Err(e) => self.notify_warning(format!("書き出しを始められませんでした（{e}）")),
+        }
     }
 
     fn finish_video_export_outcome(
@@ -746,54 +761,65 @@ impl Is2dApp {
                 return;
             }
         }
-        // 道具の入力は、砦の中で受ける（途中で止まったら、その入力を無かったことにする：`with_tool_input`）
-        let tool = self.tool.tool;
-        doc_actions::with_tool_input(self, |input| {
-            if tool == Tool::Eyedropper {
-                let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
-                    || response.dragged_by(egui::PointerButton::Primary)
-                    || response.clicked_by(egui::PointerButton::Primary);
-                if sampling {
-                    if let Some(pt) = mouse_pt {
-                        tool_paint::pick_color_at(input, pt);
-                    }
+        if self.tool.tool == Tool::Eyedropper {
+            let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
+                || response.dragged_by(egui::PointerButton::Primary)
+                || response.clicked_by(egui::PointerButton::Primary);
+            if sampling {
+                if let Some(pt) = mouse_pt {
+                    tool_paint::pick_color_at(self, pt);
                 }
-                return;
             }
-            if !tool_allowed {
-                return;
-            }
-            match tool {
+        } else if tool_allowed {
+            match self.tool.tool {
                 Tool::Brush | Tool::Pencil | Tool::Eraser => {
-                    tool_paint::handle_brush_or_eraser_input(input, response, mouse_pt);
+                    tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
                 }
                 Tool::Bucket => {
-                    let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    let just_pressed =
+                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            let color = input.tool().brush_color;
-                            apply(input, Action::BucketFill { pt, color });
+                            let color = self.tool.brush_color;
+                            apply(self, Action::BucketFill { pt, color });
                         }
                     }
                 }
                 Tool::InkBottle => {
-                    let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    let just_pressed =
+                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            let stroke = input.tool().stroke;
-                            apply(input, Action::InkBottle { pt, stroke });
+                            let stroke = self.tool.stroke;
+                            apply(self, Action::InkBottle { pt, stroke });
                         }
                     }
                 }
                 Tool::Eyedropper => {}
                 Tool::Select => {
-                    tool_select::handle_select_tool_input(input, ui, response, mouse_pt);
+                    tool_select::handle_select_tool_input(self, ui, response, mouse_pt);
                 }
                 Tool::Transform => {
-                    tool_transform::handle_transform_tool_input(input, ui, response, mouse_pt);
+                    tool_transform::handle_transform_tool_input(self, ui, response, mouse_pt);
                 }
             }
-        });
+        }
+    }
+
+    /// 画面の1コマの仕事 `work` を、画面のスレッドの砦の中で走らせる（画面の仕事の入口はここ1つ：設計
+    /// claude/最後の砦を仕事の入口に置く設計.md）。途中で止まったら（panic）、そのコマを無かったことにする：タイムラインの
+    /// ドラッグを取り消し、止まった仕事の戻し方 `recover_from_panic`（画面の土台を捨てて作り直す・キャンバスのドラッグを取り
+    /// 消す・操作の途中なら操作の前に戻す・知らせる）を、これも砦の中で走らせ、次のコマから続ける。戻し方まで止まったら、
+    /// アプリの状態が分からないので、今の未保存のタブを復旧ファイルに書き終えてから終わる（設計審査 de92ceb の D-2）
+    pub(crate) fn run_frame(&mut self, work: impl FnOnce(&mut Self)) {
+        if vector_engine::guarded(|| work(self)).is_some() {
+            return;
+        }
+        self.timeline_ui.cancel_drag();
+        if vector_engine::guarded(|| doc_actions::recover_from_panic(self)).is_none() {
+            self.flush_recovery();
+            panic!("止まった仕事を戻す途中で、また止まった");
+        }
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -1077,6 +1103,14 @@ impl Is2dApp {
                 failed.join("」「")
             ));
         }
+        // 砦の外まで止まって終わった裏のスレッド（内部の不具合）を知らせる
+        let stopped = self.stopped_threads.take_new();
+        if !stopped.is_empty() {
+            self.notify_warning(format!(
+                "内部の不具合で、裏の仕事（{}）が止まりました。保存して、アプリを開き直してください",
+                stopped.join("・")
+            ));
+        }
     }
 
     /// 今のタブを、復旧ファイルに書き終えるまで待つ（確認なしに終わるとき・画面の処理で止まったとき）
@@ -1177,24 +1211,22 @@ fn load_notice_text(notices: &[timeline::LoadNotice]) -> Option<String> {
 
 impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 画面の処理の途中で止まったら（panic。文書を変える操作の中で止まったときは `apply` が操作の前に戻すので、ここへ来る
-        // のはそのほかの所）、落ちる前に、今の未保存のタブを復旧ファイルに書き終える（設計審査 de92ceb の D-2。書く道は裏の
-        // 書き手の1つ）。前は止まると、全部のタブの保存していない作業が消えた
-        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_ui(ctx))) {
-            self.flush_recovery();
-            std::panic::resume_unwind(e);
-        }
+        self.run_frame(|app| app.update_ui(ctx));
     }
 
     /// 確認なしに終わるときは、今の未保存のタブを書き終えてから書き手を止める。確認ありで終わる（保存するか捨てるかを
     /// 決めた）ときは、書いた復旧ファイルをみな消して止める
+    /// 終わるときの入口（砦の中。止まったら、書けなかったことを捨てて終わる。書き手はタブ1つ分ずつ砦の中で書くので、ふつう
+    /// ここへは来ない）
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if !self.allow_viewport_close {
-            self.flush_recovery();
-        }
-        if let Some(w) = self.recovery_writer.take() {
-            w.finish(self.allow_viewport_close);
-        }
+        let _ = vector_engine::guarded(|| {
+            if !self.allow_viewport_close {
+                self.flush_recovery();
+            }
+            if let Some(w) = self.recovery_writer.take() {
+                w.finish(self.allow_viewport_close);
+            }
+        });
     }
 }
 

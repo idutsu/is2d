@@ -32,11 +32,7 @@ impl Prefetch {
         if !self.started {
             self.started = true;
             let (tx, rx) = mpsc::channel();
-            self.tx = std::thread::Builder::new()
-                .name("is2d-prefetch".to_owned())
-                .spawn(move || work(&rx))
-                .ok()
-                .map(|_| tx);
+            self.tx = crate::vector_engine::spawn_guarded("is2d-prefetch", move || work(&rx)).ok().map(|_| tx);
         }
         if let Some(tx) = &self.tx {
             if tx.send(maps.clone()).is_err() {
@@ -50,7 +46,8 @@ impl Prefetch {
 /// 係の仕事：渡された一覧のうち、まだ作っていない地図の写しを順に作って持つ。新しい一覧が来たら、それに替える
 fn work(rx: &mpsc::Receiver<Vec<ScopeMap>>) {
     let mut want: Vec<ScopeMap> = Vec::new();
-    let mut held: Vec<(ScopeMap, Arc<LayerBase>)> = Vec::new();
+    // 持つ写し（作る途中で止まった地図は `None`：作り直さずに飛ばす。見る瞬間に画面のスレッドが作る）
+    let mut held: Vec<(ScopeMap, Option<Arc<LayerBase>>)> = Vec::new();
     loop {
         let todo = want.iter().position(|m| !held.iter().any(|(h, _)| h.same(m)));
         let next = match todo {
@@ -70,7 +67,8 @@ fn work(rx: &mpsc::Receiver<Vec<ScopeMap>>) {
                 want = list;
             }
             (None, Some(i)) => {
-                let base = prefetched(&want[i]);
+                // 地図1つが仕事の単位（止まったら、その地図を飛ばす）
+                let base = crate::vector_engine::guarded(|| prefetched(&want[i]));
                 held.push((want[i].clone(), base));
             }
             (None, None) => return,

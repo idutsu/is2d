@@ -834,7 +834,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     // クリップボードを書くかを並べず、いつも写しておく（写すのは中身の `Arc` と移植の控えの表だけ。前は貼り付けの移植の
     // 控えだけを戻し、ずらしとカットの中身は進んだままだった：約束の棚卸し 5616fcc の A の P-16）
     let prev_clipboard = host.parts_mut().2.clone();
-    // 操作の途中で止まったら（panic）、その操作を無かったことにする（`restore_after_panic`）
+    // 操作の途中で止まったら（panic）、その操作を無かったことにする（`recover_from_panic`）
     // 入口が先に貼り戻したか（操作が断った・何もしなかったときは、この貼り戻しも戻す）
     let commits_first =
         policy.floating == FloatingUse::CommitFirst && host.tab().session.floating().is_some();
@@ -940,22 +940,13 @@ fn restore_state_before_action(tab: &mut Tab) {
     tab.session.refusal = None;
 }
 
-/// 計算の途中で止まったら（panic：計算の前提が破れた）受け止めて `None` を返す（最後の砦。操作を無かったことにする受け止めは
-/// この1つ。画面の処理の受け止め `Is2dApp::update` は、控えを書き終えてから落ちる別の役目）。使うのは、部屋の外に出す
-/// 入口のうち作品に触る計算を走らせるもの：入口 `apply`・道具の入力 `with_tool_input`・持ち上げた絵を置いた写しを作る
-/// `committed_document`・復旧の書き手のタブ1つ分の書き込み（設計審査 de92ceb の D-2・392e9af の D-1。
-/// 前は `apply` にしか無く、同じ計算が入口の外で止まるとアプリごと落ちた）。別のやり方へ逃げるのではなく、受け取った
-/// 所が「その操作を無かったことにする」（`recover_from_panic`、置けないのと同じ答え、そのタブを飛ばす）。何も止まらない
-/// ときの手間は無い
-pub(crate) fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
-}
+use crate::vector_engine::guarded;
 
-/// 止まった操作を無かったことにする（戻し方はこの1つ。入口 `apply` と道具の入力 `with_tool_input` が使う）：途中まで
+/// 止まった仕事を無かったことにする（戻し方はこの1つ。入口 `apply` と画面の毎コマの砦 `Is2dApp::run_frame` が使う）：途中まで
 /// 作り直したかもしれない画面の土台を捨て、ドラッグを取り消し、操作の前の状態に戻し（操作の前の写しがあれば：
 /// `restore_state_before_action`）、知らせる。文書は共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は
 /// 操作の前のまま。前は止まるとアプリが落ち、全部のタブの保存していない作業が消えた
-fn recover_from_panic(host: &mut impl ActionHost) {
+pub(crate) fn recover_from_panic(host: &mut impl ActionHost) {
     let (tab, _, _, toast) = host.parts_mut();
     tab.session.drop_scene_base();
     cancel_active_drag(tab);
@@ -967,68 +958,6 @@ fn recover_from_panic(host: &mut impl ActionHost) {
     );
 }
 
-/// 道具の入力（ブラシ・選択・変形のドラッグとクリック・スポイト）を受ける関数が受け取る通行証。作るのは砦の入口
-/// `with_tool_input` だけなので、砦を通らずに道具の計算（ドラッグ中の仮表示は、離したときと同じ地図の計算をする）を走らせる
-/// 道は、型で作れない（設計審査 392e9af の D-1）。作業の相手 `ActionHost` と同じに使える（中は包んだ相手そのもの）
-pub(crate) struct ToolInput<'a, H> {
-    host: &'a mut H,
-}
-
-/// 道具の入力の中にいる証し（通行証 `ToolInput::proof` からしか取れない）。道具の入力のためだけにある作業状態の関数
-/// （ドラッグ中の仮表示を作る・中心点を動かす）は、これを受け取るので、砦の外からは呼べない（設計審査 392e9af の D-1）
-#[derive(Clone, Copy)]
-pub(crate) struct ToolProof(());
-
-impl<H> ToolInput<'_, H> {
-    /// 道具の入力の中にいる証し
-    pub(crate) fn proof(&self) -> ToolProof {
-        ToolProof(())
-    }
-}
-
-impl<H: ActionHost> ActionHost for ToolInput<'_, H> {
-    fn tab(&self) -> &Tab {
-        self.host.tab()
-    }
-    fn tab_mut(&mut self) -> &mut Tab {
-        self.host.tab_mut()
-    }
-    fn tool(&self) -> &ToolSettings {
-        self.host.tool()
-    }
-    fn tool_mut(&mut self) -> &mut ToolSettings {
-        self.host.tool_mut()
-    }
-    fn clipboard_mut(&mut self) -> &mut Clipboard {
-        self.host.clipboard_mut()
-    }
-    fn toast_mut(&mut self) -> &mut Option<StatusToast> {
-        self.host.toast_mut()
-    }
-    fn parts_mut(&mut self) -> (&mut Tab, &mut ToolSettings, &mut Clipboard, &mut Option<StatusToast>) {
-        self.host.parts_mut()
-    }
-    fn stop_playback(&mut self) {
-        self.host.stop_playback();
-    }
-    fn restart_playback(&mut self) {
-        self.host.restart_playback();
-    }
-    fn dialog_shown(&self) -> bool {
-        self.host.dialog_shown()
-    }
-}
-
-/// 道具の入力を、砦の中で `f(通行証)` として受ける（部屋の外から道具の入力を受ける入口はこれ1つ）。途中で止まったら、
-/// その入力を無かったことにして（ドラッグを取り消す：`recover_from_panic`）`None`
-pub(crate) fn with_tool_input<H: ActionHost, R>(host: &mut H, f: impl FnOnce(&mut ToolInput<'_, H>) -> R) -> Option<R> {
-    let out = guarded(|| f(&mut ToolInput { host: &mut *host }));
-    if out.is_none() {
-        recover_from_panic(host);
-    }
-    out
-}
-
 fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
     let (tab, tool, clipboard, toast) = host.parts_mut();
 
@@ -1038,14 +967,14 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             radius,
             color,
         } => {
-            if points.is_empty() {
+            if points.is_empty() || !stroke_fits_grid(tab, &points, f64::from(radius)) {
                 return false;
             }
             let shapes = stroke_shapes_in_view(tab, &points, radius, color);
             apply_stroke_shapes(tab, Tool::Brush, shapes)
         }
         Action::EraseStroke { points, radius } => {
-            if points.is_empty() {
+            if points.is_empty() || !stroke_fits_grid(tab, &points, f64::from(radius)) {
                 return false;
             }
             let shapes = stroke_shapes_in_view(tab, &points, radius, tool.brush_color);
@@ -1061,6 +990,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         #[cfg(test)]
         Action::DrawLines { segs } => apply_draw_lines(tab, segs),
         Action::PencilStroke { points, stroke } => {
+            if !stroke_fits_grid(tab, &points, f64::from(stroke.width)) {
+                return false;
+            }
             let zoom = tab.view.zoom() as f64;
             let step = input_step(zoom, tab.view.pixels_per_point as f64);
             let segs = crate::vector_stroke::pencil_curves(&points, step, zoom)
@@ -1385,6 +1317,21 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
 
 /// ブラシ・消しゴムの点 `points`（ステージの座標）と半径から、線の形を作る。丸めの刻みと当てはめの許容は、今の表示の
 /// 倍率と画面の倍率で決める（描いている間の形と同じ：`tool_paint::handle_brush_or_eraser_input`）
+/// 点 `points` に太さ `reach` を足した範囲（線の形が収まる範囲）が、地図の格子に置けるか（決まりは `on_grid` の1つ）。
+/// 置けなければ「地図にできない形」と断る（`Refusal::OffGrid`）。線の形を作る前に確かめる（設計審査 392e9af の D-1 の
+/// 確かめで見つけた：前は確かめずに線の形を作り始め、座標がとても大きいと、形を作る計算がメモリを使い果たして固まった）
+fn stroke_fits_grid(tab: &mut Tab, points: &[Point], reach: f64) -> bool {
+    let corners = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
+    let fits = reach.is_finite()
+        && crate::planar_map::on_grid(
+            points.iter().flat_map(|&p| corners.iter().map(move |&(dx, dy)| p + KVec2::new(dx * reach, dy * reach))),
+        );
+    if !fits {
+        tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+    }
+    fits
+}
+
 fn stroke_shapes_in_view(
     tab: &Tab,
     points: &[Point],

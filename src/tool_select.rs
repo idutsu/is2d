@@ -7,7 +7,7 @@ use kurbo::{ParamCurve, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
-use crate::doc_actions::{apply, Action, ActionHost, ToolInput, ToolProof};
+use crate::doc_actions::{apply, Action, ActionHost};
 use crate::map_hover::scope_maps;
 use crate::planar_map::{reshape_result, LayerBase, ReshapeEdit};
 use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
@@ -129,7 +129,7 @@ fn draw_anchor_dot(tab: &Tab, painter: &egui::Painter, p: Point) {
 }
 
 pub(crate) fn handle_select_tool_input(
-    host: &mut ToolInput<'_, impl ActionHost>,
+    host: &mut impl ActionHost,
     ui: &egui::Ui,
     response: &egui::Response,
     mouse_pt: Option<Point>,
@@ -156,13 +156,13 @@ pub(crate) fn handle_select_tool_input(
                     start_reshape_drag(host, start_pt, shift_held, alt_held);
                     if let Some(curr_pt) = mouse_pt {
                         if crate::canvas_tool::View::moved_since_press(start_pt, curr_pt) {
-                            update_reshape_drag(host, curr_pt);
+                            update_reshape_drag(host.tab_mut(), curr_pt);
                         }
                     }
                 }
             } else if response.dragged_by(PointerButton::Primary) {
                 if let Some(pt) = mouse_pt {
-                    update_reshape_drag(host, pt);
+                    update_reshape_drag(host.tab_mut(), pt);
                 }
             }
             if response.drag_stopped_by(PointerButton::Primary) {
@@ -207,22 +207,21 @@ fn handle_anchor_edit_input(
 
 /// 地図での変形のドラッグを始める：レイヤー `layer_id` の地図から、ドラッグのあいだ使う元の地図と階層を作り、仮表示を空にする
 /// （選択は空のとき：呼ぶ側が先に外す。選択を外すのは `clear_selection` だけ）
-fn begin_map_drag(tab: &mut Tab, proof: ToolProof, layer_id: LayerId) -> Option<(Arc<LayerBase>, Vec<u64>)> {
+fn begin_map_drag(tab: &mut Tab, layer_id: LayerId) -> Option<(Arc<LayerBase>, Vec<u64>)> {
     let maps = scope_maps(tab.scene(), &tab.session);
     let lm = maps.maps.iter().find(|m| m.layer_id == layer_id)?;
     let (base, group_path) = (lm.base.clone(), lm.group_path.clone());
     tab.session
-        .set_reshape_overlay(proof, &[], Vec::new(), layer_id, &group_path);
+        .set_reshape_overlay(&[], Vec::new(), layer_id, &group_path);
     Some((base, group_path))
 }
 
 pub(crate) fn start_reshape_drag(
-    host: &mut ToolInput<'_, impl ActionHost>,
+    host: &mut impl ActionHost,
     pt: Point,
     shift_held: bool,
     alt_held: bool,
 ) {
-    let proof = host.proof();
     let sub_mode = host.tool().select_sub_mode;
     if shift_held {
         host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, true));
@@ -265,7 +264,7 @@ pub(crate) fn start_reshape_drag(
             ..
         } => {
             let tab = host.tab_mut();
-            let Some((base, group_path)) = begin_map_drag(tab, proof, layer_id) else {
+            let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
             let follow = drag_follows(tab);
@@ -285,7 +284,7 @@ pub(crate) fn start_reshape_drag(
             ..
         } => {
             let tab = host.tab_mut();
-            let Some((base, group_path)) = begin_map_drag(tab, proof, layer_id) else {
+            let Some((base, group_path)) = begin_map_drag(tab, layer_id) else {
                 return;
             };
             let grab_t = crate::planar_map::grab_t(t);
@@ -322,12 +321,10 @@ pub(crate) fn drag_follows(tab: &Tab) -> bool {
     !tab.view.show_wireframe
 }
 
-pub(crate) fn update_reshape_drag(host: &mut ToolInput<'_, impl ActionHost>, pt: Point) {
-    let proof = host.proof();
-    if update_selection_drag(host, pt) {
+pub(crate) fn update_reshape_drag(tab: &mut Tab, pt: Point) {
+    if update_selection_drag(tab, pt) {
         return;
     }
-    let tab = host.tab_mut();
     // 地図は文書の座標。マウスの位置は、変換の逆で文書の座標へ写す（ほかの頂点に吸い付かない。利用者が決めた）
     let xform = tab.session.edit_path().world_xform();
     // ドラッグ中も、離したときと同じ計算（交われば辺を切って色を決め直す）をして、その結果を見せる
@@ -380,10 +377,10 @@ pub(crate) fn update_reshape_drag(host: &mut ToolInput<'_, impl ActionHost>, pt:
     let (removed, added) =
         reshape_result(&base, edit, layer_id, &group_path, xform).unwrap_or_default();
     tab.session
-        .set_reshape_overlay(proof, &removed, added, layer_id, &group_path);
+        .set_reshape_overlay(&removed, added, layer_id, &group_path);
 }
 
-pub(crate) fn finish_reshape_drag(host: &mut ToolInput<'_, impl ActionHost>, mouse_pt: Option<Point>) {
+pub(crate) fn finish_reshape_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
     if finish_selection_drag(host, mouse_pt) {
         return;
     }

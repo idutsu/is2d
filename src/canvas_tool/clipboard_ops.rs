@@ -217,11 +217,10 @@ pub(in crate::canvas_tool) fn put_placements(tab: &mut Tab, placements: Vec<Plac
 
 /// 選択オブジェクトの移動ドラッグ（`Alt` 複製移動を含む）の初期状態を構築する共通ヘルパー
 pub(crate) fn begin_move_selection_drag(
-    host: &mut crate::doc_actions::ToolInput<'_, impl crate::doc_actions::ActionHost>,
+    tab: &mut Tab,
     pt: Point,
     alt_held: bool,
 ) -> MoveSelectionDrag {
-    let tab = crate::doc_actions::ActionHost::tab_mut(host);
     // 複製のときは、離したときと同じ写す中身（`duplicate_selected_in_working_copy` の `selected_content`）を作り、
     // 動かす生の絵はその生の図形の地図の絵（地図の決まりで、線は塗りの上）。中身は離したときに使い回す
     let (content, copy) = if alt_held {
