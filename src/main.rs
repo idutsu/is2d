@@ -5,10 +5,10 @@ mod audio_latency_macos;
 mod audio_out;
 mod canvas_tool;
 // 作業の部屋（`canvas_tool`）の中のファイルを、今までの名前で呼べるようにする
-use canvas_tool::{clipboard_ops, doc_actions, select_ops, symbol_ops};
 mod chunked_list;
 mod color_picker;
 mod floating;
+mod guard;
 mod map_hover;
 mod menu;
 mod panels;
@@ -18,9 +18,13 @@ mod project_io;
 mod recovery;
 mod recovery_journal;
 mod save_format;
+mod screen_mesh;
+mod serial;
 mod sound;
 mod stored_map;
+mod sync_cache;
 mod symbol;
+mod symbol_binding;
 mod timeline;
 mod timeline_ui;
 mod tool_paint;
@@ -45,13 +49,20 @@ use canvas_tool::{
     Clipboard, NoticeKind, SelectSubMode, Notices, Tab, Tool,
     ToolSettings,
 };
-use doc_actions::{apply, Action, ActionHost};
+use canvas_tool::doc_actions::{apply, Action, ActionHost};
 use panels::{ArrowDir, FrameEnd, RightPanelTab, UiAction, ZoomStep};
 use project_io::{PendingCloseConfirm, ProjectWorkspace};
 use timeline::EditBlock;
 use timeline_ui::{TimelineHost, TimelineUiState};
-#[cfg(test)]
-pub(crate) use vector_engine::FillShape;
+
+/// 知らせの描く文：取り消しの案内の印があれば、メニューの表から作った案内を付ける（`menu::undo_exit_text`）
+fn shown_notice_text(n: &canvas_tool::NoticeText) -> String {
+    if n.undo_exit {
+        format!("{}{}", n.text, menu::undo_exit_text())
+    } else {
+        n.text.clone()
+    }
+}
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -75,7 +86,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             let mut app = Is2dApp::default();
             let mut step = |name: &str, f: &mut dyn FnMut(&mut Is2dApp)| {
-                if vector_engine::guarded(|| f(&mut app)).is_none() {
+                if guard::guarded(|| f(&mut app)).is_none() {
                     app.notify_warning(format!("内部の不具合で、始めるときの「{name}」を飛ばしました"));
                 }
             };
@@ -238,7 +249,7 @@ pub(crate) struct Is2dApp {
     /// 出ている読み込みの知らせに足し合わせた、ファイルから読んだものの知らせ（知らせが消えたら捨てる）
     pub(crate) shown_load_notices: Vec<timeline::LoadNotice>,
     /// 砦の外まで止まって終わった裏のスレッドの記録を、どこまで読んだか（毎コマ読んで知らせる）
-    pub(crate) stopped_threads: vector_engine::StoppedThreads,
+    pub(crate) stopped_threads: guard::StoppedThreads,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
     pub(crate) canvas_rect: egui::Rect,
     /// OS のメニューバーの「ファイル」「編集」「表示」（Mac。起動のときに作る。テストでは作らない）
@@ -269,7 +280,7 @@ impl Default for Is2dApp {
             recovery_writer: None,
             prefetch: prefetch::Prefetch::default(),
             shown_load_notices: Vec::new(),
-            stopped_threads: vector_engine::StoppedThreads::default(),
+            stopped_threads: guard::StoppedThreads::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
             os_menu: None,
@@ -466,10 +477,7 @@ impl Is2dApp {
 
         // 浮いた片を置けなければ、画面に見えている片が入らない動画は書き出さない
         let Some(doc) = self.tab().committed_document_copy() else {
-            self.notify_warning(format!(
-                "選んだ図形を置けないため書き出せません。{}",
-                canvas_tool::undo_exit_text()
-            ));
+            self.notify_warning(canvas_tool::NoticeText::with_undo_exit("選んだ図形を置けないため書き出せません。"));
             return;
         };
         match video_export::VideoExportJob::start(doc, path) {
@@ -822,11 +830,11 @@ impl Is2dApp {
     /// 消す・操作の途中なら操作の前に戻す・知らせる）を、これも砦の中で走らせ、次のコマから続ける。戻し方まで止まったら、
     /// アプリの状態が分からないので、今の未保存のタブを復旧ファイルに書き終えてから終わる（設計審査 de92ceb の D-2）
     pub(crate) fn run_frame(&mut self, work: impl FnOnce(&mut Self)) {
-        if vector_engine::guarded(|| work(self)).is_some() {
+        if guard::guarded(|| work(self)).is_some() {
             return;
         }
         self.timeline_ui.cancel_drag();
-        if vector_engine::guarded(|| doc_actions::recover_from_panic(self)).is_none() {
+        if guard::guarded(|| canvas_tool::doc_actions::recover_from_panic(self)).is_none() {
             self.flush_recovery();
             panic!("止まった仕事を戻す途中で、また止まった");
         }
@@ -835,7 +843,7 @@ impl Is2dApp {
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
     fn current_state_notice(&self, tool_allowed: bool) -> Option<(NoticeKind, String)> {
         if self.tab().session.drag.unplaceable() {
-            return Some((NoticeKind::Warning, canvas_tool::Refusal::OffGrid.message()));
+            return Some((NoticeKind::Warning, shown_notice_text(&canvas_tool::Refusal::OffGrid.message())));
         }
         if tool_allowed {
             return None;
@@ -879,8 +887,9 @@ impl Is2dApp {
         self.notices.drop_expired(now);
         for toast in self.notices.iter() {
             ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
-            if !notices.iter().any(|(_, m)| m == &toast.message) {
-                notices.push((toast.kind, toast.message.clone()));
+            let text = shown_notice_text(&canvas_tool::NoticeText { text: toast.message.clone(), undo_exit: toast.undo_exit });
+            if !notices.iter().any(|(_, m)| m == &text) {
+                notices.push((toast.kind, text));
             }
         }
 
@@ -1242,7 +1251,7 @@ impl eframe::App for Is2dApp {
     /// 終わるときの入口（砦の中。止まったら、書けなかったことを捨てて終わる。書き手はタブ1つ分ずつ砦の中で書くので、ふつう
     /// ここへは来ない）
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = vector_engine::guarded(|| {
+        let _ = guard::guarded(|| {
             if !self.allow_viewport_close {
                 self.flush_recovery();
             }

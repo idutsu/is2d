@@ -7,10 +7,12 @@ use crate::canvas_tool::{
     editable_layer_ids, finish_cel_writes, reset_session_after_timeline_change, update_instances,
     write_cel, write_cels, Tab, View,
 };
-use crate::clipboard_ops::{
+use crate::canvas_tool::clipboard_ops::{
     content_xform, prepare_placement, put_placements, selected_content, Content,
 };
-use crate::symbol::{EditLevel, SymbolDef, SymbolInstance, SymbolInstanceBinding};
+use crate::symbol::{EditLevel, SymbolDef};
+use crate::timeline::SymbolInstance;
+use crate::symbol_binding::SymbolInstanceBinding;
 use crate::timeline::{Cel, TimelineCellSelection};
 use crate::vector_engine::{invertible, union_bounding_boxes};
 
@@ -32,7 +34,7 @@ pub(in crate::canvas_tool) fn prepare_convert_selection_to_symbol(
     }
 
     // シンボルにできるのは、1つのレイヤーの中で選んだものだけ（グループ化と同じ決まり：`selected_single_layer_id`）
-    let target_lid = crate::select_ops::selected_single_layer_id(tab)?;
+    let target_lid = crate::canvas_tool::select_ops::selected_single_layer_id(tab)?;
     if !editable_layer_ids(tab).contains(&target_lid) {
         return None;
     }

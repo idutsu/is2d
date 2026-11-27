@@ -1,13 +1,14 @@
 use crate::planar_map::{realized, CheckedMap, FaceKeep, LayerBase, PlanarMap};
 use crate::stored_map::{Relabeled, StoredMap};
 use crate::vector_engine::ShapeId;
-use crate::vector_engine::{FillShape, SymbolInstanceBinding};
+use crate::vector_engine::FillShape;
+use crate::symbol_binding::SymbolInstanceBinding;
 use kurbo::{Affine, Point};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex, OnceLock, PoisonError, Weak,
     },
 };
@@ -21,7 +22,6 @@ pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct KeyframeId(u64);
 
-static NEXT_KEYFRAME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// コマに見えている絵の見分け：どのキーフレームの絵か（`KeyframeId`）と、トゥイーンの中割りの絵か（中割りのコマは、
 /// キーフレームの絵そのものではない）。選択は、選んだときに見えていた絵を覚え、見える絵が変わったら外れる
@@ -33,7 +33,7 @@ pub(crate) struct ShownPicture {
 
 impl KeyframeId {
     fn fresh() -> Self {
-        Self(NEXT_KEYFRAME_ID.fetch_add(1, Ordering::Relaxed))
+        Self(crate::serial::next_keyframe_id())
     }
 }
 
@@ -406,7 +406,7 @@ impl UncheckedMaps {
             };
             if let Some(m) = m.upgrade() {
                 // 地図1つが仕事の単位（止まったら、その地図を飛ばす。使うときに画面のスレッドで確かめる）
-                if crate::vector_engine::guarded(|| {
+                if crate::guard::guarded(|| {
                     m.get();
                 })
                 .is_some()
@@ -584,7 +584,7 @@ impl ScopeMap {
                     |id| {
                         *fresh
                             .entry(id)
-                            .or_insert_with(crate::vector_engine::next_shape_id)
+                            .or_insert_with(crate::serial::next_shape_id)
                     },
                     tiles,
                 )
@@ -657,7 +657,7 @@ impl Default for Cel {
         Self {
             maps: Arc::new(Vec::new()),
             instances: Arc::new(Vec::new()),
-            revision: crate::vector_engine::next_mesh_revision(),
+            revision: crate::serial::next_mesh_revision(),
         }
     }
 }
@@ -924,7 +924,7 @@ impl Cel {
         instances.shrink_to_fit();
         self.maps = Arc::new(maps);
         self.instances = Arc::new(instances);
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
     }
 
     /// 階層 `scope`（とその中）の、番号が `faces` の面を地図から外し（外した所は何も無い所になる）、番号が `instances` の
@@ -1184,7 +1184,7 @@ impl Cel {
 
     #[inline]
     pub(crate) fn instances_mut(&mut self) -> &mut Vec<SymbolInstance> {
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
         Arc::make_mut(&mut self.instances)
     }
 
@@ -1198,7 +1198,7 @@ impl Cel {
                 *gid = f(*gid);
             }
         }
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
     }
 
     /// 面の図形の番号を、みな新しい番号にする（キーフレームを写したとき。同じコマに同じ番号の図形が2つ出ないように）。
@@ -1210,7 +1210,7 @@ impl Cel {
         for m in Arc::make_mut(&mut self.maps) {
             m.renew_labels(r);
         }
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
     }
 
     /// テスト用：重なりの順の中身 `parts`（生の図形は新しい図形でよい）をセル画にする（図形から地図を作る：
@@ -1520,7 +1520,7 @@ impl Cel {
         match at {
             Some(i) => {
                 Arc::make_mut(&mut self.maps)[i] = m;
-                self.revision = crate::vector_engine::next_mesh_revision();
+                self.revision = crate::serial::next_mesh_revision();
             }
             None => {
                 let mut items = Self::items_of(&self.maps, &self.instances);

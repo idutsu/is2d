@@ -33,11 +33,11 @@ impl From<crate::planar_map::LocalRefusal> for Refusal {
 }
 
 impl Refusal {
-    /// 画面の下に出す知らせ
-    pub(crate) fn message(self) -> String {
-        match self {
+    /// 画面に出す知らせ（置けないときは、取り消しの案内を付けて描く）
+    pub(crate) fn message(self) -> crate::canvas_tool::NoticeText {
+        let text = match self {
             Refusal::OffGrid => "地図の範囲（±65,536px）の外や、潰れるほど小さくには置けません".to_owned(),
-            Refusal::Unplaceable => format!("選んだ図形をここに置けません。{}", undo_exit_text()),
+            Refusal::Unplaceable => return crate::canvas_tool::NoticeText::with_undo_exit("選んだ図形をここに置けません。"),
             Refusal::Unwritable => "この編集の結果を地図にできないので、何も変えていません".to_owned(),
             Refusal::UnderLifted => "持ち上げている絵の下の絵には書けないので、何も変えていません".to_owned(),
             Refusal::BlankPicture => "壊れていて表示できない絵には書けないので、何も変えていません".to_owned(),
@@ -47,18 +47,9 @@ impl Refusal {
             Refusal::CelForm(crate::timeline::CelFormError::Tangled) => {
                 "この編集の結果をセル画にできないので、何も変えていません".to_owned()
             }
-        }
+        };
+        text.into()
     }
-}
-
-/// 持ち上げた絵を置けないときの出口の案内（確定を断ったとき・保存や書き出しを断るときの知らせに付ける）。出口は、もと
-/// からある取り消し：取り消しは確定を断られたときも効き、動かす前に戻る（新しい操作は作らない：持ち主が決めた
-/// 2026-11-27。審査 5616fcc の D-2）。キーは表から出す
-pub(crate) fn undo_exit_text() -> String {
-    let keys = crate::menu::keys_text(|a| {
-        matches!(a, crate::panels::UiAction::Doc(crate::doc_actions::Action::Undo))
-    });
-    format!("取り消し（{keys}）で動かす前に戻せます")
 }
 
 /// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内・非トゥイーン途中）な全レイヤーID一覧を背面→前面順で返す
@@ -186,7 +177,7 @@ pub(in crate::canvas_tool) fn update_instances(
     tab: &mut Tab,
     layer_ids: &[LayerId],
     pick: impl Fn(u64) -> bool,
-    f: impl Fn(&mut crate::vector_engine::SymbolInstanceBinding),
+    f: impl Fn(&mut crate::symbol_binding::SymbolInstanceBinding),
 ) -> bool {
     write_cels(tab, layer_ids, |_, cel, _| {
         cel.update_instances(&pick, &f).map_err(|_| Refusal::OffGrid)

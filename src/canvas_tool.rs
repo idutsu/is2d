@@ -8,10 +8,11 @@ use kurbo::{Affine, Point, QuadBez, Rect as KRect, Vec2 as KVec2};
 
 use crate::map_hover::ScopeMaps;
 use crate::planar_map::LayerBase;
-pub(crate) use crate::symbol::Document;
+use crate::symbol::Document;
 use crate::symbol::{EditPath, Library, SymbolDef, SymbolEvalCtx, SymbolEvalState};
 use crate::timeline::{Timeline, TimelineCellSelection};
-use crate::vector_engine::{FillShape, LayerId, ShapeId, SyncCache};
+use crate::vector_engine::{FillShape, LayerId, ShapeId};
+use crate::sync_cache::SyncCache;
 
 pub(crate) const MAX_UNDO_HISTORY: usize = 100;
 const DEFAULT_TOAST_DURATION: Duration = Duration::from_millis(2800);
@@ -36,9 +37,40 @@ pub(crate) enum NoticeKind {
 pub(crate) struct StatusToast {
     pub(crate) kind: NoticeKind,
     pub(crate) message: String,
+    /// 取り消しの案内を付けて描くか（`NoticeText::undo_exit`）
+    pub(crate) undo_exit: bool,
     pub(crate) expires_at: Instant,
     /// 書き直す知らせの見分け（同じ見分けの知らせは、足さずに文を書き直す：読み込みの知らせを「ほか N か所」にまとめる）
     key: Option<NoticeKey>,
+}
+
+/// 知らせの文（何が起きたか）と、取り消しの案内を付けて描くか。案内の文（「取り消し（キー）で動かす前に戻せます」）は、
+/// 知らせを描く画面がメニューの表から作って付ける（`menu::undo_exit_text`。作業の部屋はメニューの表を使わない：設計
+/// claude/層の分け方の直しの設計.md の 6.。前はここで表を読み、3層めが4層めを使っていた）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NoticeText {
+    pub(crate) text: String,
+    pub(crate) undo_exit: bool,
+}
+
+impl NoticeText {
+    /// 取り消しの案内を付けて描く知らせ（持ち上げた絵を置けないとき：出口は、もとからある取り消し。持ち主が決めた
+    /// 2026-11-27。審査 5616fcc の D-2）
+    pub(crate) fn with_undo_exit(text: impl Into<String>) -> Self {
+        Self { text: text.into(), undo_exit: true }
+    }
+}
+
+impl From<String> for NoticeText {
+    fn from(text: String) -> Self {
+        Self { text, undo_exit: false }
+    }
+}
+
+impl From<&str> for NoticeText {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
 }
 
 /// 書き直す知らせの見分け
@@ -72,11 +104,13 @@ impl Notices {
         self.items.retain(|t| now < t.expires_at);
     }
 
-    /// 知らせを足す（同じ見分けの知らせがあれば文を書き直し、同じ文があれば1つにまとめる。どちらも出ている時間を延ばす）
-    fn push(&mut self, kind: NoticeKind, message: String, key: Option<NoticeKey>) {
+    /// 知らせを足す（同じ見分けの知らせがあれば文を書き直し、同じ文（と案内の印）があれば1つにまとめる。どちらも出ている
+    /// 時間を延ばす）
+    fn push(&mut self, kind: NoticeKind, message: NoticeText, key: Option<NoticeKey>) {
         let expires_at = Instant::now() + DEFAULT_TOAST_DURATION;
-        self.items.retain(|t| !(key.is_some() && t.key == key) && t.message != message);
-        self.items.push(StatusToast { kind, message, expires_at, key });
+        let NoticeText { text, undo_exit } = message;
+        self.items.retain(|t| !((key.is_some() && t.key == key) || (t.message == text && t.undo_exit == undo_exit)));
+        self.items.push(StatusToast { kind, message: text, undo_exit, expires_at, key });
     }
 }
 
@@ -507,7 +541,7 @@ impl View {
     /// ワールド座標 `p` を現在のズーム・パンに応じたスクリーン座標 `Pos2` へ変換する
     #[inline]
     pub(crate) fn world_to_screen(&self, p: Point) -> Pos2 {
-        crate::vector_engine::to_screen(p.x as f32, p.y as f32, self.zoom, self.pan)
+        crate::screen_mesh::to_screen(p.x as f32, p.y as f32, self.zoom, self.pan)
     }
 
     /// スクリーン座標 `pos` を現在のズーム・パンに応じたワールド座標 `Point` へ逆変換する
@@ -807,7 +841,7 @@ impl View {
 #[derive(Clone, Default)]
 pub(crate) struct Clipboard {
     /// コピー / カットした中身（地図とインスタンス。階層の番号の並びは、写した所からの相対）
-    pub(crate) content: Option<crate::clipboard_ops::Content>,
+    pub(crate) content: Option<crate::canvas_tool::clipboard_ops::Content>,
     /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用。書くのは `set_source` だけ）
     source_doc_id: u64,
     /// コピー元のタブの番号が、もういない（閉じた・作品を入れ替えた）か（`forget_tab`・`set_source`）
@@ -953,11 +987,10 @@ pub(crate) mod doc_actions;
 pub(crate) mod select_ops;
 pub(crate) mod symbol_ops;
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;
 pub(crate) use self::cel_writes::*;
 
-pub(crate) use crate::vector_engine::CelTint;
+use crate::screen_mesh::CelTint;
 pub(crate) use scene_base_cache::SceneBaseCache;
 use scene_base_cache::{CelMeshCache, CelScope};
 
@@ -1273,7 +1306,7 @@ impl<'a> Scene<'a> {
     ) -> Option<usize> {
         self.topmost_shape_at(pt, &session.editing_group_path)
             .or_else(|| {
-                crate::select_ops::compute_hover_target(self, session, pt, zoom, sub_mode)
+                crate::canvas_tool::select_ops::compute_hover_target(self, session, pt, zoom, sub_mode)
                     .shape_id()
                     .and_then(|id| self.index_of_shape_id(id))
             })
@@ -1404,7 +1437,7 @@ impl<'a> Scene<'a> {
     pub(in crate::canvas_tool) fn selected_single_symbol_binding(
         self,
         selection: &Selection,
-    ) -> Option<crate::symbol::SymbolInstanceBinding> {
+    ) -> Option<crate::symbol_binding::SymbolInstanceBinding> {
         if !selection.shapes.is_empty() || selection.instances.len() != 1 {
             return None;
         }
@@ -1444,8 +1477,8 @@ impl<'a> Scene<'a> {
     }
 }
 
-pub(crate) use crate::floating::{Floating, FloatingView};
-pub(crate) use crate::floating::Stage;
+use crate::floating::{Floating, FloatingView};
+use crate::floating::Stage;
 
 /// 親の背景を描く文書の写し：（鍵, 浮いた片を確定した後の文書。確定できなければ `None`）
 /// 親の背景を描く文書の写しと、その鍵（浮いた片の番号・ライブラリの版・見ている場所）
@@ -1519,7 +1552,7 @@ struct DropAhead {
     /// 浮いた片の確定の計画（複製：`plan_commit`）
     commit: Option<CommitPlan>,
     /// 写す中身（複製：`clipboard_ops::selected_content`）
-    content: Option<crate::clipboard_ops::Content>,
+    content: Option<crate::canvas_tool::clipboard_ops::Content>,
     /// 複製のドラッグ中の確定した絵：確定の答えの地図の写し（`LayerBase::written_view`）と、その地図の図形の画面の写し
     /// （レイヤー, 元の地図の図形, 画面の写し）。離したとき、書き戻しは同じ写しを使い（`LayerBase::of_local`）、画面の
     /// 土台は同じ画面の写しを使い回す（`SceneBaseCache::offer`）
@@ -1751,7 +1784,7 @@ impl Session {
         &mut self,
         stage: &Stage,
         alt_duplicate: bool,
-        content: Option<crate::clipboard_ops::Content>,
+        content: Option<crate::canvas_tool::clipboard_ops::Content>,
         copy: Vec<FillShape>,
     ) {
         if alt_duplicate {
@@ -1831,7 +1864,7 @@ impl Session {
     }
 
     /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
-    pub(in crate::canvas_tool) fn take_ahead_content(&mut self, stage: &Stage) -> Option<crate::clipboard_ops::Content> {
+    pub(in crate::canvas_tool) fn take_ahead_content(&mut self, stage: &Stage) -> Option<crate::canvas_tool::clipboard_ops::Content> {
         let ahead = self.drop_ahead.as_ref()?;
         if !self.ahead_holds(ahead, self.floating.as_deref(), stage) {
             return None;
@@ -2620,13 +2653,13 @@ impl Default for ToolSettings {
 }
 
 /// キャンバス左上に一定時間自動で消える知らせを足す（知らせを足すのはここ1つ：`Notices::push`）
-pub(in crate::canvas_tool) fn show_notice(notices: &mut Notices, kind: NoticeKind, message: impl Into<String>) {
+pub(in crate::canvas_tool) fn show_notice(notices: &mut Notices, kind: NoticeKind, message: impl Into<NoticeText>) {
     notices.push(kind, message.into(), None);
 }
 
 /// 見分け `key` の知らせを、文 `message` に書き直す（無ければ足す）
 pub(crate) fn show_keyed_notice(notices: &mut Notices, key: NoticeKey, kind: NoticeKind, message: String) {
-    notices.push(kind, message, Some(key));
+    notices.push(kind, message.into(), Some(key));
 }
 
 // ============================================================================
@@ -3263,7 +3296,7 @@ impl Tab {
             return false;
         }
         while self.session.edit_path.levels.iter().any(|lvl| lvl.symbol_id == sym_id) {
-            if !crate::symbol_ops::exit_symbol_timeline(self) {
+            if !crate::canvas_tool::symbol_ops::exit_symbol_timeline(self) {
                 return false;
             }
         }

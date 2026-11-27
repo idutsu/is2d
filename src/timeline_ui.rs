@@ -4,9 +4,9 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 
 use crate::audio_out::AudioOut;
 use crate::canvas_tool::{cancel_active_drag, CoalesceKey, Tab};
-use crate::doc_actions::{apply, Action, ActionHost};
+use crate::canvas_tool::doc_actions::{apply, Action, ActionHost};
 use crate::sound::{frames_to_sound, SoundEdge};
-use crate::symbol::TweenState;
+use crate::timeline::TweenState;
 use crate::timeline::{Layer, TimelineCellSelection};
 
 #[cfg(test)]

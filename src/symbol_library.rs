@@ -379,7 +379,7 @@ impl Library {
             def.height = height;
             def.dynamic = dynamic;
             if first && (bump_start || id != start) {
-                def.revision = crate::vector_engine::next_mesh_revision();
+                def.revision = crate::serial::next_mesh_revision();
             }
             let is_deep = height > MAX_SYMBOL_NEST_DEPTH;
             if was_deep != is_deep {

@@ -11,20 +11,21 @@ use crate::canvas_tool::{
     update_instances, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
     SelectSubMode, Notices, Tab, Tool, ToolSettings, UndoEntry,
 };
-use crate::clipboard_ops::{
+use crate::canvas_tool::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
     prepare_placement, put_placements, remap_timeline_ids, selected_content,
 };
 use crate::planar_map::{AnchorEdit, MapRule, ReshapeEdit};
-use crate::select_ops::{
+use crate::canvas_tool::select_ops::{
     apply_marquee_selection, compute_hover_target, enter_group_at, exit_current_group,
     prepare_arrange_selected, prepare_clear_active_frame_shapes, prepare_delete_selected_shapes,
     prepare_group_selected_shapes, prepare_ungroup_selected_shapes,
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
     ArrangeMode,
 };
-use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
-use crate::symbol_ops::{
+use crate::timeline::TweenRotate;
+use crate::symbol_binding::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
+use crate::canvas_tool::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
     prepare_swap_selected_instances, selected_single_symbol_info,
@@ -73,15 +74,15 @@ pub(crate) trait ActionHost {
         apply(self, Action::EndCoalesce { key: None });
     }
 
-    fn notify_error(&mut self, message: impl Into<String>) {
+    fn notify_error(&mut self, message: impl Into<crate::canvas_tool::NoticeText>) {
         show_notice(self.notices_mut(), NoticeKind::Error, message);
     }
 
-    fn notify_info(&mut self, message: impl Into<String>) {
+    fn notify_info(&mut self, message: impl Into<crate::canvas_tool::NoticeText>) {
         show_notice(self.notices_mut(), NoticeKind::Info, message);
     }
 
-    fn notify_warning(&mut self, message: impl Into<String>) {
+    fn notify_warning(&mut self, message: impl Into<crate::canvas_tool::NoticeText>) {
         show_notice(self.notices_mut(), NoticeKind::Warning, message);
     }
 }
@@ -889,7 +890,7 @@ fn restore_state_before_action(tab: &mut Tab) {
     tab.session.refusal = None;
 }
 
-use crate::vector_engine::guarded;
+use crate::guard::guarded;
 
 /// 止まった仕事を無かったことにする（戻し方はこの1つ。入口 `apply` と画面の毎コマの砦 `Is2dApp::run_frame` が使う）：途中まで
 /// 作り直したかもしれない画面の土台を捨て、ドラッグを取り消し、操作の前の状態に戻し（操作の前の写しがあれば：
@@ -988,7 +989,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         Action::Ungroup => prepare_ungroup_selected_shapes(tab),
         Action::Arrange { mode } => prepare_arrange_selected(tab, mode),
         Action::EnterGroupAt { pt } => enter_group_at(tab, pt),
-        Action::SelectConnectedAt { pt, add } => crate::select_ops::select_connected_at(tab, pt, add),
+        Action::SelectConnectedAt { pt, add } => crate::canvas_tool::select_ops::select_connected_at(tab, pt, add),
         Action::ExitGroupSteps { steps } => {
             let mut exited = false;
             for _ in 0..steps {
@@ -1491,7 +1492,7 @@ fn apply_draw_lines(tab: &mut Tab, segs: Vec<crate::planar_map::LineSeg>) -> boo
         .map(|(q, stroke)| (to_doc * q, stroke))
         .collect();
     // 引いた線は、新しい線のラベルを持つ（`line_label`）
-    let label = crate::vector_engine::next_shape_id();
+    let label = crate::serial::next_shape_id();
     let at = editing_target(tab, target_lid);
     write_local(tab, &at, |base, scope| {
         base.edit_local(&base.line_change(&segs, label), scope)

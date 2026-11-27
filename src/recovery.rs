@@ -204,7 +204,7 @@ impl RecoveryWriter {
             thread: Mutex::new(None),
         });
         let worker = shared.clone();
-        let handle = crate::vector_engine::spawn_guarded("is2d-recovery", move || run_writer(&worker))
+        let handle = crate::guard::spawn_guarded("is2d-recovery", move || run_writer(&worker))
             .map_err(|e| failed.push(WriteFailure { tab: None, why: format!("裏で控えを書く係を始められません：{e}") }))
             .ok();
         *shared.thread.lock().unwrap_or_else(PoisonError::into_inner) = handle;
@@ -330,7 +330,7 @@ impl WriterCore {
         for item in items {
             // タブ1つ分を砦の中で書く（途中で止まったら、そのタブだけを飛ばし（前に書けた控えは残る。次は全体を書き直す）、
             // ほかのタブは続けて書き、止まったことは画面に知らせる：設計審査 392e9af の D-1）
-            let res = crate::vector_engine::guarded(|| self.write_tab(item)).unwrap_or_else(|| {
+            let res = crate::guard::guarded(|| self.write_tab(item)).unwrap_or_else(|| {
                 if let Some(j) = self.journals.get_mut(&item.id) {
                     j.rewrite = true;
                 }

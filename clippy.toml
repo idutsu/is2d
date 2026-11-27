@@ -1,8 +1,8 @@
-# スレッドを始めるのは `vector_engine::spawn_guarded` の1つ（砦の中で走らせる。素のスレッドの始め方は禁じる：設計
+# スレッドを始めるのは `guard::spawn_guarded` の1つ（砦の中で走らせる。素のスレッドの始め方は禁じる：設計
 # claude/最後の砦を仕事の入口に置く設計.md）。範囲の中のスレッド（止まったら呼んだ側へ伝える）だけ、理由を書いて許す
 disallowed-methods = [
-    { path = "std::thread::spawn", reason = "スレッドは vector_engine::spawn_guarded で始める（砦の中で走らせる）" },
-    { path = "std::thread::Builder::spawn", reason = "スレッドは vector_engine::spawn_guarded で始める（砦の中で走らせる）" },
+    { path = "std::thread::spawn", reason = "スレッドは guard::spawn_guarded で始める（砦の中で走らせる）" },
+    { path = "std::thread::Builder::spawn", reason = "スレッドは guard::spawn_guarded で始める（砦の中で走らせる）" },
     { path = "std::thread::Builder::spawn_scoped", reason = "範囲の中のスレッドは、止まったら呼んだ側へ伝える所だけ（理由を書いて許す）" },
     { path = "std::thread::Scope::spawn", reason = "範囲の中のスレッドは、止まったら呼んだ側へ伝える所だけ（理由を書いて許す）" },
 ]

@@ -460,7 +460,7 @@ fn collect_voices(
         }
         if depth < crate::symbol::MAX_SYMBOL_NEST_DEPTH {
             // トゥイーンの途中は、絵と同じく、そのコマの結び付けのインスタンスだけ
-            let bindings: Vec<crate::vector_engine::SymbolInstanceBinding> =
+            let bindings: Vec<crate::symbol_binding::SymbolInstanceBinding> =
                 match layer.interpolated_tween_binding_at(frame) {
                     Some(b) => vec![b],
                     None => kf.cel.instances().iter().map(|i| i.binding).collect(),

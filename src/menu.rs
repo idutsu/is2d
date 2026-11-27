@@ -6,10 +6,10 @@
 use eframe::egui::{self, Key};
 
 use crate::canvas_tool::{active_scope_layer_id, Clipboard, Tab, View, ViewSwitch};
-use crate::doc_actions::Action;
+use crate::canvas_tool::doc_actions::Action;
 use crate::panels::{ArrowDir, FrameEnd, UiAction, ZoomStep};
 use crate::canvas_tool::{SelectSubMode, Tool};
-use crate::select_ops::ArrangeMode;
+use crate::canvas_tool::select_ops::ArrangeMode;
 use crate::panels::MOD_KEY;
 
 /// メニュー。`App` はアプリのメニュー（終了）：Mac では OS のアプリメニュー（「is2d」）に、Windows・Linux では窓の中の
@@ -694,6 +694,14 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
         UiAction::Doc(Action::Arrange { mode: ArrangeMode::ToBack }),
     ),
 ];
+
+/// 持ち上げた絵を置けないときの出口の案内（取り消しの案内の印のある知らせに、画面が付けて描く：`NoticeText::undo_exit`）。
+/// 出口は、もとからある取り消し：取り消しは確定を断られたときも効き、動かす前に戻る（新しい操作は作らない：持ち主が決めた
+/// 2026-11-27。審査 5616fcc の D-2）。キーは表から出す
+pub(crate) fn undo_exit_text() -> String {
+    let keys = keys_text(|a| matches!(a, UiAction::Doc(crate::canvas_tool::doc_actions::Action::Undo)));
+    format!("取り消し（{keys}）で動かす前に戻せます")
+}
 
 /// `is` に当たる項目のキー（メニューに出すものと出さないもの）を「 / 」で並べた文字（ボタンの吹き出しに出す。キーの決まりは
 /// 表の1か所）

@@ -486,7 +486,7 @@ impl VideoEncoder for MacosVideoEncoder<'_> {
         let (tx, rx) = mpsc::sync_channel::<()>(1);
         // OS から呼ばれる受け口（書き終えた知らせ。砦の中：設計 claude/最後の砦を仕事の入口に置く設計.md）
         let block = RcBlock::new(move || {
-            let _ = crate::vector_engine::guarded(|| {
+            let _ = crate::guard::guarded(|| {
                 let _ = tx.send(());
             });
         });

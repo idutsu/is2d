@@ -7,9 +7,9 @@ use crate::canvas_tool::{
     editable_layer_ids, sync_timeline_layer_from_canvas_selection, write_cels, ActiveCanvasDrag,
     HoverTarget, Scene, SelectSubMode, Session, Tab,
 };
-use crate::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
-use crate::doc_actions::{apply, Action, ActionHost};
-use crate::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
+use crate::canvas_tool::clipboard_ops::{prepare_placement, put_placements, Content, Placement};
+use crate::canvas_tool::doc_actions::{apply, Action, ActionHost};
+use crate::canvas_tool::symbol_ops::{enter_symbol_timeline, exit_symbol_timeline};
 use crate::vector_engine::{make_marquee_rect_shape, nearest_on_quad, rects_overlap, FillShape};
 use crate::vector_engine::{LayerId, ShapeId};
 
@@ -233,7 +233,7 @@ pub(crate) fn grab_and_move(host: &mut impl ActionHost, pt: Point, selected: boo
         return;
     }
     let tab = host.tab_mut();
-    let move_drag = crate::clipboard_ops::begin_move_selection_drag(tab, pt, alt);
+    let move_drag = crate::canvas_tool::clipboard_ops::begin_move_selection_drag(tab, pt, alt);
     tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
 }
 

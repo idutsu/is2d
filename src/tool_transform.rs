@@ -2,10 +2,10 @@ use eframe::egui::{self, Color32, CursorIcon, PointerButton, Pos2, Stroke, Vec2}
 use kurbo::{Affine, Point, Rect as KRect};
 
 use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
-pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
-use crate::clipboard_ops::begin_move_selection_drag;
-use crate::doc_actions::{apply, Action, ActionHost};
-use crate::select_ops::{
+use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
+use crate::canvas_tool::clipboard_ops::begin_move_selection_drag;
+use crate::canvas_tool::doc_actions::{apply, Action, ActionHost};
+use crate::canvas_tool::select_ops::{
     apply_click_selection, finish_selection_drag, handle_canvas_double_click, update_selection_drag,
 };
 use crate::vector_engine::{affine_rotate_around, affine_scale_around};
@@ -144,7 +144,7 @@ pub(crate) fn start_transform_drag(
             let hit_opt = scene.hit_shape_or_hover_at(&host.tab().session, pt, zoom, sub_mode);
             if let Some(hit_idx) = hit_opt {
                 let selected = host.tab().session.is_selected_at(hit_idx);
-                crate::select_ops::grab_and_move(host, pt, selected, alt_held);
+                crate::canvas_tool::select_ops::grab_and_move(host, pt, selected, alt_held);
             } else {
                 host.tab_mut().session.drag =
                     ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));

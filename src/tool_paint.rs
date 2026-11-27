@@ -2,8 +2,9 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
-use crate::doc_actions::{apply, topmost_visible_at, Action, ActionHost};
-use crate::vector_engine::{append_mesh, tessellate_raw_polygon, transform_mesh_to_screen};
+use crate::canvas_tool::doc_actions::{apply, topmost_visible_at, Action, ActionHost};
+use crate::screen_mesh::transform_mesh_to_screen;
+use crate::vector_engine::{append_mesh, tessellate_raw_polygon};
 use crate::vector_stroke::{input_step, stroke_preview_outline, CenterlineBuilder};
 
 // ============================================================================

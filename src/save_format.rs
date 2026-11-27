@@ -14,10 +14,9 @@ use crate::chunked_list::{Chunk, ChunkedList, Keyed};
 use crate::sound::SoundLibrary;
 use crate::stored_map::{ReadTiles, SavedStroke, SavedTile, TileReader, WriteTiles};
 use crate::symbol::Slot;
-use crate::symbol::{
-    ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
-    TweenRotate,
-};
+use crate::symbol::{Document, SymbolDef};
+use crate::timeline::{SymbolInstance, TweenRotate};
+use crate::symbol_binding::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
 use crate::timeline::MAX_LAYERS_PER_TIMELINE;
 use crate::timeline::{
     Cel, Keyframe, KeyframeList, Layer, SavedScopeMap, ScopeMap, Timeline, TimelineCellSelection,

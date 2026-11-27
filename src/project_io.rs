@@ -47,7 +47,7 @@ pub(crate) enum OpenProjectOutcome {
 // ============================================================================
 
 /// 複数タブ管理とプロジェクトI/O操作に必要なワークスペース機能を抽象化するトレイト
-pub(crate) trait ProjectWorkspace: crate::doc_actions::ActionHost {
+pub(crate) trait ProjectWorkspace: crate::canvas_tool::doc_actions::ActionHost {
     fn tabs(&self) -> &[Tab];
     fn tabs_mut(&mut self) -> &mut Vec<Tab>;
     fn active_index(&self) -> usize;
@@ -380,19 +380,21 @@ pub(crate) fn resolve_target_path(path: &Path) -> PathBuf {
 }
 
 
-/// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する
+/// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する。保存できなければ、知らせ（持ち上げた
+/// 絵を置けないときは、取り消しの案内の印つき）
 pub(crate) fn save_project_to_path(
     ws: &mut impl ProjectWorkspace,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<(), crate::canvas_tool::NoticeText> {
     prepare_active_tab_for_switch_or_save(ws);
 
     // 浮いた片を置いた文書を書く（置けなければ書かない：画面に見えている片が入らないファイルは作らない）
-    let doc = ws.tab().committed_document_copy().ok_or_else(|| {
-        format!("選んだ図形を置けないため保存できません。{}", crate::canvas_tool::undo_exit_text())
-    })?;
+    let doc = ws
+        .tab()
+        .committed_document_copy()
+        .ok_or_else(|| crate::canvas_tool::NoticeText::with_undo_exit("選んだ図形を置けないため保存できません。"))?;
     let target_path = resolve_target_path(path);
-    write_project_file(&target_path, &doc)?;
+    write_project_file(&target_path, &doc).map_err(crate::canvas_tool::NoticeText::from)?;
 
     // 別タブが同じファイルパスを開いていた場合、重複タブ化を防ぐため別タブ側のファイル紐付けを解除して未保存状態にする
     let active_idx = ws.active_index();

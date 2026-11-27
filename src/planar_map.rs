@@ -10,7 +10,8 @@ use eframe::egui::Color32;
 use kurbo::{Affine, ParamCurve, ParamCurveArclen, Point, QuadBez, Rect as KRect, Shape as KurboShape};
 
 use crate::stored_map::StoredMap;
-use crate::vector_engine::{nearest_on_quad, rects_overlap, Contour, FillShape, SyncCache};
+use crate::vector_engine::{nearest_on_quad, rects_overlap, Contour, FillShape};
+use crate::sync_cache::SyncCache;
 use crate::vector_engine::{LayerId, ShapeId};
 
 mod grid;
@@ -1107,7 +1108,7 @@ pub(crate) fn line_id_of(te: &crate::stored_map::TileEdge) -> Option<ShapeId> {
 /// （`LocalMap::relabeled_edges`）。前は新しい線の番号を形・線・側の番号から計算で振ったので、動かした線が持ち続ける
 /// 元の所の番号と、元の所に新しくできた同じ形の線の番号が同じになり、書き込みが断られた（レビュー de92ceb の N-1002）
 pub(crate) fn written_line_id(stroke: Option<EdgeStroke>, line_id: Option<ShapeId>) -> Option<ShapeId> {
-    stroke.map(|_| line_id.unwrap_or_else(|| LINE_ID_BIT | crate::vector_engine::next_shape_id()))
+    stroke.map(|_| line_id.unwrap_or_else(|| LINE_ID_BIT | crate::serial::next_shape_id()))
 }
 
 /// しまう形 `stored` の図形の番号：面の番号（色のある側に記した番号）と、線の番号（線を乗せた辺ごとの `line_id_of`。線の
@@ -3890,7 +3891,7 @@ fn face_ids(map: &PlanarMap, faces: &[MapFace], how: FaceIds) -> Vec<ShapeId> {
         .enumerate()
         .map(|(i, f)| match f.srcs[..] {
             [id] if holder.get(&id) == Some(&i) => id,
-            _ => crate::vector_engine::next_shape_id(),
+            _ => crate::serial::next_shape_id(),
         })
         .collect()
 }
@@ -3974,7 +3975,7 @@ impl CheckedMap {
             let mut fresh: IntMap<ShapeId, ShapeId> = IntMap::default();
             let mut renew = |src: &mut Option<ShapeId>| {
                 if let Some(id) = src {
-                    *id = *fresh.entry(*id).or_insert_with(crate::vector_engine::next_shape_id);
+                    *id = *fresh.entry(*id).or_insert_with(crate::serial::next_shape_id);
                 }
             };
             for ed in &mut c.map.edges {
@@ -4124,7 +4125,7 @@ impl LayerBase {
                 );
                 match keep {
                     Some(src) if kept.insert(src) => src,
-                    _ => crate::vector_engine::next_shape_id(),
+                    _ => crate::serial::next_shape_id(),
                 }
             })
             .collect()

@@ -5,12 +5,12 @@ use eframe::egui::{self, Color32, Mesh, Vec2};
 use kurbo::{Affine, Point};
 
 use crate::planar_map::LayerBase;
-#[cfg(test)]
-pub(crate) use crate::timeline::interpolate_affine_with_pivot;
 use crate::timeline::{Cel, Layer, Timeline};
-pub(crate) use crate::timeline::{ResolvedCelSig, SymbolInstance, TweenRotate, TweenState};
-use crate::vector_engine::{next_shape_id, union_bounding_boxes, Contour, FillShape, SyncCache};
-pub(crate) use crate::vector_engine::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
+use crate::timeline::{ResolvedCelSig, SymbolInstance};
+use crate::vector_engine::{union_bounding_boxes, Contour, FillShape};
+use crate::serial::next_shape_id;
+use crate::sync_cache::SyncCache;
+use crate::symbol_binding::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
 
 // ============================================================================
 // 1. シンボル定義（SymbolDef）・インスタンス紐付け・トゥイーン状態・編集セッション
@@ -397,7 +397,7 @@ impl SymbolDef {
             id,
             name,
             timeline,
-            revision: crate::vector_engine::next_mesh_revision(),
+            revision: crate::serial::next_mesh_revision(),
             children: Vec::new(),
             sounds: Vec::new(),
             height: 0,
@@ -417,7 +417,7 @@ impl SymbolDef {
 
     /// 新しい版にする（ライブラリに足す前の、別のシンボルにする写し：複製）
     pub(crate) fn renew_revision(&mut self) {
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
     }
 
     /// 中で使うシンボルの番号（小さい順）
@@ -687,13 +687,13 @@ impl Counter {
     /// ので、番号は決してぶつからない（2^64 個で、1秒に10億個配っても約580年。持ち主の了解：2026-11-27）
     pub(crate) fn take(&mut self) -> u64 {
         let id = self.0;
-        self.0 = id.checked_add(1).expect("作品の番号を使い切った");
+        self.0 = crate::serial::advanced(id, 1);
         id
     }
 
     /// 番号 `id` より先へ進める（よそから持ち込んだ番号を、これから配らない）
     pub(crate) fn advance_past(&mut self, id: u64) {
-        self.0 = self.0.max(id.checked_add(1).expect("作品の番号を使い切った"));
+        self.0 = self.0.max(crate::serial::advanced(id, 1));
     }
 }
 
@@ -806,7 +806,7 @@ impl Document {
             next_group_id,
             next_sound_id,
             next_layer_id,
-            revision: crate::vector_engine::next_mesh_revision(),
+            revision: crate::serial::next_mesh_revision(),
             load_notices: Default::default(),
         }
     }
@@ -952,12 +952,12 @@ impl Document {
         let maps = crate::timeline::UncheckedMaps::of(
             std::iter::once(&self.root).chain(self.library.iter_by_id().map(|s| &s.timeline)),
         );
-        crate::vector_engine::spawn_guarded("is2d-map-check", move || maps.check()).ok()
+        crate::guard::spawn_guarded("is2d-map-check", move || maps.check()).ok()
     }
 
     /// シンボルライブラリの世代番号 `revision` を一意な値へ更新する
     fn bump_revision(&mut self) {
-        self.revision = crate::vector_engine::next_mesh_revision();
+        self.revision = crate::serial::next_mesh_revision();
     }
 
     /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す（決まりは `DocParts::alloc_group_id` の1つ）
@@ -1389,33 +1389,5 @@ impl Timeline {
                     .collect()
             };
         (!batch.is_empty()).then_some((batch, shapes))
-    }
-
-    /// テスト用：指定レイヤー・フレームの描画用スクリーン `Arc<Mesh>` を、写しを使わずにその場で構築して返す（本番は
-    /// 写しから：`CelMeshCache::screen_mesh`。同じ `build_cel_world` と `tinted_screen_mesh`）
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolved_cel_screen_mesh(
-        &self,
-        layer_idx: usize,
-        frame: usize,
-        zoom: f32,
-        pan: Vec2,
-        dim_backdrop: bool,
-        world_xform: Affine,
-        ctx: SymbolEvalCtx<'_>,
-    ) -> Option<Arc<Mesh>> {
-        let (world_batch, _) = self.build_cel_world(layer_idx, frame, world_xform, None, ctx)?;
-        let tint = if dim_backdrop {
-            crate::vector_engine::CelTint::Dim
-        } else {
-            crate::vector_engine::CelTint::Plain
-        };
-        Some(Arc::new(crate::vector_engine::tinted_screen_mesh(
-            &world_batch,
-            zoom,
-            pan,
-            tint,
-        )))
     }
 }

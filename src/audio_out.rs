@@ -438,7 +438,7 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
         // claude/最後の砦を仕事の入口に置く設計.md。前は止まるとアプリごと落ちた）
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             let frames = data.len() / channels;
-            if crate::vector_engine::guarded(|| {
+            if crate::guard::guarded(|| {
                 stereo.resize(2 * frames, 0.0);
                 let ts = info.timestamp();
                 // 渡す分を装置が鳴らし始めるまで（cpal が知らせる）と、耳に届くまで
@@ -471,7 +471,7 @@ fn build<T: cpal::SizedSample + cpal::FromSample<f32>>(
         },
         // 装置が使えなくなった知らせの入口（止まったら、その知らせを捨てる）
         move |e| {
-            let _ = crate::vector_engine::guarded(|| fail.fail(e.to_string()));
+            let _ = crate::guard::guarded(|| fail.fail(e.to_string()));
         },
         None,
     )

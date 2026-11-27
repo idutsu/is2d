@@ -32,7 +32,7 @@ impl Prefetch {
         if !self.started {
             self.started = true;
             let (tx, rx) = mpsc::channel();
-            self.tx = crate::vector_engine::spawn_guarded("is2d-prefetch", move || work(&rx)).ok().map(|_| tx);
+            self.tx = crate::guard::spawn_guarded("is2d-prefetch", move || work(&rx)).ok().map(|_| tx);
         }
         if let Some(tx) = &self.tx {
             if tx.send(maps.clone()).is_err() {
@@ -68,7 +68,7 @@ fn work(rx: &mpsc::Receiver<Vec<ScopeMap>>) {
             }
             (None, Some(i)) => {
                 // 地図1つが仕事の単位（止まったら、その地図を飛ばす）
-                let base = crate::vector_engine::guarded(|| prefetched(&want[i]));
+                let base = crate::guard::guarded(|| prefetched(&want[i]));
                 held.push((want[i].clone(), base));
             }
             (None, None) => return,

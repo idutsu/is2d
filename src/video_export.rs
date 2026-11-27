@@ -264,10 +264,10 @@ impl VideoExportJob {
         let thread_target = target_path.clone();
         let thread_done = Arc::clone(&completed_frames);
         let thread_cancel = Arc::clone(&cancel_flag);
-        let handle = crate::vector_engine::spawn_guarded("is2d-video-export", move || {
+        let handle = crate::guard::spawn_guarded("is2d-video-export", move || {
             // 書き出しは砦の中（途中で止まったら、書き出しを断って知らせ、作りかけの一時ファイルを消す：設計審査 392e9af の
             // D-1。前は止まると書き出しの裏の仕事ごと終わり、一時ファイルが残った）
-            let res = crate::vector_engine::guarded(|| {
+            let res = crate::guard::guarded(|| {
                 run_video_export(&doc, &thread_target, &tmp_path, &thread_done, &thread_cancel)
             })
             .unwrap_or_else(|| VideoExportOutcome::Failed("内部の不具合で書き出しを続けられませんでした".to_owned()));

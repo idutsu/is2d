@@ -32,7 +32,7 @@ define_class!(
         fn choose_command(&self, sender: &NSMenuItem) {
             // OS から呼ばれる受け口（砦の中。OS をまたいで止まると強制終了になる。止まったら、その1回を捨てる：設計
             // claude/最後の砦を仕事の入口に置く設計.md）
-            let _ = crate::vector_engine::guarded(|| {
+            let _ = crate::guard::guarded(|| {
                 self.ivars().chosen.borrow_mut().push(sender.tag() as usize);
                 self.ivars().ctx.request_repaint();
             });

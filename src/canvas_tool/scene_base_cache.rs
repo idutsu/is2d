@@ -9,11 +9,12 @@ use eframe::egui::{self, Color32, Vec2};
 use kurbo::{Affine, Point};
 
 use crate::planar_map::LayerBase;
-use crate::symbol::{
-    compute_resolved_cel_signature, CelShape, Library, ResolvedCelSig, SymbolEvalCtx, SymbolLoopMode,
-};
+use crate::symbol::{compute_resolved_cel_signature, CelShape, Library, SymbolEvalCtx};
+use crate::timeline::ResolvedCelSig;
+use crate::symbol_binding::SymbolLoopMode;
 use crate::timeline::{Layer, Timeline};
-use crate::vector_engine::{tinted_screen_mesh, CelTint, FillShape};
+use crate::screen_mesh::{tinted_screen_mesh, CelTint};
+use crate::vector_engine::FillShape;
 use crate::vector_engine::{LayerId, ShapeId};
 
 /// 使い回してよい画面の写し1つ：（レイヤー, 元の地図の図形, 画面の写し）（`SceneBaseCache::offer`）

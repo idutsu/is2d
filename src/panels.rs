@@ -2,22 +2,21 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Stroke, Vec2};
 use kurbo::{Point, Rect as KRect};
 
 use crate::canvas_tool::{
-    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, CelTint, CoalesceKey,
+    active_scope_layer_id, draw_registration_cross, ActiveCanvasDrag, CoalesceKey,
     NoticeKind, SelectSubMode, Tab, Tool, ToolSettings, TransformDragState, ViewSwitch,
 };
-use crate::doc_actions::Action;
+use crate::canvas_tool::doc_actions::Action;
 #[cfg(not(target_os = "macos"))]
 use crate::menu::{ItemState, Menu, MenuCommand, COMMANDS, COMMAND_COUNT};
-use crate::select_ops::ArrangeMode;
-use crate::symbol::{
-    ColorEffect, SymbolDef, SymbolInstanceBinding, SymbolLoopMode, TweenRotate, STAGE_MAX,
-    STAGE_MIN,
-};
-use crate::symbol_ops::selected_single_symbol_info;
-pub(crate) use crate::timeline_ui::icons;
+use crate::canvas_tool::select_ops::ArrangeMode;
+use crate::symbol::{SymbolDef, STAGE_MAX, STAGE_MIN};
+use crate::timeline::TweenRotate;
+use crate::symbol_binding::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
+use crate::canvas_tool::symbol_ops::selected_single_symbol_info;
+use crate::timeline_ui::icons;
 use crate::timeline_ui::{coalesce_end, TimelineUiState};
 use crate::planar_map::STROKE_WIDTHS;
-use crate::vector_engine::transform_mesh_to_screen;
+use crate::screen_mesh::{shape_screen_mesh, transform_mesh_to_screen, CelTint};
 
 /// OS標準の修飾キー表記（macOS では `"Cmd"`、Windows / Linux では `"Ctrl"`）
 pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
@@ -810,7 +809,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
     equal_width_row(ui, 3, |ui, cell_w| {
         if ui
             .add_enabled(
-                crate::select_ops::selected_single_layer_id(tab).is_some(),
+                crate::canvas_tool::select_ops::selected_single_layer_id(tab).is_some(),
                 egui::Button::new("シンボル化").min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text(format!("選択中の図形をシンボルに変換してライブラリに登録します ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::ConvertToSymbol)))))
@@ -821,7 +820,7 @@ fn draw_symbol_and_group_section(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mu
         }
         if ui
             .add_enabled(
-                crate::select_ops::selected_single_layer_id(tab).is_some(),
+                crate::canvas_tool::select_ops::selected_single_layer_id(tab).is_some(),
                 egui::Button::new("グループ化").min_size(Vec2::new(cell_w, 28.0)),
             )
             .on_hover_text(format!("選択中のオブジェクトを1つのグループにまとめる ({})", crate::menu::keys_text(|a| matches!(a, UiAction::Doc(Action::Group)))))
@@ -1529,7 +1528,7 @@ fn draw_selected_library_symbol_controls(
     let tl = tab.active_timeline();
     let can_place = tab.can_place_symbol_in_current_context(sel_id)
         && tl.is_layer_editable_by_id(active_scope_layer_id(&tab.session, tl));
-    let can_swap = !crate::symbol_ops::swap_targets(tab, sel_id).is_empty();
+    let can_swap = !crate::canvas_tool::symbol_ops::swap_targets(tab, sel_id).is_empty();
     // 配置・編集・複製・削除・入替を、同じ幅で1行に並べる（ボタン、押せるか、説明、押せないときの説明、操作）
     let buttons = [
         (
@@ -2046,7 +2045,7 @@ fn draw_shapes_outside_group(
             .geometry_bounding_box()
             .is_some_and(|b| crate::vector_engine::rects_overlap(b, view_world_rect))
         {
-            artwork_painter.add(egui::Shape::mesh(shape.screen_mesh(zoom, pan, true)));
+            artwork_painter.add(egui::Shape::mesh(shape_screen_mesh(shape, zoom, pan, true)));
         }
     }
 }
@@ -2136,7 +2135,7 @@ fn draw_editable_layer_shapes(
             continue;
         }
 
-        artwork_painter.add(egui::Shape::mesh(shape.screen_mesh(zoom, pan, false)));
+        artwork_painter.add(egui::Shape::mesh(shape_screen_mesh(shape, zoom, pan, false)));
         if show_wf && raw {
             wire.add_shape(shape);
         }

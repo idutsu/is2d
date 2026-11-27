@@ -24,7 +24,8 @@ use crate::planar_map::{
     EdgeStroke, STROKE_WIDTHS,
     point_order, tile_edge, EdgeGeom, IntMap, LayerBase, MapEdge, PlanarMap, Poly,
 };
-use crate::vector_engine::{ShapeId, SyncCache};
+use crate::vector_engine::{ShapeId};
+use crate::sync_cache::SyncCache;
 
 /// 塊の升目の大きさ（文書の座標の px）。ブラシ1本・消しゴム1本で変わるのは、ふつう升目の数個分
 const TILE: f64 = 32.0;
@@ -1400,7 +1401,7 @@ impl TileReader {
         if read.broken || read.labels > read.sides {
             return None;
         }
-        let first = crate::vector_engine::new_shape_ids(read.labels);
+        let first = crate::serial::new_shape_ids(read.labels);
         let label = |n: Option<NonZeroU64>| n.and_then(|n| NonZeroU64::new(first + n.get() - 1));
         // 塊の並びは、ちょうどの大きさで1回だけ取る（押し足しで伸ばさない：`GrowingList`）
         let mut tiles = Vec::with_capacity(read.tiles.len());

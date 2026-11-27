@@ -60,12 +60,12 @@ unsafe extern "system" fn subclass_proc(
     match msg {
         // 終わってよいか：書いてから、よいと答える
         WM_QUERYENDSESSION => {
-            let _ = crate::vector_engine::guarded(|| write_once(hwnd, state));
+            let _ = crate::guard::guarded(|| write_once(hwnd, state));
             LRESULT(1)
         }
         // 終わる（wparam が 0 でない）なら、まだ書いていなければ書く。やめたなら、次の終わりに備える
         WM_ENDSESSION => {
-            let _ = crate::vector_engine::guarded(|| {
+            let _ = crate::guard::guarded(|| {
                 if wparam.0 != 0 {
                     write_once(hwnd, state);
                 } else {

@@ -7,24 +7,24 @@ use kurbo::{ParamCurve, Point, QuadBez, Rect as KRect};
 use crate::canvas_tool::{
     ActiveCanvasDrag, HoverTarget, MapOwner, MarqueeDrag, SelectDragState, SelectSubMode, Tab,
 };
-use crate::doc_actions::{apply, Action, ActionHost};
+use crate::canvas_tool::doc_actions::{apply, Action, ActionHost};
 use crate::map_hover::scope_maps;
 use crate::planar_map::{reshape_result, LayerBase, ReshapeEdit};
-use crate::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
-pub(crate) use crate::select_ops::{compute_hover_target, handle_canvas_double_click};
+use crate::canvas_tool::select_ops::{apply_click_selection, finish_selection_drag, update_selection_drag};
+use crate::canvas_tool::select_ops::{compute_hover_target, handle_canvas_double_click};
 use crate::vector_engine::{FillShape, LayerId};
 
 // ============================================================================
 // 選択ツール（Tool::Select / V キー）・輪郭変形・アンカー編集・グループ・クリップボード
 // ============================================================================
 
-/// 選んだ生の図形（画面の図形の番号 `picked`）を、選択の色で塗る（`FillShape::selection_screen_mesh`。同じ段の図形を描き
+/// 選んだ生の図形（画面の図形の番号 `picked`）を、選択の色で塗る（`screen_mesh::shape_selection_screen_mesh`。同じ段の図形を描き
 /// 終えた所で呼ぶ：`panels::draw_editable_layer_shapes`）
 pub(crate) fn draw_selection_overlays(tab: &Tab, painter: &egui::Painter, picked: &[usize]) {
     let scene = tab.scene();
     for &idx in picked {
         if let Some(shape) = scene.get(idx) {
-            painter.add(egui::Shape::mesh(shape.selection_screen_mesh(tab.view.zoom(), tab.view.pan)));
+            painter.add(egui::Shape::mesh(crate::screen_mesh::shape_selection_screen_mesh(shape, tab.view.zoom(), tab.view.pan)));
         }
     }
 }
@@ -237,7 +237,7 @@ pub(crate) fn start_reshape_drag(
     if alt_held {
         if let Some(shape_id) = target.shape_id() {
             let selected = host.tab().session.is_shape_id_selected(shape_id);
-            crate::select_ops::grab_and_move(host, pt, selected, true);
+            crate::canvas_tool::select_ops::grab_and_move(host, pt, selected, true);
             return;
         }
     }
@@ -305,7 +305,7 @@ pub(crate) fn start_reshape_drag(
         HoverTarget::Vertex { .. } | HoverTarget::Edge { .. } => {}
         HoverTarget::Fill { shape_id } => {
             let selected = host.tab().session.is_shape_id_selected(shape_id);
-            crate::select_ops::grab_and_move(host, pt, selected, false);
+            crate::canvas_tool::select_ops::grab_and_move(host, pt, selected, false);
         }
         HoverTarget::None => {
             host.tab_mut().session.drag = ActiveCanvasDrag::Marquee(MarqueeDrag::new(pt, false));

@@ -1,4 +1,4 @@
-use eframe::egui::{self, epaint::Vertex, Color32, Mesh, Pos2, Vec2};
+use eframe::egui::{self, epaint::Vertex, Color32, Mesh, Pos2};
 use kurbo::{
     Affine, BezPath, ParamCurve, Point, QuadBez, Rect as KRect, Shape as KurboShape, Vec2 as KVec2,
 };
@@ -6,143 +6,18 @@ use lyon_tessellation::{
     math::point as lyon_point, path::Path as LyonPath, BuffersBuilder, FillOptions, FillRule,
     FillTessellator, FillVertex, VertexBuffers,
 };
-use serde::{Deserialize, Serialize};
+
 use std::{
     borrow::Cow,
     cell::RefCell,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard, OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock},
 };
+
+use crate::serial::{next_mesh_revision, next_shape_id};
+use crate::symbol_binding::SymbolInstanceBinding;
 
 pub(crate) const MIN_VIEW_ZOOM: f32 = 0.15;
 pub(crate) const MAX_VIEW_ZOOM: f32 = 16.0;
-
-/// シンボルインスタンスのフレーム再生モード（Adobe Animate のグラフィックシンボル相当）
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub(crate) enum SymbolLoopMode {
-    /// ループ再生：キーフレーム開始位置からシンボル内部フレームを繰り返し再生する
-    #[default]
-    Loop,
-    /// 1回再生：キーフレーム開始位置からシンボル内部の最終フレームまで再生して停止する
-    PlayOnce,
-    /// 停止（コマ固定）：指定された `first_frame` の1コマだけを固定表示する
-    SingleFrame,
-}
-
-/// シンボルインスタンスの色効果（アルファ 0〜1、明度 -1〜1）
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct ColorEffect {
-    pub(crate) alpha: f32,
-    pub(crate) brightness: f32,
-}
-
-impl Default for ColorEffect {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            alpha: 1.0,
-            brightness: 0.0,
-        }
-    }
-}
-
-impl ColorEffect {
-    /// アルファ `alpha` と明度 `brightness` を範囲（アルファ 0〜1、明度 -1〜1）に収めた色効果。有限かは見ない（有限かを決める
-    /// のは、インスタンスを書く入口・ファイルを読む入口の判定 `SymbolInstanceBinding::is_finite` だけ）
-    #[inline]
-    pub(crate) fn new(alpha: f32, brightness: f32) -> Self {
-        Self {
-            alpha: alpha.clamp(0.0, 1.0),
-            brightness: brightness.clamp(-1.0, 1.0),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn lerp(self, other: Self, t: f64) -> Self {
-        let t = t.clamp(0.0, 1.0) as f32;
-        Self::new(
-            self.alpha + (other.alpha - self.alpha) * t,
-            self.brightness + (other.brightness - self.brightness) * t,
-        )
-    }
-
-    pub(crate) fn apply(self, c: Color32) -> Color32 {
-        let [r, g, b, a] = c.to_srgba_unmultiplied();
-        let br = self.brightness;
-        let apply_ch = |v: u8| -> u8 {
-            let vf = v as f32;
-            let out = if br >= 0.0 {
-                vf + (255.0 - vf) * br
-            } else {
-                vf * (1.0 + br)
-            };
-            out.round().clamp(0.0, 255.0) as u8
-        };
-        let out_a = (a as f32 * self.alpha).round().clamp(0.0, 255.0) as u8;
-        Color32::from_rgba_unmultiplied(apply_ch(r), apply_ch(g), apply_ch(b), out_a)
-    }
-}
-
-/// シンボルインスタンスに属するシェイプが持つ幾何変換・再生紐付け情報
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SymbolInstanceBinding {
-    pub(crate) instance_gid: u64,
-    pub(crate) symbol_id: u64,
-    pub(crate) xform: Affine,
-    /// シンボルローカル座標系での変形中心点（ピボット）。初期値は `Point::ZERO` `(0.0, 0.0)`
-    pub(crate) pivot: Point,
-    pub(crate) loop_mode: SymbolLoopMode,
-    pub(crate) first_frame: usize,
-    pub(crate) color_effect: ColorEffect,
-}
-
-impl SymbolInstanceBinding {
-    #[inline]
-    pub(crate) fn new(instance_gid: u64, symbol_id: u64, xform: Affine) -> Self {
-        Self {
-            instance_gid,
-            symbol_id,
-            xform,
-            pivot: Point::ZERO,
-            loop_mode: SymbolLoopMode::Loop,
-            first_frame: 0,
-            color_effect: ColorEffect::default(),
-        }
-    }
-
-    /// 数がみな有限か（変換・中心点・色効果）。インスタンスの受け入れの判定はこれ1つ：インスタンスを書く入口
-    /// （`Cel::update_instances`・`Cel::insert_content`）、置く準備（`Cel::transformed`）、ファイルを読む入口
-    /// （`ProjectDocument::only_finite_numbers`）。文書のインスタンスはいつも有限なので、保存で直す所は無い
-    pub(crate) fn is_finite(&self) -> bool {
-        self.xform.is_finite()
-            && self.pivot.is_finite()
-            && self.color_effect.alpha.is_finite()
-            && self.color_effect.brightness.is_finite()
-    }
-
-    /// 再生位置を `d` コマ進める：キーフレームの始めを `d` コマ後ろへずらしても、同じコマに同じ絵を出す（1コマだけの
-    /// 表示は変えない）。再生位置をずらす式は、これと `rewind` だけ
-    pub(crate) fn advance(&mut self, d: usize) {
-        if self.loop_mode != SymbolLoopMode::SingleFrame {
-            self.first_frame = self.first_frame.saturating_add(d);
-        }
-    }
-
-    /// 再生位置を `d` コマ戻す（`advance` の逆：キーフレームの始めを `d` コマ前へずらす）。ループは、0 より前になるときだけ
-    /// シンボルのコマ数 `frames` で回す。1回だけの再生は 0 で止める（その前の絵は出せない）
-    pub(crate) fn rewind(&mut self, d: usize, frames: usize) {
-        self.first_frame = match self.loop_mode {
-            SymbolLoopMode::Loop if self.first_frame < d => {
-                (self.first_frame as i128 - d as i128).rem_euclid(frames.max(1) as i128) as usize
-            }
-            SymbolLoopMode::Loop | SymbolLoopMode::PlayOnce => self.first_frame.saturating_sub(d),
-            SymbolLoopMode::SingleFrame => self.first_frame,
-        };
-    }
-}
 
 /// 座標の変換で、逆にできるとみなす行列式の大きさの下限
 const MIN_DET: f64 = 1e-12;
@@ -173,101 +48,6 @@ pub(crate) fn same_pivot(a: Point, b: Point) -> bool {
 #[inline]
 pub(crate) fn is_custom_pivot(pivot: Point) -> bool {
     !same_pivot(pivot, Point::ZERO)
-}
-
-static NEXT_MESH_REVISION: AtomicU64 = AtomicU64::new(1);
-static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) fn next_mesh_revision() -> u64 {
-    NEXT_MESH_REVISION.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(crate) fn next_shape_id() -> u64 {
-    new_shape_ids(1)
-}
-
-/// 続けて使える新しい図形の番号を `n` 個取り、その最初の番号を返す（図形の番号を振るのはこれ1つ。ファイルから読んだ
-/// 地図の印も、これで取った番号に替える：`TileReader::new`）
-pub(crate) fn new_shape_ids(n: u64) -> u64 {
-    NEXT_SHAPE_ID.fetch_add(n, Ordering::Relaxed)
-}
-
-/// 計算の途中で止まったら（panic：計算の前提が破れた）受け止めて `None` を返す（最後の砦。受け止めるのはこの1つ）。置くのは
-/// 仕事の入口ごとに1つ：画面の毎コマ・終わるとき・アプリの始まりの手順・OS から呼ばれる受け口・スレッドの始まり
-/// （`spawn_guarded`）と、その中の仕事の単位（作品を変える操作 `apply`・復旧の書き手のタブ1つ分・書き出し1回・音の装置の
-/// 呼び出し1回・先読みと地図の確かめの地図1つ）。計算はかならずどれかの入口から始まるので、どこで止まっても砦の中にいる
-/// （設計：claude/最後の砦を仕事の入口に置く設計.md。前は計算の場所ごとに置いたので、置き忘れが出続けた）。受け止めた所が
-/// その仕事を無かったことにする（別のやり方へ逃げない）。どの層からも使えるよう、いちばん下の層に置く。何も止まらない
-/// ときの手間は無い
-pub(crate) fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
-}
-
-/// 名前 `name` のスレッドで `f` を、砦の中で走らせる（スレッドを始めるのはこれ1つ。素のスレッドの始め方は clippy の
-/// `disallowed-methods` で禁じてある：clippy.toml）。止まったら、そのスレッドは `None` で終わり、名前を止まったスレッドの
-/// 記録に足す（画面が毎コマ `StoppedThreads::take_new` で読んで知らせる。スレッドの中の仕事の単位ごとの砦が先に受け止める
-/// ので、ここへ来るのは、それでも漏れたとき）。スレッドを作れなければ `Err`
-pub(crate) fn spawn_guarded<T: Send + 'static>(
-    name: &str,
-    f: impl FnOnce() -> T + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<Option<T>>> {
-    let owned = name.to_owned();
-    #[allow(clippy::disallowed_methods)] // スレッドを始める所はここだけ
-    std::thread::Builder::new().name(owned.clone()).spawn(move || {
-        let out = guarded(f);
-        if out.is_none() {
-            STOPPED_THREADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(owned);
-        }
-        out
-    })
-}
-
-/// 砦の外まで止まって終わったスレッドの名前の記録（`spawn_guarded` が足すだけで、消さない。スレッドはプロセスに1組なので
-/// 記録も1つ。読む側はそれぞれ、どこまで読んだかを覚える：`StoppedThreads`。足すのは内部の不具合のときだけ）
-static STOPPED_THREADS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// 止まったスレッドの記録を読む側（どこまで読んだか）。作ったときより前の記録は読まない
-pub(crate) struct StoppedThreads {
-    seen: usize,
-}
-
-impl Default for StoppedThreads {
-    fn default() -> Self {
-        Self { seen: STOPPED_THREADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() }
-    }
-}
-
-impl StoppedThreads {
-    /// まだ読んでいない、止まったスレッドの名前（画面が毎コマ読んで知らせる）
-    pub(crate) fn take_new(&mut self) -> Vec<String> {
-        let all = STOPPED_THREADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let new = all.get(self.seen..).unwrap_or_default().to_vec();
-        self.seen = all.len();
-        new
-    }
-}
-
-
-/// `Arc` と共存可能なスレッドセーフ（`Send + Sync`）かつ `Clone` 対応の内部可変キャッシュラッパー
-#[derive(Debug, Default)]
-pub(crate) struct SyncCache<T>(Mutex<T>);
-
-impl<T> SyncCache<T> {
-    #[inline]
-    pub(crate) const fn new(val: T) -> Self {
-        Self(Mutex::new(val))
-    }
-
-    #[inline]
-    pub(crate) fn lock(&self) -> MutexGuard<'_, T> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl<T: Clone> Clone for SyncCache<T> {
-    fn clone(&self) -> Self {
-        Self::new(self.lock().clone())
-    }
 }
 
 thread_local! {
@@ -496,8 +276,8 @@ impl FillShape {
     }
 
     /// 倍率 `zoom` で画面に描くメッシュ（文書の座標）：段（`mesh_level`）が 0 なら `fill_mesh`、それより上なら、その段の
-    /// 許容で作ったもの（1つだけ持ち、段が変われば作り直す）。画面に描く図形のメッシュはみなこれ（`screen_mesh`・
-    /// `selection_screen_mesh`・セル画の写しの拡大した表示 `CelMeshCache::screen_mesh`）
+    /// 許容で作ったもの（1つだけ持ち、段が変われば作り直す）。画面に描く図形のメッシュはみなこれ（`screen_mesh::shape_screen_mesh`・
+    /// `screen_mesh::shape_selection_screen_mesh`・セル画の写しの拡大した表示 `CelMeshCache::screen_mesh`）
     pub(crate) fn view_mesh(&self, zoom: f32) -> Arc<Mesh> {
         let level = mesh_level(zoom);
         if level == 0 {
@@ -518,7 +298,7 @@ impl FillShape {
     /// 選択の色を塗るメッシュ（文書の座標。倍率 `zoom` の段の細かさ）：線の図形は、両端を丸くした帯（同じ線が続くつなぎ目
     /// でも、選んだ区間の端が丸く見える。利用者が決めた。選んだ線どうしで丸い端が重なっても、選択の色は不透明なので濃く
     /// ならない：`selection_color`）、面の図形は描くメッシュ（`view_mesh`）。両端がもともと丸い線は、描くメッシュを使う
-    fn selection_mesh(&self, zoom: f32) -> Arc<Mesh> {
+    pub(crate) fn selection_mesh(&self, zoom: f32) -> Arc<Mesh> {
         let round = [crate::vector_stroke::LineEnd::Cap; 2];
         if self.line.is_none() || self.line_ends == round {
             return self.view_mesh(zoom);
@@ -546,20 +326,6 @@ impl FillShape {
     fn drop_view_meshes(&mut self) {
         self.zoom_mesh = ZoomMesh::default();
         self.round_mesh = ZoomMesh::default();
-    }
-
-    /// 指定された `(zoom, pan, dim_backdrop)` に対応するスクリーン座標変換済み `Mesh` を返す（倍率に合わせた細かさ：`view_mesh`）
-    pub(crate) fn screen_mesh(&self, zoom: f32, pan: Vec2, dim_backdrop: bool) -> Mesh {
-        transform_mesh_to_screen(
-            (*self.view_mesh(zoom)).clone(),
-            zoom,
-            pan,
-            if dim_backdrop {
-                Some(&dim_backdrop_color)
-            } else {
-                None
-            },
-        )
     }
 
     /// Undo 履歴保存時やバックアップ時に、幾何データから随時再生成可能な描画メッシュキャッシュを破棄してメモリを解放する
@@ -910,18 +676,6 @@ impl FillShape {
         self.mesh_revision = next_mesh_revision();
     }
 
-    /// 選択表示：選択の色を塗るメッシュ（`selection_mesh`。線の図形は両端を丸くした帯）を画面座標に写し、頂点の色を選択の
-    /// 色（`selection_color`：図形の色に `SELECTION_TINT` を重ねた色）にしたもの。同じ段の図形の上に描く。どの倍率でも、
-    /// 図形と同じ形のまま青みがかって見える
-    pub(crate) fn selection_screen_mesh(&self, zoom: f32, pan: Vec2) -> Mesh {
-        let mut mesh = (*self.selection_mesh(zoom)).clone();
-        for v in &mut mesh.vertices {
-            v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
-            v.color = selection_color(v.color);
-        }
-        mesh
-    }
-
     pub(crate) fn get_contour(&self, idx: usize) -> Option<&Contour> {
         if self.exterior.segments.is_empty() {
             return None;
@@ -1159,21 +913,6 @@ pub(crate) fn max_scale(affine: Affine) -> f64 {
     ((p + q) / 2.0 + (((p - q) / 2.0).powi(2) + r * r).sqrt()).sqrt()
 }
 
-/// 選択表示で、選んだ図形の色に重ねる半透明の色（明るい青）
-const SELECTION_TINT: Color32 = Color32::from_rgba_premultiplied(0, 46, 100, 100);
-
-/// 選んだ図形を塗る色：図形の色 `c` に `SELECTION_TINT` を重ねた色（どちらも前もって不透明度を掛けた色で、重ねる式は
-/// `t + c × (1 − t の不透明度)`）。不透明な図形なら不透明なので、選んだ図形どうしがどう重なっても（線の丸い端・曲がり角の
-/// 内側・塗りと輪郭の線）、2回塗られて濃くならない。同じ段（同じレイヤー・同じ階層の塗りどうし・線どうし）の図形を描き
-/// 終えた所で塗るので、選んだ図形は、同じ段の中ではいちばん上に見える（利用者が決めた）。不透明度を下げた図形は、図形の色
-/// が2回重なる分、選んでいる間は少し濃く見える
-pub(crate) fn selection_color(c: Color32) -> Color32 {
-    let t = SELECTION_TINT;
-    let keep = 255 - u16::from(t.a());
-    let over = |tc: u8, cc: u8| (u16::from(tc) + (u16::from(cc) * keep + 127) / 255).min(255) as u8;
-    Color32::from_rgba_premultiplied(over(t.r(), c.r()), over(t.g(), c.g()), over(t.b(), c.b()), over(t.a(), c.a()))
-}
-
 pub(crate) fn tessellate_raw_polygon(pts: &[Point], color: Color32) -> Mesh {
     if pts.len() < 3 {
         return Mesh::default();
@@ -1223,86 +962,6 @@ fn tessellate_lyon_path(
         indices: buffers.indices,
         ..Default::default()
     }
-}
-
-/// シンボルインプレイス編集時の親シーン背景表示用に、頂点色を薄くブレンドする
-#[inline]
-pub(crate) fn dim_backdrop_color(c: Color32) -> Color32 {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
-    Color32::from_rgba_unmultiplied(
-        ((r as u16 * 30 + 250 * 70) / 100) as u8,
-        ((g as u16 * 30 + 250 * 70) / 100) as u8,
-        ((b as u16 * 30 + 252 * 70) / 100) as u8,
-        a,
-    )
-}
-
-/// オニオンスキン表示用に、頂点色を指定されたティント色・不透明度へブレンドする
-#[inline]
-pub(crate) fn onion_tint_color(c: Color32, tint_rgb: [u8; 3], alpha: u8) -> Color32 {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
-    Color32::from_rgba_unmultiplied(
-        ((r as u16 * 35 + tint_rgb[0] as u16 * 65) / 100) as u8,
-        ((g as u16 * 35 + tint_rgb[1] as u16 * 65) / 100) as u8,
-        ((b as u16 * 35 + tint_rgb[2] as u16 * 65) / 100) as u8,
-        alpha,
-    )
-}
-
-/// セル画を1枚の結合メッシュで描くときの、色の変え方
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum CelTint {
-    /// そのまま
-    Plain,
-    /// グループ・シンボルの編集中の、ほかの所の薄い表示（`dim_backdrop_color`）
-    Dim,
-    /// オニオンスキン（色と不透明度：`onion_tint_color`）
-    Onion([u8; 3], u8),
-}
-
-/// ワールド座標の結合メッシュ `world` を、ズーム `zoom`・パン `pan` の画面座標に写し、色を `tint` で変えたもの
-pub(crate) fn tinted_screen_mesh(world: &Mesh, zoom: f32, pan: Vec2, tint: CelTint) -> Mesh {
-    let mesh = world.clone();
-    match tint {
-        CelTint::Plain => transform_mesh_to_screen(mesh, zoom, pan, None),
-        CelTint::Dim => transform_mesh_to_screen(mesh, zoom, pan, Some(&dim_backdrop_color)),
-        CelTint::Onion(rgb, alpha) => {
-            transform_mesh_to_screen(mesh, zoom, pan, Some(&|c| onion_tint_color(c, rgb, alpha)))
-        }
-    }
-}
-
-/// 座標 (`x`, `y`) を、ズーム `zoom`・パン `pan` の画面の座標にする（画面に写す式はこれ1つ）
-#[inline]
-pub(crate) fn to_screen(x: f32, y: f32, zoom: f32, pan: Vec2) -> Pos2 {
-    Pos2::new(x * zoom + pan.x, y * zoom + pan.y)
-}
-
-/// ワールド座標で構築された `Mesh` を複製せずその場でスクリーン座標へ変換し、任意の頂点色変換 `map_color` を適用して返す
-pub(crate) fn transform_mesh_to_screen(
-    mut mesh: Mesh,
-    zoom: f32,
-    pan: Vec2,
-    map_color: Option<&dyn Fn(Color32) -> Color32>,
-) -> Mesh {
-    if zoom == 1.0 && pan == Vec2::ZERO && map_color.is_none() {
-        return mesh;
-    }
-    let mut last_color: Option<(Color32, Color32)> = None;
-    for v in &mut mesh.vertices {
-        v.pos = to_screen(v.pos.x, v.pos.y, zoom, pan);
-        if let Some(f) = map_color {
-            v.color = match last_color {
-                Some((src, dst)) if src == v.color => dst,
-                _ => {
-                    let dst = f(v.color);
-                    last_color = Some((v.color, dst));
-                    dst
-                }
-            };
-        }
-    }
-    mesh
 }
 
 /// 複数の `Mesh` を1つのバッチ `Mesh` に結合する（セル単位の一括キャッシュ構築用）
