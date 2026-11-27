@@ -16,14 +16,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::chunked_list::{Chunk, ChunkedList, Keyed};
-use crate::project_io::{ProjectDocument, SavedKeyframe, SavedLayer, SavedSound, SavedSymbolDef, SavedTimeline};
+use crate::project_io::{
+    file_identity, file_kind, read_identity, ProjectDocument, SaveKind, SavedKeyframe, SavedLayer, SavedSound, SavedSymbolDef,
+    SavedTimeline,
+};
 use crate::sound::{Sound, SoundLibrary};
 use crate::stored_map::{ReadTiles, SavedStroke, SavedTile, WriteTiles};
 use crate::symbol::{Document, Slot, SymbolDef};
 use crate::timeline::{Keyframe, Timeline};
 
-/// 書き足すファイルの頭の印（`.is2d` の頭とは違う）
-const MAGIC: &[u8; 8] = b"IS2DJRN1";
 
 /// 記録1つ。目録は入れ子で、どの段も、書き換えていない所は前に書いた記録を番号で指す（番号は書いた順の通し番号）
 #[derive(Serialize, Deserialize)]
@@ -34,8 +35,8 @@ enum Record {
         tiles: Vec<SavedTile>,
         strokes: Vec<SavedStroke>,
     },
-    /// 音（音のライブラリの1つ）
-    Sound(SavedSound),
+    /// 音（音のライブラリの1つ）：番号・名前と、どのデータか（データは `SoundBytes` で1回だけ書く）
+    Sound(SoundEntry),
     /// 音のライブラリ（番号 `id`）：音の番号の並び
     Sounds { id: u64, sounds: Vec<u64> },
     /// キーフレームの塊（番号 `id`）：塊の基準からの始まりのコマ `rels` と、キーフレーム（始まりのコマは使わない）
@@ -54,6 +55,16 @@ enum Record {
     Manifest(Manifest),
     /// 保存した（最後の記録がこれなら、復元するものは無い：`is_saved`）
     Saved,
+    /// 音のデータ（番号 `id`。WAV・MP3 のバイトのまま）。同じデータは1回だけ書く（名前を変えても書き直さない）
+    SoundBytes { id: u64, bytes: Arc<[u8]> },
+}
+
+/// 音の記録の形：音の番号・名前・データの記録の番号
+#[derive(Serialize, Deserialize)]
+struct SoundEntry {
+    id: u64,
+    name: String,
+    bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,7 +121,9 @@ pub(crate) struct Journal {
     /// 書いた地図の塊の表（番号はファイルの中で続く）と、書いた塊の数・色の数
     tiles: WriteTiles,
     done: (usize, usize),
-    /// 書いた音・音のライブラリ・キーフレームの塊・キーフレームの並び・ライブラリの塊
+    /// 書いた音のデータ（番地は `Sound::bytes_address`）・音・音のライブラリ・キーフレームの塊・キーフレームの並び・
+    /// ライブラリの塊
+    sound_bytes: Written<Arc<[u8]>>,
     sounds: Written<Arc<Sound>>,
     sound_lists: Written<SoundLibrary>,
     chunks: Written<Chunk<Keyframe>>,
@@ -129,11 +142,12 @@ pub(crate) struct Journal {
 impl Journal {
     /// `path` に、文書 `doc`（元のファイル `source`）の全体を書いたファイルを作る（同じフォルダの一時ファイル `tmp` に
     /// 書いてから置き換える）
-    pub(crate) fn create(path: &Path, tmp: &Path, doc: &Document, source: Option<&Path>) -> std::io::Result<Self> {
+    pub(crate) fn create(path: &Path, doc: &Document, source: Option<&Path>) -> std::io::Result<Self> {
         let mut journal = Self {
             path: path.to_path_buf(),
             tiles: WriteTiles::default(),
             done: (0, 0),
+            sound_bytes: Written::default(),
             sounds: Written::default(),
             sound_lists: Written::default(),
             chunks: Written::default(),
@@ -145,21 +159,22 @@ impl Journal {
             appended: 0,
             saved: false,
         };
-        let mut out = std::io::BufWriter::new(std::fs::File::create(tmp)?);
-        out.write_all(MAGIC)?;
-        journal.snapshot = journal.write_records(&mut out, doc, source)?;
-        let file = out.into_inner().map_err(|e| e.into_error())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(tmp, path)?;
+        // 頭（種類と版）と全体を一時ファイルに書いてから置き換える（作品ファイルと同じ頭と置き換え方：`file_identity`・
+        // `write_atomically`）
+        crate::project_io::write_atomically(path, |file| {
+            let mut out = std::io::BufWriter::new(file);
+            out.write_all(&file_identity(SaveKind::Journal))?;
+            journal.snapshot = journal.write_records(&mut out, doc, source)?;
+            out.into_inner().map_err(|e| e.into_error())
+        })?;
         Ok(journal)
     }
 
     /// 文書 `doc` の今を書く：前に書いてから変わった所だけを書き足す。書き足した量が全体を書いた量を超えたら、全体を
     /// 書き直す（一時ファイル `tmp` に書いてから置き換える。覚えている書いたものも手放す）
-    pub(crate) fn write(&mut self, tmp: &Path, doc: &Document, source: Option<&Path>) -> std::io::Result<()> {
+    pub(crate) fn write(&mut self, doc: &Document, source: Option<&Path>) -> std::io::Result<()> {
         if self.appended > self.snapshot {
-            *self = Self::create(&self.path, tmp, doc, source)?;
+            *self = Self::create(&self.path, doc, source)?;
             return Ok(());
         }
         self.append(|j, out| j.write_records(out, doc, source))?;
@@ -236,10 +251,20 @@ impl Journal {
         }
         for s in lib.iter() {
             let k = Arc::as_ptr(s) as usize;
-            if let std::collections::hash_map::Entry::Vacant(e) = self.sounds.ids.entry(k) {
-                *written += write_record(out, &Record::Sound(SavedSound::from(&**s)))?;
-                e.insert((s.id, s.clone()));
+            if self.sounds.ids.contains_key(&k) {
+                continue;
             }
+            let bytes = match self.sound_bytes.ids.get(&s.bytes_address()) {
+                Some((id, _)) => *id,
+                None => {
+                    let id = self.new_id();
+                    *written += write_record(out, &Record::SoundBytes { id, bytes: s.encoded.clone() })?;
+                    self.sound_bytes.ids.insert(s.bytes_address(), (id, s.encoded.clone()));
+                    id
+                }
+            };
+            *written += write_record(out, &Record::Sound(SoundEntry { id: s.id, name: s.name.clone(), bytes }))?;
+            self.sounds.ids.insert(k, (s.id, s.clone()));
         }
         let id = self.new_id();
         *written += write_record(out, &Record::Sounds { id, sounds: lib.iter().map(|s| s.id).collect() })?;
@@ -342,19 +367,11 @@ fn write_record(out: &mut impl Write, rec: &Record) -> std::io::Result<u64> {
     Ok(8 + u64::from(len))
 }
 
-/// ファイルが書き足すファイルか（頭の印で見る）
-pub(crate) fn is_journal(path: &Path) -> bool {
-    let mut head = [0u8; 8];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut head))
-        .is_ok_and(|()| &head == MAGIC)
-}
-
 /// 書き足すファイル `path` の最後の記録が「保存した」の印か（ファイルの終わりの数バイトだけを見る）
 pub(crate) fn is_saved(path: &Path) -> bool {
     use std::io::{Seek, SeekFrom};
     let mut tail = Vec::new();
-    if write_record(&mut tail, &Record::Saved).is_err() || !is_journal(path) {
+    if write_record(&mut tail, &Record::Saved).is_err() || file_kind(path) != Ok(SaveKind::Journal) {
         return false;
     }
     let mut got = vec![0u8; tail.len()];
@@ -371,9 +388,13 @@ pub(crate) fn is_saved(path: &Path) -> bool {
 pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
     let broken = || "復旧ファイルが壊れています".to_owned();
     let bytes = std::fs::read(path).map_err(|e| format!("復旧ファイルを読めませんでした: {e}"))?;
-    let rest = bytes.strip_prefix(MAGIC.as_slice()).ok_or_else(broken)?;
+    if read_identity(&bytes)? != SaveKind::Journal {
+        return Err(broken());
+    }
+    let rest = &bytes[SaveKind::Journal.identity_len()..];
     let mut tiles = ReadTiles::default();
-    let mut sounds: HashMap<u64, SavedSound> = HashMap::new();
+    let mut sound_bytes: HashMap<u64, Arc<[u8]>> = HashMap::new();
+    let mut sounds: HashMap<u64, SoundEntry> = HashMap::new();
     let mut sound_lists: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut chunks: HashMap<u64, (Vec<i64>, Vec<SavedKeyframe>)> = HashMap::new();
     let mut keyframe_lists: HashMap<u64, Vec<(u64, i64)>> = HashMap::new();
@@ -412,6 +433,9 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
             }
             Record::Order { id, ids } => {
                 order_chunks.insert(id, ids);
+            }
+            Record::SoundBytes { id, bytes } => {
+                sound_bytes.insert(id, bytes);
             }
             Record::Manifest(m) => manifest = Some(m),
             Record::Saved => {}
@@ -455,7 +479,10 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
         .get(&m.sounds)
         .ok_or_else(broken)?
         .iter()
-        .map(|id| sounds.get(id).cloned())
+        .map(|id| {
+            let s = sounds.get(id)?;
+            Some(SavedSound { id: s.id, name: s.name.clone(), bytes: sound_bytes.get(&s.bytes)?.clone() })
+        })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(broken)?;
     Ok(ProjectDocument {

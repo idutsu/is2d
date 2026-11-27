@@ -806,6 +806,12 @@ impl Is2dApp {
         }
     }
 
+    /// 画面の1コマ（`update` の中身）：画面の仕事と、コマの終わりの仕事を、それぞれ砦の中で走らせる
+    pub(crate) fn frame(&mut self, ctx: &egui::Context) {
+        self.run_frame(|app| app.update_ui(ctx));
+        self.run_frame(Self::finish_frame);
+    }
+
     /// 画面の1コマの仕事 `work` を、画面のスレッドの砦の中で走らせる（画面の仕事の入口はここ1つ：設計
     /// claude/最後の砦を仕事の入口に置く設計.md）。途中で止まったら（panic）、そのコマを無かったことにする：タイムラインの
     /// ドラッグを取り消し、止まった仕事の戻し方 `recover_from_panic`（画面の土台を捨てて作り直す・キャンバスのドラッグを取り
@@ -1088,6 +1094,12 @@ impl Is2dApp {
         project_io::update_window_title(self, ctx);
         timeline_ui::scrub_on_frame_change(self);
         self.prefetch_next_cels();
+
+    }
+
+    /// コマの終わりの仕事：タブの控えを渡す・裏の仕事の知らせ（画面の仕事 `update_ui` とは別の仕事の単位。画面の仕事が
+    /// 止まっても走る：`update`。設計審査 6fb4faa の D-3）
+    pub(crate) fn finish_frame(&mut self) {
         // タブの控えを今のタブにし（文書が変わったタブがあるときだけ写し直す）、変わったら裏の書き手に渡して、復旧ファイルに
         // 書き足してもらう（待たない）
         if self.tab_copies.refresh(&self.tabs) {
@@ -1210,8 +1222,11 @@ fn load_notice_text(notices: &[timeline::LoadNotice]) -> Option<String> {
 }
 
 impl eframe::App for Is2dApp {
+    /// 画面の毎コマは、仕事の単位を2つに分けて、それぞれ砦の中で走らせる：画面の仕事（操作を受ける・描く）と、コマの終わりの
+    /// 仕事（控えを渡す・裏の仕事の知らせ）。画面の仕事が止まっても、コマの終わりの仕事は走る（前は1つの単位だったので、
+    /// 描く所で止まり続けると、作業の控えが復旧の係へ渡らなかった：設計審査 6fb4faa の D-3）
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.run_frame(|app| app.update_ui(ctx));
+        self.frame(ctx);
     }
 
     /// 確認なしに終わるときは、今の未保存のタブを書き終えてから書き手を止める。確認ありで終わる（保存するか捨てるかを

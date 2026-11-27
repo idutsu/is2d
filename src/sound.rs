@@ -159,8 +159,12 @@ struct BytesEntry {
     id: u64,
 }
 
-fn bytes_address(s: &Sound) -> usize {
-    Arc::as_ptr(&s.encoded) as *const u8 as usize
+impl Sound {
+    /// 音のデータ（`encoded`）の場所：同じ場所なら同じデータ（「同じデータか」の見分けはこれ1つ：音のライブラリのデータの
+    /// 目次・復旧ファイルの書き手。名前を変えて音の箱を写しても、データは分け合うので変わらない）
+    pub(crate) fn bytes_address(&self) -> usize {
+        Arc::as_ptr(&self.encoded) as *const u8 as usize
+    }
 }
 
 fn bytes_key(e: &BytesEntry) -> (usize, u64) {
@@ -173,7 +177,7 @@ impl From<Vec<Arc<Sound>>> for SoundLibrary {
         sounds.sort_by_key(|s| s.id);
         sounds.dedup_by_key(|s| s.id);
         let mut by_bytes: Vec<Arc<BytesEntry>> =
-            sounds.iter().map(|s| Arc::new(BytesEntry { bytes: bytes_address(s), id: s.id })).collect();
+            sounds.iter().map(|s| Arc::new(BytesEntry { bytes: s.bytes_address(), id: s.id })).collect();
         by_bytes.sort_by_key(|e| bytes_key(e));
         Self { sounds: sounds.into_iter().collect(), by_bytes: by_bytes.into_iter().collect() }
     }
@@ -205,7 +209,7 @@ impl SoundLibrary {
 
     /// バイトを `sound` と共有する音（2分探索）
     pub(crate) fn with_bytes(&self, sound: &Sound) -> Option<&Arc<Sound>> {
-        let bytes = bytes_address(sound);
+        let bytes = sound.bytes_address();
         let e = self.by_bytes.sorted_from(&(bytes, 0), bytes_key).next().filter(|e| e.bytes == bytes)?;
         self.get(e.id)
     }
@@ -218,7 +222,7 @@ impl SoundLibrary {
     /// 音 `sound` を終わりに足す。番号は、今ある音のどれよりも大きいこと
     pub(crate) fn push_new(&mut self, sound: Arc<Sound>) {
         assert!(self.sounds.last().is_none_or(|l| l.id < sound.id), "音の番号 {} が並びの順にならない", sound.id);
-        let e = BytesEntry { bytes: bytes_address(&sound), id: sound.id };
+        let e = BytesEntry { bytes: sound.bytes_address(), id: sound.id };
         self.sounds.push(sound);
         self.by_bytes.replace_sorted(&[], vec![Arc::new(e)], bytes_key);
     }
@@ -229,7 +233,7 @@ impl SoundLibrary {
             return false;
         };
         let gone = self.sounds.remove(i);
-        self.by_bytes.replace_sorted(&[(bytes_address(&gone), id)], Vec::new(), bytes_key);
+        self.by_bytes.replace_sorted(&[(gone.bytes_address(), id)], Vec::new(), bytes_key);
         true
     }
 

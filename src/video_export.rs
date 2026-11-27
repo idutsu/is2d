@@ -233,12 +233,6 @@ fn fill_contours<'a>(
     );
 }
 
-/// 書き出し先 `target_path` と同じフォルダに置く一時ファイルパス（`.<名前>.<プロセスID>.mp4.tmp`）を返す
-pub(crate) fn tmp_export_path(target_path: &Path) -> PathBuf {
-    let file_name = crate::project_io::file_name_or(target_path, "video.mp4");
-    let stem = file_name.strip_suffix(".mp4").unwrap_or(file_name);
-    target_path.with_file_name(format!(".{stem}.{}.mp4.tmp", std::process::id()))
-}
 
 /// 動画書き出しジョブの終了結果
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,7 +256,7 @@ impl VideoExportJob {
     /// 書き出しを裏のスレッドで始める（スレッドを作れなければ `Err`）
     pub(crate) fn start(doc: Document, target_path: PathBuf) -> std::io::Result<Self> {
         let target_path = crate::project_io::resolve_target_path(&target_path);
-        let tmp_path = tmp_export_path(&target_path);
+        let tmp_path = crate::project_io::tmp_path_for(&target_path);
         let total_frames = export_frames(&doc);
         let completed_frames = Arc::new(AtomicUsize::new(0));
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -440,7 +434,7 @@ fn run_video_export(
     if let Err(err) = encoder.finish() {
         return VideoExportOutcome::Failed(err);
     }
-    if let Err(err) = std::fs::rename(tmp_path, target_path) {
+    if let Err(err) = crate::project_io::replace_atomically(tmp_path, target_path) {
         return VideoExportOutcome::Failed(format!("動画ファイルの保存に失敗しました: {err}"));
     }
     VideoExportOutcome::Completed

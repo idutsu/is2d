@@ -767,14 +767,18 @@ impl View {
 pub(crate) struct Clipboard {
     /// コピー / カットした中身（地図とインスタンス。階層の番号の並びは、写した所からの相対）
     pub(crate) content: Option<crate::clipboard_ops::Content>,
-    /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用）
-    pub(crate) source_doc_id: u64,
+    /// クリップボードにコピーされた時点のコピー元ドキュメントID（別タブへのペースト判定用。書くのは `set_source` だけ）
+    source_doc_id: u64,
+    /// コピー元のタブの番号が、もういない（閉じた・作品を入れ替えた）か（`forget_tab`・`set_source`）
+    source_retired: bool,
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
     /// `symbols` のタイムラインの音の区間が指す音（コピー元の音のライブラリの音を共有する。移植で貼り先へ持ち込む）
     pub(crate) sounds: crate::sound::SoundLibrary,
-    /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
-    pub(crate) imported_map: HashMap<(u64, u64, u64), u64>,
+    /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`。
+    /// 入口 `apply` が毎回クリップボードを写すので、共有の箱に入れ、書くときだけ写す（`note_imported`。設計審査 6fb4faa の
+    /// D-4）。いなくなったタブの記録は捨てる（`forget_tab`）
+    imported_map: Arc<HashMap<(u64, u64, u64), u64>>,
     /// 最後に V を離してから、V を押した合図（`Key`）か貼り付けの合図（`Paste`）が来たか（`swallowed_paste`）
     pub(crate) v_press_seen: bool,
     /// `Cmd+V` による通常ペーストの連続回数（少しずつずらして配置するためのカウンタ）
@@ -784,6 +788,45 @@ pub(crate) struct Clipboard {
 }
 
 impl Clipboard {
+    /// コピー元のタブの番号
+    pub(crate) fn source_doc_id(&self) -> u64 {
+        self.source_doc_id
+    }
+
+    /// 写した中身のコピー元をタブ `id` にする（写すたびに呼ぶ）。前のコピー元のタブがもういなければ、それをコピー元とする
+    /// 記録を捨てる（もう使う中身が無い）
+    pub(crate) fn set_source(&mut self, id: u64) {
+        if self.source_retired {
+            let old = self.source_doc_id;
+            Arc::make_mut(&mut self.imported_map).retain(|&(s, _, _), _| s != old);
+        }
+        self.source_doc_id = id;
+        self.source_retired = false;
+    }
+
+    /// 移した対応（コピー元のタブ・シンボル → 貼り先のタブ・シンボル）
+    pub(crate) fn imported(&self, from_doc: u64, from_sym: u64, to_doc: u64) -> Option<u64> {
+        self.imported_map.get(&(from_doc, from_sym, to_doc)).copied()
+    }
+
+    /// 移した対応を、行きと帰りの両方向で足す（書くときだけ表を写す）
+    pub(crate) fn note_imported(&mut self, (from_doc, from_sym): (u64, u64), (to_doc, to_sym): (u64, u64)) {
+        let map = Arc::make_mut(&mut self.imported_map);
+        map.insert((from_doc, from_sym, to_doc), to_sym);
+        map.insert((to_doc, to_sym, from_doc), from_sym);
+    }
+
+    /// タブの番号 `id` がいなくなった（タブを閉じた・タブに作品を入れ替えた）：そのタブを貼り先とする記録を捨てる。そのタブを
+    /// コピー元とする記録は、今の中身がそのタブのものなら残し（閉じたタブから写した中身を何度貼っても、同じシンボルを使い
+    /// 回す）、中身を写し直したときに捨てる（`set_source`）。そうでなければ今捨てる
+    pub(crate) fn forget_tab(&mut self, id: u64) {
+        let keep_source = self.source_doc_id == id;
+        self.source_retired |= keep_source;
+        if self.imported_map.keys().any(|&(s, _, t)| t == id || (s == id && !keep_source)) {
+            Arc::make_mut(&mut self.imported_map).retain(|&(s, _, t), _| t != id && (s != id || keep_source));
+        }
+    }
+
     /// 入力の合図 `events` に、捨てられた `Cmd+V` があったか。egui-winit は `Cmd+V` の押下を、OS のクリップボードに文字が
     /// あれば貼り付けの合図（`Paste`）にし、無ければ捨てる（どちらでも、押した合図の `Key` は送らない。離した合図は送る）。
     /// なので、V を押した合図も貼り付けの合図も来ないまま V を離したら、それは捨てられた `Cmd+V`。修飾キーや時間を見ないので、

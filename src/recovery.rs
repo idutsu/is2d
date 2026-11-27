@@ -327,7 +327,6 @@ impl WriterCore {
         }
         let name = format!("{}-{}-{RECOVER_MARK}{}.is2dj", self.token, item.id, item.name());
         let path = self.dir.join(&name);
-        let tmp = self.dir.join(format!(".{name}.tmp"));
         let source = item.file.as_deref();
         match self.journals.get_mut(&item.id) {
             // 前に書いたときから変わっていない（中身の世代も保存先も同じ）：書かない
@@ -336,7 +335,7 @@ impl WriterCore {
             }
             // 同じ名前のファイルに、変わった所を書き足す
             Some(j) if j.journal.path() == path => {
-                if j.journal.write(&tmp, &item.document(), source).is_ok() {
+                if j.journal.write(&item.document(), source).is_ok() {
                     j.content_gen = item.content_gen;
                     j.file.clone_from(&item.file);
                 } else {
@@ -357,7 +356,7 @@ impl WriterCore {
         if std::fs::write(&entry, path.to_string_lossy().as_bytes()).is_err() {
             return;
         }
-        match Journal::create(&path, &tmp, &item.document(), source) {
+        match Journal::create(&path, &item.document(), source) {
             Ok(journal) => {
                 self.journals.insert(item.id, TabJournal { journal, content_gen: item.content_gen, file: item.file.clone() });
             }
@@ -473,12 +472,12 @@ impl Recovery {
         let mut opened = Vec::new();
 
         for item in found {
-            // 書き足すファイル（今の書き方）か、前の版のアプリが書いた `.is2d` の復旧ファイルか（ファイルの頭の印で見る）
-            let read = if crate::recovery_journal::is_journal(&item.recovery_path) {
-                crate::recovery_journal::read(&item.recovery_path)
-            } else {
-                read_project_document(&item.recovery_path)
-            };
+            // 復旧ファイルの種類と版は頭で見る（見るのは `project_io::read_identity` の1つ。前の版のアプリが書いた `.is2d` の
+            // 形の復旧ファイルは作品ファイルとして読み、版の違うファイルは読まずに断る）
+            let read = crate::project_io::file_kind(&item.recovery_path).and_then(|kind| match kind {
+                crate::project_io::SaveKind::Journal => crate::recovery_journal::read(&item.recovery_path),
+                crate::project_io::SaveKind::Project => read_project_document(&item.recovery_path),
+            });
             let res = read.and_then(|mut proj_doc| {
                 let src = proj_doc.recovery_source.take();
                 open_document_in_new_tab(ws, proj_doc.into_document()?, Some(ctx))?;
@@ -499,11 +498,12 @@ impl Recovery {
                     opened.push(item);
                     restored += 1;
                 }
-                Err(_) => {
+                // 読めない（壊れている・このアプリと違う版）：中身は消さずに名前を替えて残し、わけと一緒に知らせる
+                Err(why) => {
                     let broken_path = item.recovery_path.with_extension("is2d.broken");
                     let _ = std::fs::rename(&item.recovery_path, &broken_path);
                     let _ = std::fs::remove_file(&item.entry_path);
-                    broken_paths.push(broken_path.display().to_string());
+                    broken_paths.push(format!("{}：{why}", broken_path.display()));
                 }
             }
         }

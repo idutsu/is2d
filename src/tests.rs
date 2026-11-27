@@ -17928,7 +17928,8 @@ fn test_video_export_common_render_and_dimensions() {
 fn test_video_export_mp4_cancel_and_error() {
     use crate::canvas_tool::View;
     use crate::vector_engine::Contour;
-    use crate::video_export::{tmp_export_path, VideoExportJob, VideoExportOutcome};
+    use crate::project_io::tmp_path_for;
+    use crate::video_export::{VideoExportJob, VideoExportOutcome};
 
     let make_rect_shape = |x: f64, y: f64, w: f64, h: f64, color: Color32| -> FillShape {
         let p00 = Point::new(x, y);
@@ -17965,7 +17966,7 @@ fn test_video_export_mp4_cancel_and_error() {
         assert_eq!(app.tab().doc.root.total_frames, 10);
 
         let out_path = tmp_dir.join("ten_frames.mp4");
-        let tmp_file = tmp_export_path(&out_path);
+        let tmp_file = tmp_path_for(&out_path);
         let mut job = VideoExportJob::start(
             app.tab().committed_document_copy().unwrap(),
             out_path.clone(),
@@ -17988,7 +17989,7 @@ fn test_video_export_mp4_cancel_and_error() {
         app.tab_mut().doc.root.total_frames = 500;
 
         let cancel_path = tmp_dir.join("cancelled.mp4");
-        let cancel_tmp = tmp_export_path(&cancel_path);
+        let cancel_tmp = tmp_path_for(&cancel_path);
         let mut job = VideoExportJob::start(
             app.tab().committed_document_copy().unwrap(),
             cancel_path.clone(),
@@ -18007,7 +18008,7 @@ fn test_video_export_mp4_cancel_and_error() {
         let app = Is2dApp::default();
         let bad_dir = tmp_dir.join("nonexistent_subdir");
         let bad_path = bad_dir.join("out.mp4");
-        let bad_tmp = tmp_export_path(&bad_path);
+        let bad_tmp = tmp_path_for(&bad_path);
         let mut job = VideoExportJob::start(
             app.tab().committed_document_copy().unwrap(),
             bad_path.clone(),
@@ -19354,7 +19355,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     std::fs::write(&bad_entry, bad_rec.to_string_lossy().as_bytes()).unwrap();
     let bad_journal = rec_dir.join("RECOVER_headonly.is2dj");
     let bad_journal_entry = rec_dir.join("0-9997.entry");
-    std::fs::write(&bad_journal, b"IS2DJRN1").unwrap();
+    std::fs::write(&bad_journal, project_io::file_identity(project_io::SaveKind::Journal)).unwrap();
     std::fs::write(&bad_journal_entry, bad_journal.to_string_lossy().as_bytes()).unwrap();
     let no_src_rec = rec_dir.join("RECOVER_no_source.is2d");
     let no_src_entry = rec_dir.join("0-9998.entry");
@@ -20606,6 +20607,86 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
     assert!(app.scene().iter().any(|s| s.color() == green));
 }
 
+/// クリップボードの対応表（別のタブへ移したシンボル）は共有の箱で、入口 `apply` が毎回クリップボードを写しても、表は写さず
+/// 分け合う。いなくなったタブ（閉じた・作品を入れ替えた）を貼り先とする記録は捨てる。閉じたタブから写した中身は、閉じた
+/// あとに何度貼っても同じシンボルを使い回し、中身を写し直したら、その閉じたタブの記録も捨てる（前は表を毎回丸ごと写し、
+/// 捨てる所が無く、アプリを閉じるまで増えた：設計審査 6fb4faa の D-4）
+#[test]
+fn the_clipboard_import_table_is_shared_and_forgets_gone_tabs() {
+    use crate::doc_actions::{apply, Action};
+    let ctx = egui::Context::default();
+    let symbol_tab = |app: &mut Is2dApp| {
+        assert!(apply(
+            app,
+            Action::PaintStroke { points: vec![Point::new(50.0, 50.0), Point::new(120.0, 50.0)], radius: 8.0, color: Color32::RED },
+        ));
+        assert!(apply(app, Action::SelectAll));
+        assert!(apply(app, Action::ConvertToSymbol));
+        assert!(apply(app, Action::Copy));
+    };
+    // タブ A（0）のシンボルを、タブ B（1）とタブ C（2）に貼る
+    let mut app = Is2dApp::default();
+    symbol_tab(&mut app);
+    let a = app.tab().id();
+    crate::project_io::new_project(&mut app, &ctx);
+    let b = app.tab().id();
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    crate::project_io::new_project(&mut app, &ctx);
+    let c = app.tab().id();
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    let mentions = |app: &Is2dApp, id: u64| app.clipboard.imported_map.keys().any(|&(s, _, t)| s == id || t == id);
+    assert!(mentions(&app, b) && mentions(&app, c));
+    // 写しは表を分け合う
+    let copy = app.clipboard.clone();
+    assert!(std::sync::Arc::ptr_eq(&copy.imported_map, &app.clipboard.imported_map), "クリップボードの写しが表を写した");
+    // タブ C を閉じると、C の記録が消える。B の記録は残る
+    crate::project_io::close_tab(&mut app, 2, None);
+    assert!(!mentions(&app, c), "閉じたタブの記録が残った");
+    assert!(mentions(&app, b));
+    // コピー元のタブ A を閉じても、A から写した中身をタブ B に貼るたびに、同じシンボルを使い回す
+    crate::project_io::close_tab(&mut app, 0, None);
+    assert_eq!(app.tab().id(), b);
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    assert_eq!(app.doc.library().len(), 1, "閉じたタブから写した中身を貼って、シンボルが増えた");
+    assert!(mentions(&app, a));
+    // 最後のタブ B を閉じる（タブに新しい作品を入れる道 `install_document` を通る）と、B の前の番号の記録が消える
+    crate::project_io::close_tab(&mut app, 0, None);
+    assert_ne!(app.tab().id(), b);
+    assert!(!mentions(&app, b), "作品を入れ替えたタブの前の番号の記録が残った");
+    // 中身を写し直すと、閉じたタブ A の記録も消える
+    symbol_tab(&mut app);
+    assert!(!mentions(&app, a), "閉じたコピー元のタブの記録が、写し直したあとも残った");
+}
+
+/// 画面の仕事が止まっても、コマの終わりの仕事（控えを復旧の係へ渡す）は走る（画面の1コマ `Is2dApp::frame` は2つの仕事を
+/// それぞれ砦の中で走らせる。前は1つの仕事だったので、描く所で止まり続けると控えが渡らなかった：設計審査 6fb4faa の D-3）
+#[test]
+fn the_end_of_frame_work_runs_even_when_the_screen_work_stops() {
+    use crate::recovery::RecoveryWriter;
+    let rec_dir = std::env::temp_dir().join(format!("is2d_frame_end_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rec_dir);
+    let mut app = Is2dApp { recovery_writer: Some(RecoveryWriter::start(rec_dir.clone())), ..Default::default() };
+    // 作品を変えてから、画面の仕事が止まる
+    assert!(crate::doc_actions::apply(
+        &mut app,
+        crate::doc_actions::Action::PaintStroke { points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)], radius: 8.0, color: Color32::RED },
+    ));
+    app.run_frame(|_| panic!("計算の前提が破れた"));
+    app.run_frame(Is2dApp::finish_frame);
+    // 控えが渡り、復旧ファイルができる（裏の書き手が書き終えるのを待つ）
+    let start = std::time::Instant::now();
+    let journals = || {
+        std::fs::read_dir(&rec_dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("is2dj")).count())
+    };
+    while journals() == 0 {
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "画面の仕事が止まったあと、控えが復旧の係へ渡らなかった");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    app.recovery_writer.take().unwrap().finish(true);
+    let _ = std::fs::remove_dir_all(&rec_dir);
+}
+
 #[test]
 fn test_deselected_slice_piece_does_not_collide_with_kept_piece_id() {
     use crate::doc_actions::{apply, Action};
@@ -21741,7 +21822,7 @@ fn a_panic_inside_a_frame_cancels_the_drags_and_keeps_the_work() {
     });
     assert!(matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None), "止まったコマのドラッグが残った");
     assert_eq!(app.timeline_ui.dragging_layer, None, "止まったコマのタイムラインのドラッグが残った");
-    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
+    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合で画面の処理を続けられませんでした（それまでの作業は残っています）"));
     assert!(
         app.doc.root.layers.iter().zip(doc_before.root.layers.iter()).all(|(a, b)| a.keyframes.iter().zip(b.keyframes.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(x.cel.maps(), y.cel.maps()))),
         "作品がコマの前と違う"
@@ -22676,7 +22757,7 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
     let ctx = egui::Context::default();
     let frame = |app: &mut Is2dApp| {
         let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
-        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.frame(ctx));
     };
     let red = Color32::from_rgb(220, 40, 40);
     let path = proj_dir.join("work.is2d");
@@ -36625,6 +36706,15 @@ fn convert_work_files_to_current_format() {
         .map(std::path::Path::new)
     {
         let bytes = std::fs::read(path).expect("作品を読めること");
+        // 前の版の復旧ファイル（版 1）は、隣に今の版の作品ファイル（`<名前>.is2d`）を書く（元のファイルはそのまま）
+        if bytes.starts_with(journal_v1::HEAD) {
+            let target = path.with_extension("is2d");
+            assert!(!target.exists(), "直した作品を書く所に、もうファイルがある：{}", target.display());
+            journal_v1::convert(path, &target);
+            assert!(opens(&target), "直した作品を開けること");
+            eprintln!("直した（版 1 の復旧ファイル → 今の版の作品ファイル）：{}", target.display());
+            continue;
+        }
         let Some((doc, version)) = old_format_document(&bytes) else {
             assert!(opens(path), "今の版として開けること：{}", path.display());
             recut_work_file(path);
@@ -37709,7 +37799,6 @@ fn recovery_journal_reads_back_the_same_work_after_every_edit() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("work.is2dj");
-    let tmp = dir.join(".work.is2dj.tmp");
     let names = action_kind_names();
     // よく選ぶ操作：描く・選んで動かすに加えて、シンボル（ライブラリの塊）と音（音のライブラリ）も書き足すように
     let drawing = [
@@ -37739,8 +37828,8 @@ fn recovery_journal_reads_back_the_same_work_after_every_edit() {
             saw_symbol |= !doc.library().is_empty();
             let len_before = std::fs::metadata(&path).map_or(0, |m| m.len());
             match &mut journal {
-                None => journal = Some(Journal::create(&path, &tmp, &doc, None).unwrap()),
-                Some(j) => j.write(&tmp, &doc, None).unwrap(),
+                None => journal = Some(Journal::create(&path, &doc, None).unwrap()),
+                Some(j) => j.write(&doc, None).unwrap(),
             }
             // 全体を書き直した（ファイルが前より短くなった）
             saw_rewrite |= std::fs::metadata(&path).unwrap().len() < len_before;
@@ -37912,11 +38001,11 @@ fn measure_recovery_journal() {
     let dir = std::env::temp_dir().join(format!("is2d_measure_journal_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (jpath, tmp) = (dir.join("work.is2dj"), dir.join(".work.is2dj.tmp"));
+    let jpath = dir.join("work.is2dj");
     let size = || std::fs::metadata(&jpath).unwrap().len();
     let doc = app.tab().committed_document_copy().unwrap();
     let t = Instant::now();
-    let mut journal = Journal::create(&jpath, &tmp, &doc, Some(&path)).unwrap();
+    let mut journal = Journal::create(&jpath, &doc, Some(&path)).unwrap();
     eprintln!("全体を書く: {:.1} ms, {:.1} MB", ms(t), size() as f64 / 1e6);
     let total = app.tab().active_timeline().total_frames.max(1);
     let mut times = Vec::new();
@@ -37933,7 +38022,7 @@ fn measure_recovery_journal() {
         let before = size();
         let doc = app.tab().committed_document_copy().unwrap();
         let t = Instant::now();
-        journal.write(&tmp, &doc, Some(&path)).unwrap();
+        journal.write(&doc, Some(&path)).unwrap();
         times.push(ms(t));
         bytes.push(size().saturating_sub(before));
     }
@@ -37975,18 +38064,210 @@ fn recovery_journal_appends_only_what_changed() {
         ));
     }
     let doc = app.tab().committed_document_copy().unwrap();
-    let tmp = dir.join(".work.is2dj.tmp");
-    let mut journal = Journal::create(&path, &tmp, &doc, None).unwrap();
+    let mut journal = Journal::create(&path, &doc, None).unwrap();
     let snapshot = std::fs::metadata(&path).unwrap().len();
     assert!(apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 50 }));
     assert!(apply(
         &mut app,
         Action::PaintStroke { points: vec![Point::new(300.0, 300.0), Point::new(320.0, 310.0)], radius: 6.0, color: Color32::BLUE },
     ));
-    journal.write(&tmp, &app.tab().committed_document_copy().unwrap(), None).unwrap();
+    journal.write(&app.tab().committed_document_copy().unwrap(), None).unwrap();
     let appended = std::fs::metadata(&path).unwrap().len() - snapshot;
     assert!(appended * 20 < snapshot, "1本描いて書き足した量 {appended} が、全体 {snapshot} に比べて大きい");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 復旧ファイルの音：名前を変えても、音のデータは書き直さず、名前の小さな記録だけを書き足す（「同じデータか」は
+/// `Sound::bytes_address` の1つ。前は音の箱の場所で見分け、名前を1文字変えるたびにデータを丸ごと書き足した：設計審査
+/// 6fb4faa の D-2）。読み戻した音は、名前もデータも今の作品と同じ
+#[test]
+fn renaming_a_sound_appends_only_its_name_to_the_recovery_file() {
+    use crate::doc_actions::{apply, Action};
+    use crate::recovery_journal::Journal;
+    let dir = std::env::temp_dir().join(format!("is2d_journal_sound_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("work.is2dj");
+    let mut app = Is2dApp::default();
+    // 1 秒の音（約 96KB）
+    assert!(import_sound(&mut app, wav_bytes(48_000, 1, &vec![1000i16; 48_000])));
+    let sound_id = app.doc.sounds.iter().next().unwrap().id;
+    let mut journal = Journal::create(&path, &app.tab().committed_document_copy().unwrap(), None).unwrap();
+    for name in ["音a", "音ab", "音abc"] {
+        let before = std::fs::metadata(&path).unwrap().len();
+        assert!(apply(&mut app, Action::RenameSound { sound_id, new_name: name.to_owned() }));
+        journal.write(&app.tab().committed_document_copy().unwrap(), None).unwrap();
+        let appended = std::fs::metadata(&path).unwrap().len() - before;
+        assert!(appended < 1_000, "名前を変えて書き足した量 {appended} バイトが、音のデータの大きさに比例している");
+        let read = crate::recovery_journal::read(&path).unwrap();
+        assert_eq!(read.sounds.len(), 1);
+        assert_eq!(read.sounds[0].name, name);
+        assert_eq!(&*read.sounds[0].bytes, &*app.doc.sounds.iter().next().unwrap().encoded);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ファイルの頭（種類の印と版）は、作品ファイルと復旧ファイルで同じ決まり（`file_identity`・`read_identity`）。復旧ファイルの
+/// 版がこのアプリと違えば、読まずに名前を替えて中身を残し、版の違いを知らせる（前は復旧ファイルに版が無く、保存の形の違う
+/// アプリで読むと、壊れたファイルとしか分からなかった：設計審査 6fb4faa の D-1）
+#[test]
+fn a_recovery_file_of_another_version_is_kept_and_reported() {
+    use crate::recovery::RecoveryWriter;
+    use project_io::{file_identity, read_identity, SaveKind, JOURNAL_RECORD_VERSION, PROJECT_FORMAT_VERSION};
+    // 頭の決まり：作品ファイルは前と同じバイト（印・保存の形の版）。復旧ファイルは印・保存の形の版・復旧の記録の版
+    let mut project = b"IS2D".to_vec();
+    project.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    assert_eq!(file_identity(SaveKind::Project), project);
+    let journal = file_identity(SaveKind::Journal);
+    assert_eq!(read_identity(&journal), Ok(SaveKind::Journal));
+    assert_eq!(read_identity(&project), Ok(SaveKind::Project));
+    let mut other = journal.clone();
+    other[8..12].copy_from_slice(&(JOURNAL_RECORD_VERSION + 1).to_le_bytes());
+    assert!(read_identity(&other).is_err());
+    assert!(read_identity(b"IS2DJRN1").is_err(), "版を持たない前の復旧ファイル");
+    // 版の違う復旧ファイルを復元すると、名前を替えて中身を残し、版の違いを知らせる
+    let rec_dir = std::env::temp_dir().join(format!("is2d_journal_version_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rec_dir);
+    let mut app = Is2dApp::default();
+    assert!(crate::doc_actions::apply(
+        &mut app,
+        crate::doc_actions::Action::PaintStroke { points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)], radius: 8.0, color: Color32::RED },
+    ));
+    app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    eframe::App::on_exit(&mut app, None);
+    let written: Vec<std::path::PathBuf> = std::fs::read_dir(&rec_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("is2dj"))
+        .collect();
+    assert_eq!(written.len(), 1);
+    let mut bytes = std::fs::read(&written[0]).unwrap();
+    bytes[8..12].copy_from_slice(&(JOURNAL_RECORD_VERSION + 1).to_le_bytes());
+    std::fs::write(&written[0], &bytes).unwrap();
+    let ctx = egui::Context::default();
+    let mut next = Is2dApp::default();
+    next.recovery.dir = Some(rec_dir.clone());
+    next.recovery.find_leftovers();
+    assert_eq!(next.recovery.found.len(), 1);
+    next.apply_action(UiAction::RestoreRecovered, &ctx);
+    let kept = written[0].with_extension("is2d.broken");
+    assert_eq!(std::fs::read(&kept).ok(), Some(bytes), "版の違う復旧ファイルの中身が残っていない");
+    assert!(next.toast.as_ref().is_some_and(|t| t.message.contains("未対応の復旧ファイルの版")), "版の違いを知らせない");
+    assert_eq!(next.tabs.len(), 1, "版の違う復旧ファイルを開いた");
+    let _ = std::fs::remove_dir_all(&rec_dir);
+}
+
+/// 前の版（版 1。頭が `IS2DJRN1`）の復旧ファイルは、テスト用の変換（`convert_work_files_to_current_format`）で今の版の作品
+/// ファイルに直せ、同じ作品が開ける（版 1 の復旧ファイルは、今の版の復旧ファイルから音の記録を版 1 の形に戻して作る）
+#[test]
+fn an_old_recovery_file_converts_to_the_current_project_file() {
+    use crate::recovery_journal::Journal;
+    let dir = std::env::temp_dir().join(format!("is2d_journal_v1_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = Is2dApp::default();
+    assert!(import_sound(&mut app, short_wav()));
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    let doc = app.tab().committed_document_copy().unwrap();
+    let current = dir.join("work.is2dj");
+    Journal::create(&current, &doc, None).unwrap();
+    let old = dir.join("old.is2dj");
+    std::fs::write(&old, journal_v1::from_current(&std::fs::read(&current).unwrap())).unwrap();
+    let converted = dir.join("old.is2d");
+    journal_v1::convert(&old, &converted);
+    let want = crate::recovery_journal::read(&current).unwrap().into_document().unwrap();
+    let got = project_io::read_project_document(&converted).unwrap().into_document().unwrap();
+    assert_eq!(
+        content_json(&project_io::ProjectDocument::of(&got)),
+        content_json(&project_io::ProjectDocument::of(&want)),
+        "直した作品が、今の版の復旧ファイルの作品と違う"
+    );
+    assert_eq!(got.sounds.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 前の版の復旧ファイル（版 1：頭が `IS2DJRN1`。音の記録が名前とデータを1つにした `SavedSound`）を、今の版にする変換
+/// （テスト用の変換の道具 `convert_work_files_to_current_format` が使う）。記録の並びは版 1 と今の版で同じで、違うのは音の
+/// 記録（並びの2番目）と、今の版で足した音のデータの記録（並びの10番目）だけ
+mod journal_v1 {
+    use super::*;
+
+    /// 版 1 の頭
+    pub(super) const HEAD: &[u8; 8] = b"IS2DJRN1";
+    /// 音の記録・音のデータの記録の並びの番号（postcard は列挙の何番目かを先頭に書く）
+    const SOUND: u8 = 1;
+    const SOUND_BYTES: u8 = 9;
+
+    /// 記録の列（長さ・CRC32・中身）を読む
+    fn records(mut at: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while at.len() >= 8 {
+            let len = u32::from_le_bytes(at[..4].try_into().unwrap()) as usize;
+            out.push(at[8..8 + len].to_vec());
+            at = &at[8 + len..];
+        }
+        out
+    }
+
+    fn frame(out: &mut Vec<u8>, body: &[u8]) {
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
+        out.extend_from_slice(body);
+    }
+
+    /// 版 1 の復旧ファイルの中身を、今の版の中身にする
+    pub(super) fn to_current(bytes: &[u8]) -> Vec<u8> {
+        let mut out = project_io::file_identity(project_io::SaveKind::Journal);
+        for body in records(bytes.strip_prefix(HEAD.as_slice()).expect("版 1 の頭")) {
+            if body[0] == SOUND {
+                let s: project_io::SavedSound = postcard::from_bytes(&body[1..]).expect("版 1 の音の記録");
+                // データの記録の番号は音の番号を使う（データの記録の番号は、データの記録の中で重ならなければよい）
+                let mut data = vec![SOUND_BYTES];
+                data.extend(postcard::to_allocvec(&(s.id, &*s.bytes)).unwrap());
+                frame(&mut out, &data);
+                let mut entry = vec![SOUND];
+                entry.extend(postcard::to_allocvec(&(s.id, &s.name, s.id)).unwrap());
+                frame(&mut out, &entry);
+            } else {
+                frame(&mut out, &body);
+            }
+        }
+        out
+    }
+
+    /// 今の版の復旧ファイルの中身から、版 1 の中身を作る（変換を確かめるテストの材料）
+    pub(super) fn from_current(bytes: &[u8]) -> Vec<u8> {
+        let id_len = project_io::SaveKind::Journal.identity_len();
+        let mut data: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
+        let mut out = HEAD.to_vec();
+        for body in records(&bytes[id_len..]) {
+            match body[0] {
+                SOUND_BYTES => {
+                    let (id, b): (u64, Vec<u8>) = postcard::from_bytes(&body[1..]).unwrap();
+                    data.insert(id, b);
+                }
+                SOUND => {
+                    let (id, name, b): (u64, String, u64) = postcard::from_bytes(&body[1..]).unwrap();
+                    let s = project_io::SavedSound { id, name, bytes: data[&b].clone().into() };
+                    let mut entry = vec![SOUND];
+                    entry.extend(postcard::to_allocvec(&s).unwrap());
+                    frame(&mut out, &entry);
+                }
+                _ => frame(&mut out, &body),
+            }
+        }
+        out
+    }
+
+    /// 版 1 の復旧ファイル `old` を、今の版の作品ファイル `target` にする
+    pub(super) fn convert(old: &std::path::Path, target: &std::path::Path) {
+        let current = target.with_extension("converting.is2dj");
+        std::fs::write(&current, to_current(&std::fs::read(old).unwrap())).unwrap();
+        let doc = crate::recovery_journal::read(&current).expect("今の版の復旧ファイルとして読める").into_document().unwrap();
+        let _ = std::fs::remove_file(&current);
+        write_project_file(target, &project_io::ProjectDocument::of(&doc));
+    }
 }
 
 /// 動かした絵があるときに、動かしていない絵を選び足して、その一部を Shift クリックで選択から外しても、外した絵は消えない

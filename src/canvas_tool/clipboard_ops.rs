@@ -312,7 +312,7 @@ pub(in crate::canvas_tool) fn remap_timeline_ids(
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）と、
 /// そのタイムラインの音の区間が指す音を `Arc` 共有スナップショットとして退避する
 pub(in crate::canvas_tool) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
-    clipboard.source_doc_id = tab.id();
+    clipboard.set_source(tab.id());
     clipboard.symbols.clear();
 
     let mut visited = Vec::new();
@@ -381,7 +381,7 @@ impl<'a> PasteLookup<'a> {
     fn find_reusable(&self, src_sym_id: u64) -> Option<u64> {
         let (tab, clipboard) = (self.tab, self.clipboard);
         let target_doc_id = tab.id();
-        let source_doc_id = clipboard.source_doc_id;
+        let source_doc_id = clipboard.source_doc_id();
         if target_doc_id == source_doc_id {
             if let Some(sym_def) = tab.doc.find_symbol(src_sym_id) {
                 return sym_def
@@ -392,7 +392,7 @@ impl<'a> PasteLookup<'a> {
             }
         }
         let src = self.symbol(src_sym_id)?;
-        let candidate = *clipboard.imported_map.get(&(source_doc_id, src_sym_id, target_doc_id))?;
+        let candidate = clipboard.imported(source_doc_id, src_sym_id, target_doc_id)?;
         let target = tab.doc.find_symbol(candidate).filter(|t| t.revision() == src.revision())?;
         src.children()
             .iter()
@@ -415,7 +415,7 @@ impl<'a> PasteLookup<'a> {
         if levels.is_empty() {
             return true;
         }
-        let same_doc = tab.id() == self.clipboard.source_doc_id;
+        let same_doc = tab.id() == self.clipboard.source_doc_id();
         let node = |id: u64| self.reusable(id).map_or(Node::Clip(id), Node::Doc);
         let editing = |id: u64| levels.iter().any(|lvl| lvl.symbol_id == id);
         !crate::symbol::reaches(
@@ -490,7 +490,7 @@ pub(in crate::canvas_tool) fn import_clipboard_symbols(
         return local_sym_map;
     }
     let target_doc_id = tab.id();
-    let source_doc_id = clipboard.source_doc_id;
+    let source_doc_id = clipboard.source_doc_id();
     let mut needed_imports: HashSet<u64> = HashSet::new();
     {
         let lookup = PasteLookup::new(tab, clipboard);
@@ -527,12 +527,7 @@ pub(in crate::canvas_tool) fn import_clipboard_symbols(
         };
 
         local_sym_map.insert(imported.id, new_id);
-        clipboard
-            .imported_map
-            .insert((source_doc_id, imported.id, target_doc_id), new_id);
-        clipboard
-            .imported_map
-            .insert((target_doc_id, new_id, source_doc_id), src_sym_id);
+        clipboard.note_imported((source_doc_id, imported.id), (target_doc_id, new_id));
 
         imported.id = new_id;
         let base = std::mem::take(&mut imported.name);

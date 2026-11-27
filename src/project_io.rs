@@ -32,6 +32,130 @@ pub(crate) const PROJECT_FORMAT_VERSION: u32 = 10;
 /// `.is2d` ファイルの先頭の印
 const PROJECT_FILE_MAGIC: [u8; 4] = *b"IS2D";
 
+/// 復旧ファイル（`.is2dj`：`recovery_journal`）の先頭の印
+const JOURNAL_FILE_MAGIC: [u8; 4] = *b"IS2J";
+
+/// 復旧ファイルの記録の版（`recovery_journal::Record` の形を変えたら上げる）。復旧ファイルは作品ファイルと同じ保存の型を
+/// 入れるので、頭には保存の形の版 `PROJECT_FORMAT_VERSION` も一緒に書く（どちらかが違えば読まない）。版 1 は頭の印が
+/// `IS2DJRN1` で版を持たなかった。版 2 は、音のデータと音（名前）を別の記録にした（設計：claude/審査6fb4faaの直しの設計.md）
+pub(crate) const JOURNAL_RECORD_VERSION: u32 = 2;
+
+/// 保存するファイルの種類（頭の初めの種類の印と版で見分ける：作るのは `file_identity`、確かめるのは `read_identity` だけ）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SaveKind {
+    /// 作品ファイル（`.is2d`）：印・保存の形の版
+    Project,
+    /// 復旧ファイル（`.is2dj`）：印・保存の形の版・復旧の記録の版
+    Journal,
+}
+
+impl SaveKind {
+    /// 頭の初め（種類の印と版）の長さ
+    pub(crate) const fn identity_len(self) -> usize {
+        match self {
+            Self::Project => 8,
+            Self::Journal => 12,
+        }
+    }
+}
+
+/// いちばん長い頭の初めの長さ（種類を見分けるのに読む長さ）
+pub(crate) const IDENTITY_LEN: usize = SaveKind::Journal.identity_len();
+
+/// 種類 `kind` のファイルの頭の初め（種類の印と版）。作るのはここだけ（作品ファイルと復旧ファイルの両方）
+pub(crate) fn file_identity(kind: SaveKind) -> Vec<u8> {
+    let mut head = Vec::with_capacity(kind.identity_len());
+    match kind {
+        SaveKind::Project => head.extend_from_slice(&PROJECT_FILE_MAGIC),
+        SaveKind::Journal => head.extend_from_slice(&JOURNAL_FILE_MAGIC),
+    }
+    head.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    if kind == SaveKind::Journal {
+        head.extend_from_slice(&JOURNAL_RECORD_VERSION.to_le_bytes());
+    }
+    head
+}
+
+/// ファイルの頭 `head`（初めから読めた分。短くてよい）の種類と版を確かめる（確かめるのはここだけ）。種類の印が無ければ、
+/// 前の形式（JSON）か is2d でないと断り、版が今のアプリと違えば断る
+pub(crate) fn read_identity(head: &[u8]) -> Result<SaveKind, String> {
+    let not_is2d = || {
+        if head.first() == Some(&b'{') {
+            "前の形式（JSON）のファイルは開けません".to_owned()
+        } else {
+            "is2d のファイルではありません".to_owned()
+        }
+    };
+    let kind = match head.get(..4) {
+        Some(m) if m == PROJECT_FILE_MAGIC => SaveKind::Project,
+        Some(m) if m == JOURNAL_FILE_MAGIC => SaveKind::Journal,
+        _ => return Err(not_is2d()),
+    };
+    if head.len() < kind.identity_len() {
+        return Err(not_is2d());
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(head[i..i + 4].try_into().expect("4 バイト"));
+    let version = u32_at(4);
+    if version != PROJECT_FORMAT_VERSION {
+        return Err(format!("未対応のプロジェクトバージョンです (version: {version})"));
+    }
+    if kind == SaveKind::Journal && u32_at(8) != JOURNAL_RECORD_VERSION {
+        return Err(format!("未対応の復旧ファイルの版です (version: {})", u32_at(8)));
+    }
+    Ok(kind)
+}
+
+/// ファイル `path` の頭の初めを読んで、種類と版を確かめる（`read_identity`）
+pub(crate) fn file_kind(path: &Path) -> Result<SaveKind, String> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(IDENTITY_LEN);
+    std::fs::File::open(path)
+        .and_then(|f| f.take(IDENTITY_LEN as u64).read_to_end(&mut head))
+        .map_err(read_failed)?;
+    read_identity(&head)
+}
+
+/// `target` に書くときの一時ファイル（同じフォルダの `.{名前}.{プロセス番号}.tmp`。名前の付け方はここだけ：作品の保存・
+/// 復旧ファイル・動画の書き出し）
+pub(crate) fn tmp_path_for(target: &Path) -> PathBuf {
+    target.with_file_name(format!(".{}.{}.tmp", file_name_or(target, "file"), std::process::id()))
+}
+
+/// 書き終えた一時ファイル `tmp` を `target` に置き換える（置き換えるのはここだけ）：一時ファイルを確定し、名前を替え、
+/// フォルダを確定する（電源が落ちても、置き換える前か後のどちらかが残る）。失敗したら一時ファイルを消す
+pub(crate) fn replace_atomically(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    // 確定は書ける開き方で開いて行う（Windows は、読むだけの開き方ではファイルを確定できない）
+    let res = std::fs::OpenOptions::new()
+        .write(true)
+        .open(tmp)
+        .and_then(|f| f.sync_all())
+        .and_then(|()| std::fs::rename(tmp, target));
+    if res.is_err() {
+        let _ = std::fs::remove_file(tmp);
+        return res;
+    }
+    if let Some(parent) = target.parent() {
+        if let Ok(dir_file) = std::fs::File::open(parent) {
+            let _ = dir_file.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// `target` を、一時ファイル（`tmp_path_for`）に `write` で書いてから置き換える（`replace_atomically`）。書くのに失敗
+/// したら一時ファイルを消す
+pub(crate) fn write_atomically(
+    target: &Path,
+    write: impl FnOnce(std::fs::File) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<()> {
+    let tmp = tmp_path_for(target);
+    if let Err(e) = std::fs::File::create(&tmp).and_then(write) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    replace_atomically(&tmp, target)
+}
+
 /// `.is2d` ファイルの頭の大きさ：印（4）・版（u32）・中身の長さ（u64）・中身の CRC32（u32）。数はリトルエンディアン
 const PROJECT_FILE_HEADER_LEN: usize = 20;
 
@@ -121,7 +245,10 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
 /// 入力欄の的を初めに戻す（前は道ごとに後片付けが違い、まっさらなタブに開いたときと最後のタブを閉じたときは貼り付けの
 /// ずらしが前の作品の続きになった：約束の棚卸し 5616fcc の C の B2・D2）
 fn install_document(ws: &mut impl ProjectWorkspace, doc: Document, ctx: Option<&egui::Context>) {
-    // 作品を入れたら、タブの番号はいつも新しくする（「どの作品か」の見分けを、入れる所の1か所で替える）
+    // 作品を入れたら、タブの番号はいつも新しくする（「どの作品か」の見分けを、入れる所の1か所で替える）。前の番号はもう
+    // いないので、クリップボードの対応表から捨てる（`Clipboard::forget_tab`）
+    let gone = ws.tab().id();
+    ws.clipboard_mut().forget_tab(gone);
     let id = ws.alloc_doc_id();
     ws.tab_mut().install(id, doc);
     ws.clipboard_mut().paste_count = 0;
@@ -321,6 +448,10 @@ fn close_tab_immediately(
         install_document(ws, Document::default(), ctx);
         return;
     }
+    // 閉じるタブの番号はもういないので、クリップボードの対応表から捨てる（最後のタブは、作品を入れる道 `install_document`
+    // が捨てる）
+    let gone = ws.tabs()[close_index].id();
+    ws.clipboard_mut().forget_tab(gone);
 
     if close_index == ws.active_index() {
         prepare_active_tab_for_switch_or_save(ws);
@@ -1138,8 +1269,7 @@ pub(crate) fn update_window_title(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
 /// `read_project` だけ）
 fn project_file_head(len: u64, crc: u32) -> [u8; PROJECT_FILE_HEADER_LEN] {
     let mut head = [0u8; PROJECT_FILE_HEADER_LEN];
-    head[..4].copy_from_slice(&PROJECT_FILE_MAGIC);
-    head[4..8].copy_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    head[..8].copy_from_slice(&file_identity(SaveKind::Project));
     head[8..16].copy_from_slice(&len.to_le_bytes());
     head[16..].copy_from_slice(&crc.to_le_bytes());
     head
@@ -1329,20 +1459,10 @@ pub(crate) fn read_project<T: DeserializeOwned + Default>(
         .take(PROJECT_FILE_HEADER_LEN as u64)
         .read_to_end(&mut head)
         .map_err(read_failed)?;
-    if head.len() < PROJECT_FILE_HEADER_LEN || head[..4] != PROJECT_FILE_MAGIC {
-        return Err(if head.first() == Some(&b'{') {
-            "前の形式（JSON）のファイルは開けません".to_owned()
-        } else {
-            "is2d のファイルではありません".to_owned()
-        });
+    if read_identity(&head)? != SaveKind::Project || head.len() < PROJECT_FILE_HEADER_LEN {
+        return Err("is2d のファイルではありません".to_owned());
     }
     let u32_at = |i: usize| u32::from_le_bytes(head[i..i + 4].try_into().expect("4 バイト"));
-    let version = u32_at(4);
-    if version != PROJECT_FORMAT_VERSION {
-        return Err(format!(
-            "未対応のプロジェクトバージョンです (version: {version})"
-        ));
-    }
     let body_len = u64::from_le_bytes(head[8..16].try_into().expect("8 バイト"));
     let body = BodyReader {
         inner: input,
@@ -1392,35 +1512,13 @@ pub(crate) fn file_name_or<'a>(path: &'a Path, fallback: &'a str) -> &'a str {
         .unwrap_or(fallback)
 }
 
-/// 指定されたパスへ `ProjectDocument` を一時ファイル経由でアトミックに書き出し、親ディレクトリを同期する
+/// 指定されたパスへ `ProjectDocument` を一時ファイル経由で置き換えて書く（`write_atomically`）
 pub(crate) fn write_project_file_atomically<T: Serialize>(
     target_path: &Path,
     proj_doc: &ProjectDocument<T>,
 ) -> Result<(), String> {
-    let tmp_name = format!(
-        ".{}.{}.tmp",
-        file_name_or(target_path, "project.is2d"),
-        std::process::id()
-    );
-    let tmp_path = target_path.with_file_name(tmp_name);
-    let write_res = std::fs::File::create(&tmp_path)
-        .and_then(|file| write_project(file, proj_doc))
-        .and_then(|file| file.sync_all());
-    if let Err(e) = write_res {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("一時ファイルの書き込みに失敗しました: {e}"));
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, target_path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("ファイルの保存に失敗しました: {e}"));
-    }
-    if let Some(parent) = target_path.parent() {
-        if let Ok(dir_file) = std::fs::File::open(parent) {
-            let _ = dir_file.sync_all();
-        }
-    }
-    Ok(())
+    write_atomically(target_path, |file| write_project(file, proj_doc))
+        .map_err(|e| format!("ファイルの保存に失敗しました: {e}"))
 }
 
 /// 指定されたファイルパス `path` へプロジェクトを一時ファイル経由でアトミック保存する

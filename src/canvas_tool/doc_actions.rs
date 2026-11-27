@@ -950,11 +950,17 @@ pub(crate) fn recover_from_panic(host: &mut impl ActionHost) {
     let (tab, _, _, toast) = host.parts_mut();
     tab.session.drop_scene_base();
     cancel_active_drag(tab);
+    // 知らせは、戻したかどうかで分ける（操作の外で止まったときは、戻すものが無い：設計審査 6fb4faa の D-3）
+    let restored = tab.history.before.is_some();
     restore_state_before_action(tab);
     show_notice(
         toast,
         NoticeKind::Error,
-        "内部の不具合でこの操作を続けられなかったので、操作の前に戻しました",
+        if restored {
+            "内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"
+        } else {
+            "内部の不具合で画面の処理を続けられませんでした（それまでの作業は残っています）"
+        },
     );
 }
 
