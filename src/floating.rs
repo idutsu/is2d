@@ -9,27 +9,84 @@ use std::sync::Arc;
 use eframe::egui::Color32;
 use kurbo::Affine;
 
-use crate::canvas_tool::{Placement, SceneBaseCache};
+use crate::canvas_tool::Placement;
+use crate::timeline::{Cel, KeyframeId, Timeline};
 use crate::planar_map::{
-    cut_out, parallel_map, realized, region_map, shape_ids_of, stacked, CheckedMap, FaceKeep, LayerBase,
+    cut_out, is_line_id, parallel_map, realized, region_map, shape_ids_of, stacked, CheckedMap, FaceKeep, LayerBase,
     LocalEdit, LocalWrite, MapInput, MapRule, PlanarMap,
 };
 use crate::stored_map::StoredMap;
 use crate::vector_engine::FillShape;
 use crate::vector_engine::{LayerId, ShapeId};
 
-/// 浮いた片の操作に要る画面の土台：画面に出しているセル画（`SceneBaseCache`）と編集中の階層
-#[derive(Clone, Copy)]
-pub(crate) struct Stage<'a> {
-    pub(crate) base: &'a SceneBaseCache,
-    pub(crate) scope: &'a [u64],
+/// 浮いた片の操作に要る土台：編集中のタイムラインのレイヤーの重ね順（全レイヤー）と、今のコマに見えているセル画（絵を
+/// 扱えるレイヤーだけ：`Layer::is_open`。中身は文書と分け合う写し）とその場所、編集中の階層。文書から作る（`Stage::of`：
+/// 画面の土台 `SceneBaseCache` に頼らない。前は画面の土台から読んだので、入口の外から浮いた片を扱う道は、土台を先に作り
+/// 直す約束を覚えている必要があった：設計審査 b7208d9 の 8.）。地図の計算に使う写しは、画面の土台が持っていれば同じ物を
+/// 分け合う（`LayerBase::of_stored`）ので、作り直さない
+#[derive(Clone, Debug)]
+pub(crate) struct Stage {
+    order: Vec<LayerId>,
+    cels: Vec<(LayerId, KeyframeId, Cel)>,
+    /// 編集中のシンボルの経路（シンボルの番号の並び。ルートは空）
+    path: Vec<u64>,
+    scope: Vec<u64>,
 }
 
-impl Stage<'_> {
-    /// レイヤー `layer_id` の、編集中の階層の地図（セル画の地図。生の図形はその面：`LayerBase::faces`）。`None`：画面に
-    /// 出していないレイヤー
-    fn cel(&self, layer_id: LayerId) -> Option<Arc<LayerBase>> {
-        Some(self.base.cel(layer_id)?.scope_base(self.scope))
+/// セル画の場所：編集中のシンボルの経路・レイヤー・キーフレーム・階層（浮いた片の見張り `FloatLayer::still_on`）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CelPlace {
+    path: Vec<u64>,
+    layer: LayerId,
+    keyframe: KeyframeId,
+    scope: Vec<u64>,
+}
+
+impl Stage {
+    /// 編集中のタイムライン `tl`（シンボルの経路 `path`）の今のコマの土台（階層 `scope`）
+    pub(crate) fn of(tl: &Timeline, path: Vec<u64>, scope: &[u64]) -> Self {
+        let frame = tl.current_frame;
+        let order = tl.layers.iter().map(|l| l.id).collect();
+        let cels = tl
+            .layers
+            .iter()
+            .filter(|l| l.is_open())
+            .filter_map(|l| l.shown_keyframe(frame).map(|(id, kf)| (l.id, id, kf.cel.clone())))
+            .collect();
+        Self { order, cels, path, scope: scope.to_vec() }
+    }
+
+    /// 編集中の階層
+    pub(crate) fn scope(&self) -> &[u64] {
+        &self.scope
+    }
+
+    /// レイヤーの重ね順（編集中のタイムラインの全レイヤー）
+    pub(crate) fn order(&self) -> &[LayerId] {
+        &self.order
+    }
+
+    /// 今のコマに見えているセル画（レイヤーの重ね順）
+    pub(crate) fn cels(&self) -> impl Iterator<Item = (LayerId, &Cel)> {
+        self.cels.iter().map(|(id, _, cel)| (*id, cel))
+    }
+
+    /// レイヤー `layer_id` の、階層 `group_path` の地図（セル画の地図。生の図形はその面：`LayerBase::faces`）。`None`：今の
+    /// コマにセル画の無いレイヤー
+    pub(crate) fn base_at(&self, layer_id: LayerId, group_path: &[u64]) -> Option<Arc<LayerBase>> {
+        let (_, _, cel) = self.cels.iter().find(|(id, _, _)| *id == layer_id)?;
+        Some(cel.scope_base(group_path))
+    }
+
+    /// レイヤー `layer_id` の、編集中の階層の地図（`base_at`）
+    pub(crate) fn cel(&self, layer_id: LayerId) -> Option<Arc<LayerBase>> {
+        self.base_at(layer_id, &self.scope)
+    }
+
+    /// レイヤー `layer_id` のセル画の場所
+    fn place(&self, layer_id: LayerId) -> Option<CelPlace> {
+        let (_, keyframe, _) = self.cels.iter().find(|(id, _, _)| *id == layer_id)?;
+        Some(CelPlace { path: self.path.clone(), layer: layer_id, keyframe: *keyframe, scope: self.scope.clone() })
     }
 }
 
@@ -45,6 +102,11 @@ pub(crate) struct PieceGroup {
     /// 確定で置く組か（動かした・色を変えた・文書に無い）。置かない組（選んで持ち上げただけ）は、確定でセル画を変えない：
     /// 元の所は、持ち上げる前の絵のまま（`Origin::kept`。設計 claude/約束を入口で守る設計_5616fcc.md の 13 の 2.）
     pub(crate) placed: bool,
+    /// 上に重ねる線：この組の塗りより上に見えていた、一部の確定で先に書いた線の番号（番号の順。`Floating::split_off`）。形は
+    /// 覚えず、その時点の中身にある姿を使う：確定ではこの組を置いたあとに、確定で書く残りからその線を取り出してもう一度
+    /// 重ね（`FloatLayer::placed_on`）、持っている間はこの組の塗りの上に描く（`FloatingView::of`）。前は一部を確定すると、
+    /// 同じ組の線が塗りの下に入り、あとで塗りを確定すると線が覆われて消えた（設計審査 b7208d9 の 9. の「線が消える件」）
+    lines_over: Vec<ShapeId>,
 }
 
 impl PieceGroup {
@@ -67,6 +129,7 @@ impl PieceGroup {
             fresh: Some(base),
             xform,
             placed: false,
+            lines_over: Vec::new(),
         }
     }
 
@@ -118,6 +181,7 @@ impl PieceGroup {
         let map = map.checked().ok_or(Unplaceable)?;
         Ok(Some(Self {
             placed: self.placed,
+            lines_over: self.lines_over.clone(),
             ..Self::new(map, Affine::IDENTITY)
         }))
     }
@@ -134,8 +198,16 @@ impl PieceGroup {
         }
         Some(Self {
             placed: self.placed,
+            lines_over: self.lines_over.clone(),
             ..Self::new(self.base().checked_part(Some(keep), scope), self.xform)
         })
+    }
+
+    /// 上に重ねる線を足す（番号の順。同じ番号はくり返さない）
+    fn add_lines_over(&mut self, ids: impl IntoIterator<Item = ShapeId>) {
+        self.lines_over.extend(ids);
+        self.lines_over.sort_unstable();
+        self.lines_over.dedup();
     }
 }
 
@@ -144,7 +216,7 @@ impl PieceGroup {
 /// 変換。持ち上げていない図形は無し）。置けるかの判定は `canvas_tool::TransformFit::fits`
 pub(crate) fn piece_maps(
     fl: Option<&Floating>,
-    stage: Stage<'_>,
+    stage: &Stage,
     raw: &[(LayerId, HashSet<ShapeId>)],
 ) -> Vec<(FitMap, Affine)> {
     let layers = fl.map_or(&[][..], |fl| &fl.layers[..]);
@@ -159,7 +231,7 @@ pub(crate) fn piece_maps(
             None => cel,
         };
         Some((
-            FitMap::Owned(content.only_faces_map(ids, stage.scope)),
+            FitMap::Owned(content.only_faces_map(ids, stage.scope())),
             Affine::IDENTITY,
         ))
     });
@@ -210,6 +282,10 @@ pub(crate) struct Origin {
     hidden: Vec<ShapeId>,
     /// 残りの図形の番号（残りの地図の面のうち、セル画に無いもの。図形は計算に使う写しの面から作る：`FloatingView::of`）
     remainder: Vec<ShapeId>,
+    /// 出どころの場所（持ち上げたときのセル画の場所：シンボルの経路・レイヤー・キーフレーム・階層）。確定するときに、今の
+    /// セル画の場所がこれと同じでなければ断る（`FloatLayer::still_on`。地図だけを比べると、F6 で写したキーフレームは地図を
+    /// 分け合うので、別のコマを同じ所と見た：設計審査 b7208d9 の 3.）
+    place: CelPlace,
     /// 出どころ：持ち上げたときのセル画の地図（その階層の）。確定するときに、今のセル画の地図がこれと同じでなければ断る
     /// （`FloatLayer::still_on`。持って生かしておくので、番地が別の地図に使い回されない）。前は出どころを持たず、確定は今の
     /// 画面のセル画に残りを書いたので、確定を通らずにセル画が変わる（確定の呼び忘れ）と、変わった絵が残りで黙って置き換わった
@@ -223,14 +299,37 @@ pub(crate) struct Origin {
     kept: StoredMap,
 }
 
+/// 残りが変わる出来事（2つの残りを書く決まりの表の行：`Origin::after`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestChange {
+    /// 置かない組の片を持ち上げた・戻した：見せる残りだけが変わる（書く残りは前のまま。初めてなら出どころ）
+    Unplaced,
+    /// 一部を確定した：書いたあとのセル画が、新しい出どころで書く残り（置かない組は確定でセル画を変えない）
+    Committed,
+}
+
 impl Origin {
-    /// セル画の地図 `cel` を残りの地図にする1本の道の答え `w`（`LayerBase::replace_local`）から：消した図形が隠す図形、
-    /// 入れた図形が残りの図形。線の図形は、セル画の地図から変わった辺の線が隠す図形、増えた辺の線が残りの図形
-    /// （`LayerBase::line_changes`）。升目の索引は、セル画の写しから変わった所だけ
-    /// 作る。答えが変わらない（セル画の地図のまま）ときは、使う側が残りを持たない
-    fn of_local(w: LocalWrite, cel: &LayerBase, scope: &[u64], kept: StoredMap) -> Self {
+    /// 出来事 `change` のあとの残り（見せる残りと書く残りを書くのは、ここと `place_all` だけ。決まりの表は `RestChange`：
+    /// この表から「見せる残り＋置かない組＝書く残り」が必ず成り立つ。前は呼ぶ側が書く残りを渡したので、2つの残りを別々の
+    /// 関数が書いた：設計 claude/審査b7208d9の直しの設計.md の 9.）。前の残り `prev`、セル画の地図 `cel` を新しい見せる残りに
+    /// する1本の道の答え `w`（`LayerBase::replace_local`）から：消した図形が隠す図形、入れた図形が残りの図形。線の図形は、
+    /// セル画の地図から変わった辺の線が隠す図形、増えた辺の線が残りの図形（`LayerBase::line_changes`）。升目の索引は、セル画の
+    /// 写しから変わった所だけ作る。答えが変わらない（セル画の地図のまま）ときは、使う側が残りを持たない
+    fn after(
+        prev: Option<&Origin>,
+        change: RestChange,
+        w: LocalWrite,
+        cel: &LayerBase,
+        place: CelPlace,
+        scope: &[u64],
+    ) -> Self {
+        let kept = match change {
+            RestChange::Unplaced => prev.map_or_else(|| cel.stored.clone(), |o| o.kept.clone()),
+            RestChange::Committed => cel.stored.clone(),
+        };
         let (base, hidden, remainder) = cel.written_view(w, scope);
         Self {
+            place,
             rest: base.stored.clone(),
             fresh: Some(base),
             hidden,
@@ -243,6 +342,11 @@ impl Origin {
     /// 残りの地図の、計算に使う写し
     pub(crate) fn base(&self) -> Arc<LayerBase> {
         LayerBase::of_stored(&self.rest)
+    }
+
+    /// 組をみな置く組にした：書く残りを見せる残りにそろえる（決まりの表の1行。`Floating::place_all`）
+    fn place_all(&mut self) {
+        self.kept = self.rest.clone();
     }
 }
 
@@ -260,12 +364,12 @@ impl FloatLayer {
         self.origin.is_none() && self.groups.is_empty()
     }
 
-    /// 今のセル画の地図 `cel` に確定してよいか：持ち上げた残りがあれば、その出どころの地図が `cel` そのもの（残りの無い
-    /// レイヤー（貼り付け・複製の片だけ）は、今のセル画の地図に片を重ねるだけなので、いつもよい）
-    pub(crate) fn still_on(&self, cel: &LayerBase) -> bool {
+    /// 今のセル画（場所 `place`・地図 `cel`）に確定してよいか：持ち上げた残りがあれば、その出どころの場所と地図が今の
+    /// セル画と同じ（残りの無いレイヤー（貼り付け・複製の片だけ）は、今のセル画の地図に片を重ねるだけなので、いつもよい）
+    pub(crate) fn still_on(&self, place: &CelPlace, cel: &LayerBase) -> bool {
         self.origin
             .as_ref()
-            .is_none_or(|o| o.from.id() == cel.stored.id())
+            .is_none_or(|o| o.place == *place && o.from.id() == cel.stored.id())
     }
 
     /// 中身の地図：残りの地図か、無ければセル画の地図 `cel`
@@ -282,13 +386,6 @@ impl FloatLayer {
             .map_or_else(|| cel.clone(), |o| LayerBase::of_stored(&o.kept))
     }
 
-    /// 次に切り出すときに引き継ぐ、確定で書く残り（無ければセル画の地図 `cel` のまま）
-    fn kept_or(&self, cel: &LayerBase) -> StoredMap {
-        self.origin
-            .as_ref()
-            .map_or_else(|| cel.stored.clone(), |o| o.kept.clone())
-    }
-
     /// 片の組を下から順に重ねた地図（組ごとに変換をかけて、その座標の格子で正しい地図にする：`realized`）。片が無ければ
     /// 空の地図。`None`：格子に置けない座標がある
     pub(crate) fn pieces_map(&self) -> Option<PlanarMap> {
@@ -303,23 +400,23 @@ impl FloatLayer {
     /// 座標があるか、正しい地図にならない
     pub(crate) fn selected_map(
         &self,
-        stage: Stage<'_>,
+        stage: &Stage,
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
         // 選んだ面だけで作る（手間は選んだ面の大きさ。前はセル画の地図全体を作ってから選んだ面を残した：全体の点検 2026-11-27）
-        let start = self.content(&stage.cel(self.layer_id)?).only_faces_map(ids, stage.scope);
-        let groups = restricted_groups(&self.groups, ids, stage.scope);
+        let start = self.content(&stage.cel(self.layer_id)?).only_faces_map(ids, stage.scope());
+        let groups = restricted_groups(&self.groups, ids, stage.scope());
         stacked(start, groups.iter().map(PieceGroup::placed_map))?.checked()
     }
 
     /// 確定でセル画の地図 `cel`（階層 `scope`）に書くもの（1本の道の答え：`LayerBase::replace_local`）。確定の計算はこれ1つ
     /// （確定の計画 `plan_commit` と、複製のドラッグ中の止まった絵）。`None`：持ち上げた絵と違うセル画（`still_on`）か、
     /// 格子に置けない座標がある
-    pub(crate) fn commit_edit(&self, cel: &Arc<LayerBase>, scope: &[u64]) -> Option<LocalEdit> {
-        if !self.still_on(cel) {
+    pub(crate) fn commit_edit(&self, cel: &Arc<LayerBase>, place: &CelPlace, scope: &[u64]) -> Option<LocalEdit> {
+        if !self.still_on(place, cel) {
             return None;
         }
-        let next = self.committed_local(cel)?;
+        let next = self.committed_local(cel, scope)?;
         Some(cel.replace_local(&next, scope))
     }
 
@@ -329,18 +426,23 @@ impl FloatLayer {
     pub(crate) fn committed_local(
         &self,
         cel: &Arc<LayerBase>,
+        scope: &[u64],
     ) -> Option<crate::stored_map::StoredMap> {
-        self.placed_on(&self.kept_content(cel))
+        self.placed_on(&self.kept_content(cel), scope)
     }
 
-    /// 地図 `base` に、置く組を下から順に重ねたしまう形（確定と、一部を確定したあとの残りの作り直しが使う重ね方はこれ1つ）
-    fn placed_on(&self, base: &Arc<LayerBase>) -> Option<crate::stored_map::StoredMap> {
-        base.stacked_local(
-            self.groups
-                .iter()
-                .filter(|g| g.placed)
-                .map(PieceGroup::placed_map),
-        )
+    /// 地図 `base`（階層 `scope`）に、置く組を下から順に重ねたしまう形（確定と、一部を確定したあとの残りの作り直しが使う
+    /// 重ね方はこれ1つ）。組ごとに、組を置いたあとに、その組の上に重ねる線（`PieceGroup::lines_over`）を `base` から取り出した
+    /// 線だけの地図を重ねる（色は両側とも前のまま、線の区間に線を乗せる：`MapRule::stroke`。`base` に無い線（持ち上げて
+    /// 動かした・消した）は重ねない。手間はその線の大きさの分：`LayerBase::only_faces_map`）
+    fn placed_on(&self, base: &Arc<LayerBase>, scope: &[u64]) -> Option<crate::stored_map::StoredMap> {
+        base.stacked_local(self.groups.iter().filter(|g| g.placed).flat_map(|g| {
+            let lines = (!g.lines_over.is_empty())
+                .then(|| base.only_faces_map(&g.lines_over.iter().copied().collect(), scope))
+                .filter(|m| !m.edges.is_empty())
+                .map(Some);
+            std::iter::once(g.placed_map()).chain(lines)
+        }))
     }
 }
 
@@ -361,6 +463,9 @@ pub(crate) struct FloatingView {
     piece_groups: Vec<usize>,
     /// 残りの図形と、その置き場所
     remainder: Vec<(Placement, FillShape)>,
+    /// 上に重ねる線の図形（`PieceGroup::lines_over`。見せる中身にあるもの）と、その置き場所（守る組の置き場：線は組の
+    /// 塗りより上に描く）。動かさない
+    lines_over: Vec<(Placement, FillShape)>,
     /// 画面から隠すセル画の図形
     hidden: HashSet<ShapeId>,
     bases: Vec<Arc<LayerBase>>,
@@ -368,9 +473,12 @@ pub(crate) struct FloatingView {
 
 impl FloatingView {
     /// 浮いた片 `fl` の見た目：隠す図形、残りの図形（残りの地図の面のうちセル画に無いもの。そのレイヤーの最初の隠す
-    /// 図形の所に置く）、片の図形（片の地図の面を「ステージへの変換 `world` ∘ 片の変換」で置いた写し）。面の図形は、
-    /// 地図の計算に使う写しの面（`LayerBase::faces`）から作る（作ったばかりの写しは中身が預かっているので、それを使う）
-    pub(crate) fn of(fl: &Floating, world: Affine, scope: &[u64]) -> Self {
+    /// 図形の所に置く）、片の図形（片の地図の面を「ステージへの変換 `world` ∘ 片の変換」で置いた写し）、上に重ねる線の
+    /// 図形（見せる中身（残りか、無ければ土台 `stage` のセル画）にある線の写し。中身に無い線（持ち上げた・消した）は
+    /// 描かない）。面の図形は、地図の計算に使う写しの面（`LayerBase::faces`）から作る（作ったばかりの写しは中身が預かって
+    /// いるので、それを使う）
+    pub(crate) fn of(fl: &Floating, world: Affine, stage: &Stage) -> Self {
+        let scope = stage.scope();
         let mut view = Self::default();
         for l in &fl.layers {
             let layer_id = l.layer_id;
@@ -403,9 +511,30 @@ impl FloatingView {
                     view.piece_groups.push(gi);
                 }
                 view.bases.push(base);
+                if !g.lines_over.is_empty() {
+                    let Some(content) = stage.cel(layer_id).map(|cel| l.content(&cel)) else {
+                        continue;
+                    };
+                    let lines = content.lines(scope);
+                    let at = Placement::AboveRaw(layer_id, scope.to_vec(), gi);
+                    for &id in &g.lines_over {
+                        if let Some(f) = lines.find_sorted(id, |s| s.shape_id) {
+                            let mut s = (**f).clone();
+                            s.layer_id = layer_id;
+                            s.place(world);
+                            view.lines_over.push((at.clone(), s));
+                        }
+                    }
+                    view.bases.push(content);
+                }
             }
         }
         view
+    }
+
+    /// 上に重ねる線の図形と、その置き場所（動かさない）
+    pub(crate) fn placed_lines_over(&self) -> &[(Placement, FillShape)] {
+        &self.lines_over
     }
 
     /// 片の図形（ステージの写し）
@@ -463,7 +592,7 @@ impl Floating {
     pub(crate) fn place_all(&mut self) {
         for l in &mut self.layers {
             if let Some(o) = &mut l.origin {
-                o.kept = o.rest.clone();
+                o.place_all();
             }
             for g in &mut l.groups {
                 g.placed = true;
@@ -523,10 +652,10 @@ impl Floating {
     /// 同時に計算する：待ち時間はいちばん重いレイヤー1つ分）。確定の計算はこれ1つ（確定の計画 `plan_commit` と、複製の
     /// ドラッグ中の確定した絵）。`None` のレイヤー：画面に出していないか、確定できない
     #[allow(clippy::type_complexity)]
-    pub(crate) fn commit_edits(&self, stage: Stage<'_>) -> Vec<Option<(LocalEdit, Arc<LayerBase>)>> {
+    pub(crate) fn commit_edits(&self, stage: &Stage) -> Vec<Option<(LocalEdit, Arc<LayerBase>)>> {
         parallel_map(&self.layers, |l| {
             let base = stage.cel(l.layer_id)?;
-            let r = l.commit_edit(&base, stage.scope)?;
+            let r = l.commit_edit(&base, &stage.place(l.layer_id)?, stage.scope())?;
             Some((r, base))
         })
     }
@@ -536,12 +665,12 @@ impl Floating {
         // 項目はみな分解で並べる（項目を足すと、比べるか比べないかを決めるまでコンパイラが止める）。預かり物（`fresh`）は
         // 計算に使う写し、隠す図形・残りの図形は残りの地図から決まるので比べない
         let same_origin = |x: &Origin, y: &Origin| {
-            let Origin { rest, fresh: _, hidden: _, remainder: _, from, kept } = x;
-            rest.id() == y.rest.id() && from.id() == y.from.id() && kept.id() == y.kept.id()
+            let Origin { place, rest, fresh: _, hidden: _, remainder: _, from, kept } = x;
+            *place == y.place && rest.id() == y.rest.id() && from.id() == y.from.id() && kept.id() == y.kept.id()
         };
         let same_group = |g: &PieceGroup, h: &PieceGroup| {
-            let PieceGroup { map, fresh: _, xform, placed } = g;
-            map.id() == h.map.id() && *xform == h.xform && *placed == h.placed
+            let PieceGroup { map, fresh: _, xform, placed, lines_over } = g;
+            map.id() == h.map.id() && *xform == h.xform && *placed == h.placed && *lines_over == h.lines_over
         };
         let same_layer = |a: &FloatLayer, b: &FloatLayer| {
             let FloatLayer { layer_id, origin, groups } = a;
@@ -642,7 +771,7 @@ impl Floating {
     /// 座標がある）レイヤー
     pub(crate) fn cut(
         &mut self,
-        stage: Stage<'_>,
+        stage: &Stage,
         layers: &[(LayerId, HashSet<ShapeId>)],
         rect: Option<&FillShape>,
     ) -> Vec<LayerId> {
@@ -728,14 +857,14 @@ impl Floating {
     /// 両側で同じ線なので、同じ色でつながる所は1つになる：`cut_out`）。動かしていない片は書く残り（`Origin::kept`）に元の
     /// まま入っているので、書く残りは変えない（文書も書かない）。動かした片（置く組）は戻さない（外した動かした片は確定する
     /// もの：`commit_floating_except`）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
-    pub(crate) fn return_pieces(&mut self, stage: Stage<'_>, keep: &HashSet<ShapeId>) -> bool {
+    pub(crate) fn return_pieces(&mut self, stage: &Stage, keep: &HashSet<ShapeId>) -> bool {
         let drop = self.ids_not_in(keep);
         for l in &mut self.layers {
             let layer_id = l.layer_id;
             let kept: Vec<PieceGroup> = l
                 .groups
                 .iter()
-                .filter_map(|g| if g.placed { Some(g.clone()) } else { g.restricted(keep, stage.scope) })
+                .filter_map(|g| if g.placed { Some(g.clone()) } else { g.restricted(keep, stage.scope()) })
                 .collect();
             if kept.is_empty() {
                 l.origin = None;
@@ -743,11 +872,11 @@ impl Floating {
                 continue;
             }
             let unplaced: Vec<PieceGroup> = l.groups.iter().filter(|g| !g.placed).cloned().collect();
-            let back = restricted_groups(&unplaced, &drop, stage.scope);
+            let back = restricted_groups(&unplaced, &drop, stage.scope());
             if back.is_empty() {
                 continue;
             }
-            let Some(cel) = stage.cel(layer_id) else {
+            let (Some(cel), Some(place)) = (stage.cel(layer_id), stage.place(layer_id)) else {
                 return false;
             };
             // 1本の道：外した片を中身に窓で重ね（`stacked_local`）、セル画の地図との違いを差分から先に渡す
@@ -758,10 +887,9 @@ impl Floating {
             else {
                 return false;
             };
-            let kept_rest = l.kept_or(&cel);
-            let origin = match cel.replace_local(&next, stage.scope) {
+            let origin = match cel.replace_local(&next, stage.scope()) {
                 LocalEdit::Same => None,
-                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope, kept_rest)),
+                LocalEdit::Changed(w) => Some(Origin::after(l.origin.as_ref(), RestChange::Unplaced, w, &cel, place.clone(), stage.scope())),
                 LocalEdit::Refused(_) => return false,
             };
             l.origin = origin;
@@ -785,15 +913,24 @@ impl Floating {
             .layers
             .iter()
             .map(|l| {
-                // 上の組から順に見て、それまでに取り出す片の置いた地図（覆う所）を集める
+                // 上の組から順に見て、それまでに取り出す片の置いた地図（覆う所）を集める。取り出す片の線は、同じ組と下の組の
+                // 残す塗りより上に見えているので、その下のいちばん近い残す組（同じ組の残す片か、無ければ下の組）に「上に
+                // 重ねる線」として覚える（`PieceGroup::lines_over`。上の組の残す塗りは、今までどおり線を覆う）
                 let (mut dropped, mut kept, mut cover) = (Vec::new(), Vec::new(), Vec::new());
+                let mut lines_above: Vec<ShapeId> = Vec::new();
                 for g in l.groups.iter().rev() {
-                    if let Some(k) = g.restricted(keep, scope) {
-                        kept.extend(k.erased(&cover)?);
-                    }
+                    let k = match g.restricted(keep, scope) {
+                        Some(k) => k.erased(&cover)?,
+                        None => None,
+                    };
                     if let Some(d) = g.restricted(&drop, scope) {
                         cover.push(d.placed_map().ok_or(Unplaceable)?);
+                        lines_above.extend(d.ids().into_iter().filter(|&id| is_line_id(id)));
                         dropped.push(d);
+                    }
+                    if let Some(mut k) = k {
+                        k.add_lines_over(lines_above.drain(..));
+                        kept.push(k);
                     }
                 }
                 dropped.reverse();
@@ -822,7 +959,7 @@ impl Floating {
     /// から、残る置かない組の元の所だけを切り抜いた地図と同じ。確定と同じ重ね方 `FloatLayer::placed_on`）、確定で書く残りは
     /// 出どころのまま（置かない組は確定でセル画を変えない）。置かない組が無いレイヤーは残りを持たない（置く組の元の所は、
     /// 書いた地図でもう切り抜いてある）。`false`：地図にできない
-    pub(crate) fn rebase_after_commit(&mut self, stage: Stage<'_>, committed: &Floating) -> bool {
+    pub(crate) fn rebase_after_commit(&mut self, stage: &Stage, committed: &Floating) -> bool {
         debug_assert!(
             committed.layers.iter().all(|l| l.groups.iter().all(|g| g.placed)),
             "一部の確定に、動かしていない片が入っている"
@@ -837,15 +974,15 @@ impl Floating {
             let Some(o) = &done.origin else {
                 continue;
             };
-            let Some(cel) = stage.cel(l.layer_id) else {
+            let (Some(cel), Some(place)) = (stage.cel(l.layer_id), stage.place(l.layer_id)) else {
                 return false;
             };
-            let Some(rest) = done.placed_on(&o.base()) else {
+            let Some(rest) = done.placed_on(&o.base(), stage.scope()) else {
                 return false;
             };
-            l.origin = match cel.replace_local(&rest, stage.scope) {
+            l.origin = match cel.replace_local(&rest, stage.scope()) {
                 LocalEdit::Same => None,
-                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope, cel.stored.clone())),
+                LocalEdit::Changed(w) => Some(Origin::after(None, RestChange::Committed, w, &cel, place.clone(), stage.scope())),
                 LocalEdit::Refused(_) => return false,
             };
         }
@@ -872,16 +1009,18 @@ impl Floating {
 /// 所）で1回切り、中を片の組にする（`cut_out`。中と外は同じ地図を同じ所で切るので、切り口は両側で同じ線）。矩形が無い
 /// とき（選んだ面を丸ごと持ち上げる）は切らずに、中身からその面を外す（番号はそのまま）。動かして
 /// いない片（`modified` でないとき）は元の所にあるので、新しい片を前からの片に重ねて1つの組にする（切り口は同じ線
-/// なので、同じ色でつながる片は1つになる）。動かした片があれば、新しい片は別の組として一番下に足す。`None`：地図に
-/// できない
+/// なので、同じ色でつながる片は1つになる）。動かした片があれば、新しい片は別の組として一番下に足す。ただし、組の上に
+/// 重ねる線（`PieceGroup::lines_over`）だった線は、その組の塗りより上に見えているので、その組のすぐ上の別の組にする（見えて
+/// いる重なりを変えない。一番下に入れると、確定で塗りに覆われて消える）。`None`：地図にできない
 fn cut_layer(
     cur: Option<&FloatLayer>,
-    stage: Stage<'_>,
+    stage: &Stage,
     layer_id: LayerId,
     ids: &HashSet<ShapeId>,
     rect: Option<&FillShape>,
 ) -> Option<FloatLayer> {
     let cel = stage.cel(layer_id)?;
+    let place = stage.place(layer_id)?;
     let empty = FloatLayer {
         layer_id,
         origin: None,
@@ -889,25 +1028,24 @@ fn cut_layer(
     };
     let cur = cur.unwrap_or(&empty);
     let content_base = cur.content(&cel);
-    // 切り出しても、確定で書く残りは変わらない（切り出した組は置かない組。動かしたときに切り抜く：`Floating::place_all`）
-    let kept = cur.kept_or(&cel);
+    // 切り出しても、確定で書く残りは変わらない（切り出した組は置かない組：決まりの表 `RestChange::Unplaced`）
     let (origin, inside): (Option<Origin>, CheckedMap) = match rect {
         // 面を丸ごと持ち上げる：中身から、その面を外す（面の番号はそのまま。片は前と同じ番号の図形。正しい地図の面の一部
         // なので確かめ直さない：`checked_part`）。外す面の輪郭の辺だけを替えたしまう形（`restricted_local`）を、セル画の
         // 地図に対する差分として1本の道に渡す（`replace_local`）
         None => {
             let part = (!ids.is_empty())
-                .then(|| content_base.checked_part(Some(ids), stage.scope))
+                .then(|| content_base.checked_part(Some(ids), stage.scope()))
                 .filter(|m| !m.map().edges.is_empty());
             let Some(part) = part else {
                 return Some(cur.clone());
             };
             let rest = content_base
-                .restricted_local(FaceKeep::Without(ids), stage.scope)
+                .restricted_local(FaceKeep::Without(ids), stage.scope())
                 .unwrap_or_else(|| StoredMap::from_dense(&PlanarMap::default(), None));
-            let origin = match cel.replace_local(&rest, stage.scope) {
+            let origin = match cel.replace_local(&rest, stage.scope()) {
                 LocalEdit::Same => None,
-                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope, kept)),
+                LocalEdit::Changed(w) => Some(Origin::after(cur.origin.as_ref(), RestChange::Unplaced, w, &cel, place.clone(), stage.scope())),
                 LocalEdit::Refused(_) => return None,
             };
             (origin, part)
@@ -915,7 +1053,7 @@ fn cut_layer(
         // 選ぶ所で切る（1本の道：`cut_out`）。残りは中身に対する答えなので、セル画に対する残りにする
         Some(r) => {
             let part = (!ids.is_empty())
-                .then(|| content_base.only_faces_map(ids, stage.scope))
+                .then(|| content_base.only_faces_map(ids, stage.scope()))
                 .filter(|m| !m.edges.is_empty());
             let region_owned;
             let region = match part {
@@ -925,27 +1063,54 @@ fn cut_layer(
                     MapInput::Map(&region_owned)
                 }
             };
-            let (rest, inside) = cut_out(&cel, &content_base, region, stage.scope)?;
+            let (rest, inside) = cut_out(&cel, &content_base, region, stage.scope())?;
             let origin = match rest {
-                LocalEdit::Changed(w) => Some(Origin::of_local(w, &cel, stage.scope, kept)),
+                LocalEdit::Changed(w) => Some(Origin::after(cur.origin.as_ref(), RestChange::Unplaced, w, &cel, place.clone(), stage.scope())),
                 _ => None,
             };
             (origin, inside)
         }
     };
     let mut groups = cur.groups.clone();
-    if !inside.map().edges.is_empty() {
-        match groups.first_mut() {
-            Some(g) if !g.placed => {
-                let joined = g
-                    .base()
-                    .map()
-                    .overlay(MapInput::Map(inside.map()), MapRule::Overlay)?
-                    .checked()?;
-                *g = PieceGroup::new(joined, Affine::IDENTITY);
-            }
-            _ => groups.insert(0, PieceGroup::new(inside, Affine::IDENTITY)),
+    if inside.map().edges.is_empty() {
+        return Some(FloatLayer { layer_id, origin, groups });
+    }
+    // 上の組から順に、その組の上に重ねる線だった線を、その組のすぐ上に入れる（入れても下の組の番号は変わらない）
+    let mut lifted = PieceGroup::new(inside, Affine::IDENTITY);
+    for gi in (0..groups.len()).rev() {
+        if groups[gi].lines_over.is_empty() {
+            continue;
         }
+        let over: HashSet<ShapeId> = lifted
+            .ids()
+            .into_iter()
+            .filter(|id| groups[gi].lines_over.binary_search(id).is_ok())
+            .collect();
+        if over.is_empty() {
+            continue;
+        }
+        let rest: HashSet<ShapeId> = lifted.ids().into_iter().filter(|id| !over.contains(id)).collect();
+        if let Some(g) = lifted.restricted(&over, stage.scope()) {
+            groups.insert(gi + 1, g);
+        }
+        match lifted.restricted(&rest, stage.scope()) {
+            Some(g) => lifted = g,
+            None => return Some(FloatLayer { layer_id, origin, groups }),
+        }
+    }
+    match groups.first_mut() {
+        Some(g) if !g.placed => {
+            let joined = g
+                .base()
+                .map()
+                .overlay(MapInput::Map(lifted.base().map()), MapRule::Overlay)?
+                .checked()?;
+            *g = PieceGroup {
+                lines_over: g.lines_over.clone(),
+                ..PieceGroup::new(joined, Affine::IDENTITY)
+            };
+        }
+        _ => groups.insert(0, lifted),
     }
     Some(FloatLayer {
         layer_id,

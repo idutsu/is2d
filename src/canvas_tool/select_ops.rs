@@ -81,7 +81,7 @@ pub(in crate::canvas_tool) fn exit_current_group(tab: &mut Tab) -> bool {
                     == Some(exited_gid)
             })
             .collect();
-        tab.session.set_selected_indices(indices);
+        tab.set_selected_indices(indices);
         return true;
     }
     exit_symbol_timeline(tab)
@@ -119,7 +119,7 @@ pub(in crate::canvas_tool) fn select_connected_at(tab: &mut Tab, pt: Point, add:
         return false;
     };
     let (layer_id, id) = hit;
-    let Some(base) = tab.session.base_cache().cel(layer_id).map(|c| c.scope_base(&scope)) else {
+    let Some(base) = tab.stage().base_at(layer_id, &scope) else {
         return false;
     };
     let ids = base.connected_ids(id, &scope);
@@ -135,9 +135,9 @@ pub(in crate::canvas_tool) fn select_connected_at(tab: &mut Tab, pt: Point, add:
         })
         .collect();
     if add {
-        tab.session.select_shape_indices(picked);
+        tab.select_shape_indices(picked);
     } else {
-        tab.session.set_selected_indices(picked);
+        tab.set_selected_indices(picked);
     }
     sync_timeline_layer_from_canvas_selection(tab);
     true
@@ -194,7 +194,7 @@ pub(in crate::canvas_tool) fn toggle_shape_selection(tab: &mut Tab, scene_idx: u
         .get(scene_idx)
         .is_some_and(|s| tab.active_timeline().is_layer_editable_by_id(s.layer_id))
     {
-        tab.session.select_shape_indices(unit);
+        tab.select_shape_indices(unit);
         sync_timeline_layer_from_canvas_selection(tab);
     }
 }
@@ -215,7 +215,7 @@ pub(in crate::canvas_tool) fn select_single_shape_at(tab: &mut Tab, sub_mode: Se
         })
     {
         let unit = scene.expand_to_group_unit(hit_idx, tab.session.editing_group_path());
-        tab.session.set_selected_indices(unit);
+        tab.set_selected_indices(unit);
         sync_timeline_layer_from_canvas_selection(tab);
         true
     } else {
@@ -330,7 +330,7 @@ pub(in crate::canvas_tool) fn apply_marquee_selection(tab: &mut Tab, p0: Point, 
         Vec::new()
     } else {
         tab.session
-            .with_floating(|fl, stage| fl.cut(stage, &split, Some(&clip_rect_shape)))
+            .with_floating(&tab.stage(), |fl, stage| fl.cut(stage, &split, Some(&clip_rect_shape)))
     };
     // グループは矩形にかかれば丸ごと選ぶ。地図にできないレイヤーの図形と、生の図形でないものは、切らずに、丸ごと
     // 矩形の中にあるときだけ選ぶ
@@ -359,7 +359,7 @@ pub(in crate::canvas_tool) fn apply_marquee_selection(tab: &mut Tab, p0: Point, 
         }
     }
     tab.session.replace_selection(selection);
-    tab.session.drop_unmodified_slice_if_unselected();
+    tab.session.drop_unmodified_slice_if_unselected(&tab.stage());
     sync_timeline_layer_from_canvas_selection(tab);
 }
 
@@ -548,7 +548,7 @@ pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
     // その座標の格子で正しい地図にしたもの）にして、新しいグループの階層の地図にする。生の図形は、この片の地図だけで
     // 書く（図形の並びでは書かない）。地図にできない片（格子に置けない座標がある）があれば、グループにしない
     let before = tab.session.floating().cloned();
-    if !tab.session.lift_selected_raw_shapes_to_floating() {
+    if !tab.session.lift_selected_raw_shapes_to_floating(&tab.stage()) {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
@@ -561,7 +561,7 @@ pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
                 .collect()
         });
     let Some(pieces) = pieces else {
-        tab.session.set_floating(before);
+        tab.session.set_floating(before, &tab.stage());
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     };
@@ -570,13 +570,12 @@ pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
     let mut group_path = tab.session.editing_group_path().to_vec();
     group_path.push(new_gid);
     let piece_plan: Option<crate::canvas_tool::CommitPlan> = {
-        let cache = &tab.session.base_cache();
+        let stage = tab.stage();
         pieces
             .into_iter()
             .map(|(layer_id, map)| {
                 // 新しい階層の地図を片の地図にする差分を、1本の道の差分から先に渡す（`LayerBase::replace_local`）
-                let cel = cache.cel(layer_id)?;
-                let base = cel.scope_base(&group_path);
+                let base = stage.base_at(layer_id, &group_path)?;
                 let next = crate::stored_map::StoredMap::from_dense(&map, Some(&base.stored));
                 match base.replace_local(&next, &group_path) {
                     crate::planar_map::LocalEdit::Changed(w) => Some((layer_id, w, base)),
@@ -586,7 +585,7 @@ pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
             .collect()
     };
     let Some(piece_plan) = piece_plan else {
-        tab.session.set_floating(before);
+        tab.session.set_floating(before, &tab.stage());
         tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
         return false;
     };
@@ -600,7 +599,7 @@ pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
             let mut rest = fl.clone();
             rest.drop_pieces();
             let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
-                tab.session.set_floating(Some(fl));
+                tab.session.set_floating(Some(fl), &tab.stage());
                 return false;
             };
             Some(plan)
@@ -733,15 +732,12 @@ pub(in crate::canvas_tool) fn prepare_ungroup_selected_shapes(
             group_raw.push((s.layer_id, s.group_path.clone()));
         }
     }
+    let stage = tab.stage();
     for (layer_id, path) in &group_raw {
-        let Some(cel) = tab.session.base_cache().cel(*layer_id) else {
+        let Some(base) = stage.base_at(*layer_id, path) else {
             continue;
         };
-        group_maps.push((
-            *layer_id,
-            cel.scope_base(path).checked_part(None, path),
-            Affine::IDENTITY,
-        ));
+        group_maps.push((*layer_id, base.checked_part(None, path), Affine::IDENTITY));
     }
     // グループは、セル画の並びで、その番号を階層から外す（中のグループ・インスタンスは1段上の階層へ。グループの生の図形は
     // 浮いた片にするので外す）。今の階層の子のインスタンスそのものは、下で分解する
@@ -765,13 +761,13 @@ pub(in crate::canvas_tool) fn prepare_ungroup_selected_shapes(
         return false;
     }
     let any_raw = !group_maps.is_empty() || placements.iter().any(Placement::has_pieces);
-    tab.session.add_floating_maps(group_maps);
+    tab.session.add_floating_maps(&tab.stage(), group_maps);
     // インスタンスは、そのコマの中身と入れ替える（置いたものを選ぶ。分解したインスタンスは選択から外れる）
     put_placements(tab, placements, |sym| sym);
     // 生に戻った図形のほかに選んでいた生の図形も、片に持ち上げる（持ち上げられない図形は、文書の図形のまま選んでおく。
     // 動かす・変形するときに、もう一度持ち上げて、できなければその操作を断る）
     if any_raw {
-        let _ = tab.session.lift_selected_raw_shapes_to_floating();
+        let _ = tab.session.lift_selected_raw_shapes_to_floating(&tab.stage());
     }
     tab.session.retain_existing_selection();
     true
@@ -883,7 +879,7 @@ pub(in crate::canvas_tool) fn prepare_delete_selected_shapes(
         let mut rest = fl.clone();
         rest.drop_pieces();
         if crate::canvas_tool::commit_floating_layers(tab, &rest).is_none() {
-            tab.session.set_floating(Some(fl));
+            tab.session.set_floating(Some(fl), &tab.stage());
             return false;
         }
     }

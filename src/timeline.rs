@@ -1914,6 +1914,20 @@ impl Layer {
         (i < self.keyframes.len() && self.start_of(i) == frame).then_some(i)
     }
 
+    /// 絵を扱えるレイヤーか：見えていて、ロックしていない（画面の土台がセル画を持ち、浮いた片の操作が地図を読むレイヤー。
+    /// 決まりはこれ1つ：画面の土台と、作品から作る浮いた片の土台 `Stage::of`）
+    pub(crate) fn is_open(&self) -> bool {
+        self.visible && !self.locked
+    }
+
+    /// コマ `frame` に見えているキーフレームと、その番号（コマの外なら `None`）
+    pub(crate) fn shown_keyframe(&self, frame: usize) -> Option<(KeyframeId, &Keyframe)> {
+        self.keyframe_index_at(frame).map(|i| {
+            let kf: &Keyframe = &self.keyframes[i];
+            (kf.id, kf)
+        })
+    }
+
     /// コマ `frame` に見えている絵：どのキーフレームの、キーフレームの絵か中割りの絵か（コマの外なら `None`）
     pub(crate) fn shown_picture(&self, frame: usize) -> Option<ShownPicture> {
         self.keyframe_index_at(frame).map(|i| ShownPicture {

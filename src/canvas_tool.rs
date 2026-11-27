@@ -1445,7 +1445,7 @@ impl<'a> Scene<'a> {
 }
 
 pub(crate) use crate::floating::{Floating, FloatingView};
-use crate::floating::Stage;
+pub(crate) use crate::floating::Stage;
 
 /// 親の背景を描く文書の写し：（鍵, 浮いた片を確定した後の文書。確定できなければ `None`）
 /// 親の背景を描く文書の写しと、その鍵（浮いた片の番号・ライブラリの版・見ている場所）
@@ -1618,9 +1618,9 @@ impl Session {
         self.floating.clone()
     }
 
-    /// `Floating` を置き換え、`overlay` を同期再構築する
-    pub(in crate::canvas_tool) fn set_floating(&mut self, fl: Option<Floating>) {
-        self.put_floating(fl);
+    /// `Floating` を置き換え、`overlay` を同期再構築する（重ね順は土台 `stage` の：`put_floating`）
+    pub(in crate::canvas_tool) fn set_floating(&mut self, fl: Option<Floating>, stage: &Stage) {
+        self.put_floating(fl, stage);
     }
 
     /// `Floating` を取り出し、`overlay` を同期再構築する（控えと分け合っていれば中身を写す）
@@ -1633,32 +1633,29 @@ impl Session {
     }
 
     /// クロージャで `Floating` を更新し、`overlay` を同期再構築する（控えと分け合っていれば中身を写して書く）
-    pub(in crate::canvas_tool) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
+    pub(in crate::canvas_tool) fn update_floating<R>(
+        &mut self,
+        stage: &Stage,
+        f: impl FnOnce(&mut Option<Floating>) -> R,
+    ) -> R {
         let mut fl = self.floating.take().map(Arc::unwrap_or_clone);
         let res = f(&mut fl);
-        self.put_floating(fl);
+        self.put_floating(fl, stage);
         res
     }
 
-    /// 浮いた片の操作に要る画面の土台（セル画の図形のステージの写し・編集中の階層・ステージへの変換）
-    pub(crate) fn stage(&self) -> Stage<'_> {
-        Stage {
-            base: &self.base_cache,
-            scope: &self.editing_group_path,
-        }
-    }
-
-    /// 書き換えた浮いた片 `fl` を箱に入れる（浮いた片を書き換える入口はみなここを通る）：重ね順に並べて空のレイヤーを外し
+    /// 書き換えた浮いた片 `fl` を箱に入れる（浮いた片を書き換える入口はみなここを通る）：土台 `stage` の重ね順（文書の
+    /// タイムラインの：`Stage::order`）に並べて空のレイヤーを外し
     /// （片も残りも無ければ外す）、見た目を作り（計算に使う写しは見た目が持つ）、中身の預かり物を外してから箱に入れる
     /// （箱と取り消しの控えは預かり物を持たない：`Floating::drop_fresh`）。そして `overlay` を同期再構築し、片をみな選んで、
     /// もう無い図形を選択から外す（浮いた片はいつもみな選ばれている。浮いた片が変わる所はみなここを通るので、片の番号が
     /// 変わる道を足しても漏れない。前は片の番号が変わる道ごとに呼ぶ側が選び直し、1つの道（動かしていない片を戻す道）だけ
     /// 選び直さず、選択の表示に無い塗りが、ドラッグで動き、Delete で消えた：設計審査 de92ceb の D-1 の (a)）
-    fn put_floating(&mut self, fl: Option<Floating>) {
+    fn put_floating(&mut self, fl: Option<Floating>, stage: &Stage) {
         self.floating_rev += 1;
         let world = self.edit_path.world_xform();
         let fl = fl.and_then(|mut fl| {
-            fl.tidy(self.base_cache.layer_order_ids());
+            fl.tidy(stage.order());
             (!fl.is_empty()).then_some(fl)
         });
         // テストでは毎回、見せる残りと確定で書く残りの関係を確かめる（`Floating::check_views`）
@@ -1671,7 +1668,7 @@ impl Session {
             }
         }
         self.floating_view = fl.as_ref().map_or_else(FloatingView::default, |fl| {
-            FloatingView::of(fl, world, &self.editing_group_path)
+            FloatingView::of(fl, world, stage)
         });
         self.floating = fl.map(|mut fl| {
             fl.drop_fresh();
@@ -1684,13 +1681,13 @@ impl Session {
 
     /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に。控えと分け合っていれば中身を
     /// 写して書く。片の選び直しは `put_floating`）
-    pub(in crate::canvas_tool) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
+    pub(in crate::canvas_tool) fn with_floating<R>(&mut self, stage: &Stage, f: impl FnOnce(&mut Floating, &Stage) -> R) -> R {
         let mut fl = self
             .floating
             .take()
             .map_or_else(Floating::new, Arc::unwrap_or_clone);
-        let res = f(&mut fl, self.stage());
-        self.put_floating(Some(fl));
+        let res = f(&mut fl, stage);
+        self.put_floating(Some(fl), stage);
         res
     }
 
@@ -1707,6 +1704,7 @@ impl Session {
             self.overlay.add.extend(
                 view.placed_remainder()
                     .iter()
+                    .chain(view.placed_lines_over())
                     .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
             );
             self.overlay_movable_start = self.overlay.add.len();
@@ -1751,6 +1749,7 @@ impl Session {
     /// 動かす生の絵 `copy`（離したときに置く写しの絵：`clipboard_ops::begin_move_selection_drag`）
     pub(in crate::canvas_tool) fn begin_move_overlay(
         &mut self,
+        stage: &Stage,
         alt_duplicate: bool,
         content: Option<crate::clipboard_ops::Content>,
         copy: Vec<FillShape>,
@@ -1761,15 +1760,15 @@ impl Session {
                 .flat_map(|c| c.layers.iter().map(|l| l.0))
                 .collect();
             layers.extend(self.floating.iter().flat_map(|fl| fl.layers().iter().map(|l| l.layer_id)));
-            let mut ahead = self.new_ahead(&layers);
+            let mut ahead = self.new_ahead(stage, &layers);
             ahead.content = content;
             self.drop_ahead = Some(ahead);
         }
-        self.begin_selection_overlay(alt_duplicate, false, copy);
+        self.begin_selection_overlay(stage, alt_duplicate, false, copy);
     }
 
     /// 今の浮いた片・選択・階層と、レイヤー `layers` のセル画の地図で作る答えの入れ物（答えはまだ無い）
-    fn new_ahead(&self, layers: &[LayerId]) -> DropAhead {
+    fn new_ahead(&self, stage: &Stage, layers: &[LayerId]) -> DropAhead {
         let scope = self.editing_group_path.clone();
         let mut cels: Vec<Arc<LayerBase>> = Vec::new();
         let mut seen: Vec<LayerId> = Vec::new();
@@ -1778,8 +1777,8 @@ impl Session {
                 continue;
             }
             seen.push(lid);
-            if let Some(cel) = self.base_cache.cel(lid) {
-                cels.push(cel.scope_base(&scope));
+            if let Some(cel) = stage.base_at(lid, &scope) {
+                cels.push(cel);
             }
         }
         DropAhead {
@@ -1795,8 +1794,9 @@ impl Session {
         }
     }
 
-    /// 答え `ahead` を、今（浮いた片 `floating`）使い回してよいか：作ったときと、浮いた片・選択・階層・セル画の地図がみな同じ
-    fn ahead_holds(&self, ahead: &DropAhead, floating: Option<&Floating>) -> bool {
+    /// 答え `ahead` を、今（浮いた片 `floating`・土台 `stage`）使い回してよいか：作ったときと、浮いた片・選択・階層・
+    /// セル画の地図がみな同じ
+    fn ahead_holds(&self, ahead: &DropAhead, floating: Option<&Floating>, stage: &Stage) -> bool {
         let same_floating = match (&ahead.floating, floating) {
             (None, None) => true,
             (Some(a), Some(b)) => a.same_content(b),
@@ -1806,19 +1806,17 @@ impl Session {
             && ahead.selection == self.selection
             && ahead.scope == self.editing_group_path
             && ahead.cels.iter().all(|b| {
-                self.base_cache
-                    .layer_order_ids()
-                    .iter()
-                    .filter_map(|&lid| self.base_cache.cel(lid))
-                    .any(|c| c.scope_base(&ahead.scope).stored.id() == b.stored.id())
+                stage
+                    .cels()
+                    .any(|(_, c)| c.scope_base(&ahead.scope).stored.id() == b.stored.id())
             })
     }
 
     /// ドラッグを始めるときに作った、浮いた片 `fl` の確定の計画（使い回してよいときだけ。取り出す）。確定の答えの地図の
     /// 写しと、その図形の画面の写しは、画面の土台に渡す（書き戻しと、次の画面の土台の作り直しが使い回す）
-    pub(in crate::canvas_tool) fn take_ahead_commit(&mut self, fl: &Floating) -> Option<CommitPlan> {
+    pub(in crate::canvas_tool) fn take_ahead_commit(&mut self, fl: &Floating, stage: &Stage) -> Option<CommitPlan> {
         let ahead = self.drop_ahead.as_ref()?;
-        if !self.ahead_holds(ahead, Some(fl)) {
+        if !self.ahead_holds(ahead, Some(fl), stage) {
             return None;
         }
         let ahead = self.drop_ahead.as_mut()?;
@@ -1833,9 +1831,9 @@ impl Session {
     }
 
     /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
-    pub(in crate::canvas_tool) fn take_ahead_content(&mut self) -> Option<crate::clipboard_ops::Content> {
+    pub(in crate::canvas_tool) fn take_ahead_content(&mut self, stage: &Stage) -> Option<crate::clipboard_ops::Content> {
         let ahead = self.drop_ahead.as_ref()?;
-        if !self.ahead_holds(ahead, self.floating.as_deref()) {
+        if !self.ahead_holds(ahead, self.floating.as_deref(), stage) {
             return None;
         }
         self.drop_ahead.as_mut()?.content.take()
@@ -1847,12 +1845,13 @@ impl Session {
     }
 
     /// 自由変形（拡大・回転）の仮表示用に、選択中図形を `Overlay` に載せ、変形元のクローン列を返す
-    pub(crate) fn begin_transform_overlay(&mut self) -> Vec<FillShape> {
-        self.begin_selection_overlay(false, true, Vec::new())
+    pub(crate) fn begin_transform_overlay(&mut self, stage: &Stage) -> Vec<FillShape> {
+        self.begin_selection_overlay(stage, false, true, Vec::new())
     }
 
     fn begin_selection_overlay(
         &mut self,
+        stage: &Stage,
         alt_duplicate: bool,
         for_transform: bool,
         copy: Vec<FillShape>,
@@ -1877,7 +1876,7 @@ impl Session {
             // 地図なので、組は1つ）
             let mut plan = Some(crate::canvas_tool::CommitPlan::new());
             if let Some(fl) = self.floating.as_ref().filter(|fl| fl.modified()) {
-                let outcomes = fl.commit_edits(self.stage());
+                let outcomes = fl.commit_edits(stage);
                 for (l, outcome) in fl.layers().iter().zip(outcomes) {
                     match outcome {
                         Some((crate::planar_map::LocalEdit::Changed(w), base)) => {
@@ -1919,14 +1918,15 @@ impl Session {
                 .map(|f| (Placement::AboveRaw(f.layer_id, scope.clone(), 0), Arc::new(f)))
                 .collect()
         } else {
-            match self.lift_ahead() {
+            match self.lift_ahead(stage) {
                 Ok(Some(mut fl)) => {
-                    fl.tidy(self.base_cache.layer_order_ids());
-                    let view = FloatingView::of(&fl, world, &scope);
+                    fl.tidy(stage.order());
+                    let view = FloatingView::of(&fl, world, stage);
                     self.overlay.hide = view.hidden().clone();
                     self.overlay.add.extend(
                         view.placed_remainder()
                             .iter()
+                            .chain(view.placed_lines_over())
                             .map(|(at, s)| (at.clone(), Arc::new(s.clone()))),
                     );
                     view.placed_pieces(&scope)
@@ -2016,19 +2016,19 @@ impl Session {
     /// する前。持ち上げただけの組は置かない組で、動かす・色を変える・取り出すときに置く組になる：`Floating::place_all`）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
     /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（操作を断る呼ぶ側が
     /// `refusal` に記す）
-    pub(in crate::canvas_tool) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
+    pub(in crate::canvas_tool) fn lift_selected_raw_shapes_to_floating(&mut self, stage: &Stage) -> bool {
         // ドラッグを始めるときに同じ計算をしてあれば、それを使い回す（`DropAhead`）
         let holds = self
             .drop_ahead
             .as_ref()
-            .is_some_and(|a| self.ahead_holds(a, self.floating.as_deref()));
+            .is_some_and(|a| self.ahead_holds(a, self.floating.as_deref(), stage));
         let ahead = holds
             .then(|| self.drop_ahead.as_mut().and_then(|a| a.lifted.take()))
             .flatten();
-        match ahead.unwrap_or_else(|| self.lifted_floating()) {
+        match ahead.unwrap_or_else(|| self.lifted_floating(stage)) {
             Ok(None) => true,
             Ok(Some(fl)) => {
-                self.put_floating(Some(fl));
+                self.put_floating(Some(fl), stage);
                 true
             }
             Err(()) => false,
@@ -2039,7 +2039,7 @@ impl Session {
     /// 変えない。持ち上げの計算はこれ1つ：確定する前の `lift_selected_raw_shapes_to_floating` と、ドラッグ中の見た目
     /// `lift_ahead`）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。`Ok(None)`：持ち上げるものも
     /// 浮いた片も無い。`Err`：切れないレイヤー（地図にできない）がある
-    fn lifted_floating(&self) -> Result<Option<Floating>, ()> {
+    fn lifted_floating(&self, stage: &Stage) -> Result<Option<Floating>, ()> {
         let by_layer = self.selected_raw_ids_by_layer(true);
         if by_layer.is_empty() && self.floating.is_none() {
             return Ok(None);
@@ -2049,18 +2049,18 @@ impl Session {
             .as_deref()
             .cloned()
             .unwrap_or_else(Floating::new);
-        if !fl.cut(self.stage(), &by_layer, None).is_empty() {
+        if !fl.cut(stage, &by_layer, None).is_empty() {
             return Err(());
         }
         Ok(Some(fl))
     }
 
     /// ドラッグを始めるときに、離したときと同じ持ち上げをして（`lifted_floating`）、答えを離したときのためにしまう
-    fn lift_ahead(&mut self) -> Result<Option<Floating>, ()> {
-        let lifted = self.lifted_floating();
+    fn lift_ahead(&mut self, stage: &Stage) -> Result<Option<Floating>, ()> {
+        let lifted = self.lifted_floating(stage);
         let mut layers: Vec<LayerId> = self.selected_raw_ids_by_layer(true).into_iter().map(|l| l.0).collect();
         layers.extend(self.floating.iter().flat_map(|fl| fl.layers().iter().map(|l| l.layer_id)));
-        let mut ahead = self.new_ahead(&layers);
+        let mut ahead = self.new_ahead(stage, &layers);
         ahead.lifted = Some(lifted.clone());
         self.drop_ahead = Some(ahead);
         lifted
@@ -2069,19 +2069,18 @@ impl Session {
     /// 選んでいるものに変換をかけて置けるかを決めるもの（`TransformFit`）：浮いた片と、まだ持ち上げていない選んだ生の
     /// 図形（`floating::piece_maps`）と、選んだグループの中の生の図形の階層の地図（`selected_group_scopes`）。インスタンスは
     /// 地図を持たないので、変換が潰れなければ置ける。拡大・回転のドラッグは、始めるときに1回だけ作って持つ
-    pub(crate) fn transform_fit(&self) -> TransformFit {
+    pub(crate) fn transform_fit(&self, stage: &Stage) -> TransformFit {
         let mut maps = crate::floating::piece_maps(
             self.floating.as_deref(),
-            self.stage(),
+            stage,
             &self.selected_raw_ids_by_layer(true),
         );
         maps.extend(
             self.selected_group_scopes()
                 .iter()
                 .filter_map(|(layer_id, path)| {
-                    let cel = self.base_cache.cel(*layer_id)?;
                     Some((
-                        crate::floating::FitMap::Held(cel.scope_base(path)),
+                        crate::floating::FitMap::Held(stage.base_at(*layer_id, path)?),
                         Affine::IDENTITY,
                     ))
                 }),
@@ -2146,12 +2145,13 @@ impl Session {
     /// 新しい中身（貼り付け・Alt 複製・シンボルの分解）は中身の生の図形の地図（`clipboard_ops::put_placements`）
     pub(in crate::canvas_tool) fn add_floating_maps(
         &mut self,
+        stage: &Stage,
         maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)>,
     ) {
         if maps.is_empty() {
             return;
         }
-        self.with_floating(|fl, _| {
+        self.with_floating(stage, |fl, _| {
             for (layer_id, map, xform) in maps {
                 fl.add_map(layer_id, map, xform);
             }
@@ -2160,18 +2160,18 @@ impl Session {
 
     /// 浮いている残りの図形が選択に入ったら、片に持ち上げる（動かしていなければ、ほかの片と一緒に切り直して1つの組に
     /// する：同じ色でつながる片は1つになる）
-    pub(in crate::canvas_tool) fn promote_selected_remainder_to_pieces(&mut self) {
+    pub(in crate::canvas_tool) fn promote_selected_remainder_to_pieces(&mut self, stage: &Stage) {
         let by_layer = self.selected_raw_ids_by_layer(false);
         if by_layer.is_empty() {
             return;
         }
-        self.with_floating(|fl, stage| {
+        self.with_floating(stage, |fl, stage| {
             fl.cut(stage, &by_layer, None);
         });
     }
 
     /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
-    pub(in crate::canvas_tool) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
+    pub(in crate::canvas_tool) fn drop_unmodified_slice_if_unselected(&mut self, stage: &Stage) -> bool {
         if self.floating.as_ref().is_some_and(|fl| {
             !fl.modified()
                 && !self
@@ -2180,7 +2180,7 @@ impl Session {
                     .iter()
                     .any(|p| self.selection.shapes.contains(&p.shape_id))
         }) {
-            self.set_floating(None);
+            self.set_floating(None, stage);
             true
         } else {
             false
@@ -2275,16 +2275,16 @@ impl Session {
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
-    pub(in crate::canvas_tool) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+    pub(in crate::canvas_tool) fn set_selected_indices(&mut self, stage: &Stage, indices: impl IntoIterator<Item = usize>) {
         self.change_selection(|s| {
             s.selection.clear();
-            s.select_shape_indices(indices);
-            s.drop_unmodified_slice_if_unselected();
+            s.select_shape_indices(stage, indices);
+            s.drop_unmodified_slice_if_unselected(stage);
         });
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
-    pub(in crate::canvas_tool) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+    pub(in crate::canvas_tool) fn select_shape_indices(&mut self, stage: &Stage, indices: impl IntoIterator<Item = usize>) {
         let scene = self.scene();
         let keys: Vec<_> = indices
             .into_iter()
@@ -2296,7 +2296,7 @@ impl Session {
             .collect();
         self.change_selection(|s| {
             s.insert_selection_keys(keys);
-            s.promote_selected_remainder_to_pieces();
+            s.promote_selected_remainder_to_pieces(stage);
         });
     }
 
@@ -2715,10 +2715,9 @@ pub(crate) fn committed_document(
         *g = editing_group_path.to_vec();
     });
     debug_assert!(moved);
-    // 画面の土台を先に作る（浮いた片を入れる入口が、土台のレイヤーの順で浮いた片を並べるため：約束の棚卸し 5616fcc の
-    // B の B3）
-    temp_tab.refresh_scene_base();
-    temp_tab.session.set_floating(Some(fl.clone()));
+    // 浮いた片の土台は文書から作る（画面の土台を先に作っておく約束は要らない：設計審査 b7208d9 の 8.）
+    let stage = temp_tab.stage();
+    temp_tab.session.set_floating(Some(fl.clone()), &stage);
     commit_floating(&mut temp_tab).then_some(temp_tab.doc)
 }
 
@@ -2847,6 +2846,28 @@ impl Tab {
             self.session.retain_selection_in_layers(&kept);
         }
         self.session.selection.anchors = anchors;
+    }
+
+    /// 浮いた片の操作（選ぶ・持ち上げる・ドラッグ中の見た目・確定・戻し・一部の確定のあと）の土台（文書から作る：編集中の
+    /// タイムラインの今のコマのセル画とその場所・レイヤーの重ね順・編集中の階層。浮いた片の操作の土台を作るのはこれ1つ：
+    /// `Stage::of`。設計審査 b7208d9 の 8.。前は画面の土台 `SceneBaseCache` から読み、入口の外から浮いた片を扱う道は、土台を
+    /// 先に作り直す約束を覚えている必要があった）
+    pub(crate) fn stage(&self) -> Stage {
+        let path = self.session.edit_path.levels.iter().map(|l| l.symbol_id).collect();
+        Stage::of(self.active_timeline(), path, &self.session.editing_group_path)
+    }
+
+    /// 指定した `Scene` インデックス列の図形・インスタンスだけを選ぶ（浮いた片の土台は文書から：`Tab::stage`。作業状態の
+    /// 選び方は `Session::set_selected_indices` の1つ）
+    pub(in crate::canvas_tool) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let stage = self.stage();
+        self.session.set_selected_indices(&stage, indices);
+    }
+
+    /// 指定した `Scene` インデックス列の図形・インスタンスを選択に足す（`Session::select_shape_indices`）
+    pub(in crate::canvas_tool) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let stage = self.stage();
+        self.session.select_shape_indices(&stage, indices);
     }
 
     /// 現在編集中のタイムラインへの不変参照を返す
@@ -3316,7 +3337,8 @@ impl Tab {
         );
         cancel_active_drag(self);
         self.refresh_scene_base();
-        self.session.set_floating(floating.map(Arc::unwrap_or_clone));
+        let stage = self.stage();
+        self.session.set_floating(floating.map(Arc::unwrap_or_clone), &stage);
         self.session.retain_existing_selection();
         if self.session.floating().is_some() {
             // 確定を断ったら、浮いた片と選択はそのまま（知らせは `apply`）

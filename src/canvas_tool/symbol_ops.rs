@@ -56,7 +56,7 @@ pub(in crate::canvas_tool) fn prepare_convert_selection_to_symbol(
     // 進むと、浮いた片があるとき、残りの確定が選んだ図形を外す前のセル画から作った地図で今の階層を書き直し、図形が
     // インスタンスの下に二重に残っていた：レビュー 5b822a3 の N-4003）。持ち上げられなければ断る
     let before = tab.session.floating().cloned();
-    if !tab.session.lift_selected_raw_shapes_to_floating() {
+    if !tab.session.lift_selected_raw_shapes_to_floating(&tab.stage()) {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return None;
     }
@@ -77,12 +77,12 @@ pub(in crate::canvas_tool) fn prepare_convert_selection_to_symbol(
             // シンボルの中身に入れる片は、元の所から取り出す（元の所は切り抜いたまま書く：`Floating::place_all`）
             fl.place_all();
             let Ok(rest) = fl.split_off(&keep, tab.session.editing_group_path()) else {
-                tab.session.set_floating(before);
+                tab.session.set_floating(before, &tab.stage());
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return None;
             };
             let Some(plan) = crate::canvas_tool::plan_commit(tab, &rest) else {
-                tab.session.set_floating(before);
+                tab.session.set_floating(before, &tab.stage());
                 return None;
             };
             Some(plan)

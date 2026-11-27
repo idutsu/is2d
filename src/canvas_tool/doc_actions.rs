@@ -1189,7 +1189,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                     tab.set_active_layer(l_idx);
                 }
                 tab.refresh_scene_base();
-                tab.session.set_floating(None);
+                tab.session.set_floating(None, &tab.stage());
                 true
             } else {
                 false
@@ -1499,13 +1499,13 @@ fn apply_bucket_fill(tab: &mut Tab, fill_color: Color32, pt: Point) -> bool {
                 return false;
             }
             let editable_lids: HashSet<u64> = editable_layer_ids(tab).into_iter().collect();
-            if !tab.session.lift_selected_raw_shapes_to_floating() {
+            if !tab.session.lift_selected_raw_shapes_to_floating(&tab.stage()) {
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
                 return false;
             }
             let ids = tab.session.selection().shapes.clone();
             let mut recolored = Ok(false);
-            tab.session.update_floating(|fl_opt| {
+            tab.session.update_floating(&tab.stage(), |fl_opt| {
                 if let Some(fl) = fl_opt {
                     // 動かした扱いにするのは、持ち上げた所と、色を変えたときの `recolor` だけ
                     recolored = fl.recolor(&ids, fill_color, &editable_lids);
@@ -1633,7 +1633,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
     // 地図は格子の内の形しか持てないので、生の図形（浮いた片と、まだ持ち上げていない選んだ生の図形と、選んだグループの中の
     // 生の図形）が格子の外（±65,536px の外）へ出る変形と、潰れる変形は、文書を変える前に断る。確かめるのは確定と同じ式
     // （`TransformFit::fits`。ドラッグ中の「置けない」の表示も同じ）なので、確かめを通れば確定で失敗しない
-    if !tab.session.transform_fit().fits(affine) {
+    if !tab.session.transform_fit(&tab.stage()).fits(affine) {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
@@ -1645,7 +1645,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
         }
     }
     // 選んだ生の図形は片に持ち上げて、片の変換で動かす（持ち上げられなければ断る）
-    if !tab.session.lift_selected_raw_shapes_to_floating() {
+    if !tab.session.lift_selected_raw_shapes_to_floating(&tab.stage()) {
         tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
         return false;
     }
@@ -1658,7 +1658,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
     // 選んだグループの中の生の図形の階層（レイヤー, 階層）
     let scopes = tab.session.selected_group_scopes();
     // 浮いた片（いつもみな選ばれている）は、片の組の変換に、文書の座標の変換を重ねる（確定のときに地図にかける）
-    tab.session.update_floating(|fl_opt| {
+    tab.session.update_floating(&tab.stage(), |fl_opt| {
         if let Some(fl) = fl_opt {
             if has_pieces {
                 fl.transform(doc);
@@ -1702,7 +1702,7 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
 /// インスタンスには新しい番号）。置いたものを選ぶ。置けなければ（格子の外）文書を変えずに `false`
 fn duplicate_selected_in_working_copy(tab: &mut Tab, offset: KVec2) -> bool {
     // ドラッグを始めるときに同じ中身を作ってあれば、それを使い回す（`Session::take_ahead_content`）
-    let Some(content) = tab.session.take_ahead_content().or_else(|| selected_content(tab)) else {
+    let Some(content) = tab.session.take_ahead_content(&tab.stage()).or_else(|| selected_content(tab)) else {
         return false;
     };
     let xform = content_xform(content.world, tab.session.edit_path().world_xform(), offset);
@@ -1908,7 +1908,7 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: An
     if !fl.edit_group(layer_id, group, |m| edit.apply(m)) {
         return false;
     }
-    tab.session.set_floating(Some(fl));
+    tab.session.set_floating(Some(fl), &tab.stage());
     true
 }
 

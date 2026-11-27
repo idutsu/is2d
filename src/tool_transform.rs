@@ -100,7 +100,7 @@ pub(crate) fn start_transform_drag(
             let tab = host.tab_mut();
             if let Some((orig_bbox, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot().is_some();
-                let orig_shapes = tab.session.begin_transform_overlay();
+                let orig_shapes = tab.session.begin_transform_overlay(&tab.stage());
                 // `Alt` の間は基準点を中心に拡大する（ドラッグの途中で押す・離すのに合わせて、毎回選ぶ）
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
                     handle,
@@ -112,7 +112,7 @@ pub(crate) fn start_transform_drag(
                     orig_shapes,
                     last_affine: Affine::IDENTITY,
                     changed: false,
-                    fit: std::sync::Arc::new(tab.session.transform_fit()),
+                    fit: std::sync::Arc::new(tab.session.transform_fit(&tab.stage())),
                     fits: true,
                 });
             }
@@ -121,7 +121,7 @@ pub(crate) fn start_transform_drag(
             let tab = host.tab_mut();
             if let Some((orig_bbox, pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot().is_some();
-                let orig_shapes = tab.session.begin_transform_overlay();
+                let orig_shapes = tab.session.begin_transform_overlay(&tab.stage());
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
                     pivot,
@@ -129,7 +129,7 @@ pub(crate) fn start_transform_drag(
                     start_angle: (pt.y - pivot.y).atan2(pt.x - pivot.x),
                     current_angle: 0.0,
                     orig_shapes,
-                    fit: std::sync::Arc::new(tab.session.transform_fit()),
+                    fit: std::sync::Arc::new(tab.session.transform_fit(&tab.stage())),
                     fits: true,
                 });
             }

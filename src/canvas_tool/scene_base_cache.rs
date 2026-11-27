@@ -36,7 +36,8 @@ struct CachedLayer {
     eval_frame: usize,
     world_xform_bits: [u64; 6],
     range: Range<usize>,
-    /// 画面に出しているキーフレームのセル画（文書の形。地図の編集・カーソル合わせ・浮いた片が、地図をここから読む）
+    /// 画面に出しているキーフレームのセル画（文書の形。画面のためだけの写し：カーソル合わせが地図をここから読む。作品に
+    /// 書く地図の編集と浮いた片の操作は、文書から読む：`write_local`・`Tab::stage`）
     cel: Option<crate::timeline::Cel>,
     /// そのセル画（と、中のシンボルのセル画）の地図の、計算に使う写し。画面に出している間、写しの持ち主はここ
     /// （`LayerBase::of_stored` は、ここが持っている写しを返す）
@@ -95,7 +96,8 @@ fn shown_keyframe_and_eval_frame(
     frame: usize,
     library: &Library,
 ) -> Option<(usize, usize)> {
-    let kf_idx = (layer.visible && !layer.locked)
+    let kf_idx = layer
+        .is_open()
         .then(|| layer.keyframe_index_at(frame))
         .flatten()?;
     Some((

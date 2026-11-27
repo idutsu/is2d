@@ -366,25 +366,21 @@ pub(crate) type CommitPlan = Vec<(
 /// は `TransformFit::fits`、新しい中身は `prepare_placement`）
 pub(in crate::canvas_tool) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     use crate::planar_map::LocalEdit;
-    // 画面の土台はいつも最新（`apply` の入口で作り直し、文書を変えた所は後始末で作り直す。Undo・保存の写しは確定の前に
-    // 作り直す）ので、ここでは作り直さない
-    #[cfg(test)]
-    assert!(
-        tab.scene_base_is_fresh(),
-        "浮いた片を確定するとき、画面の土台が古い"
-    );
+    // 作品に書くので、文書から作る土台で計算する（画面の土台に頼らない：設計審査 b7208d9 の 8.。前は画面の土台を読み、
+    // 呼ぶ道ごとに土台を先に作り直しておく約束があった）
+    let stage = tab.stage();
     let editable = editable_layer_ids(tab);
     // 複製のドラッグを始めるときに同じ計算をしてあれば、それを使い回す（`Session::take_ahead_commit`。同じ浮いた片・
     // 選択・階層・セル画の地図のときだけ）
     if fl.layers().iter().all(|l| editable.contains(&l.layer_id)) {
-        if let Some(plan) = tab.session.take_ahead_commit(fl) {
+        if let Some(plan) = tab.session.take_ahead_commit(fl, &stage) {
             return Some(plan);
         }
     }
     // 1本の道（設計 段2b の 11. の F2）：片を窓で重ねたしまう形（`committed_local`）とセル画のしまう形の違いを差分にして、
     // 差分から先（`apply_diff`）に渡す（`Floating::commit_edits`。持ち上げた絵（出どころ）でないセル画には書かない：
     // `FloatLayer::still_on`、設計審査 de92ceb の D-3）
-    let outcomes = fl.commit_edits(tab.session.stage());
+    let outcomes = fl.commit_edits(&stage);
     let mut plan = CommitPlan::new();
     for (l, outcome) in fl.layers().iter().zip(outcomes) {
         match outcome {
@@ -472,7 +468,7 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
             return true;
         };
         if fl.modified() && commit_floating_layers(tab, &fl).is_none() {
-            tab.session.set_floating(Some(fl));
+            tab.session.set_floating(Some(fl), &tab.stage());
             return false;
         }
         tab.session.retain_existing_selection();
@@ -480,8 +476,7 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
     }
 
     let before = tab.session.selection.clone();
-    tab.session
-        .set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
+    tab.set_selected_indices((0..is_keep.len()).filter(|&i| is_keep[i]));
     let pieces = tab.session.floating_view().pieces();
     let keep: HashSet<ShapeId> = pieces
         .iter()
@@ -495,7 +490,7 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
     // 断ったら、分ける前の浮いた片と選択に戻す
     let whole = fl.clone();
     let refuse = |tab: &mut Tab, why: Option<Refusal>| {
-        tab.session.set_floating(Some(whole));
+        tab.session.set_floating(Some(whole), &tab.stage());
         tab.session.restore_selection(before);
         if why.is_some() {
             tab.session.refusal = why;
@@ -505,7 +500,7 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
     // 1. 外した片のうち、動かしていない片は元の所に戻す（書く残りに元のまま入っているので、文書は書かない）。外した片を
     //    確定するのは、動かした片だけ（前は動かしていない片も確定する側に入れたので、確定のあとの残りの作り直しでその片が
     //    消えた：設計審査 4f8ef46 の D-1）
-    if !all_kept && !fl.return_pieces(tab.session.stage(), &keep) {
+    if !all_kept && !fl.return_pieces(&tab.stage(), &keep) {
         return refuse(tab, Some(Refusal::Unplaceable));
     }
     // 2. 残す片が無ければ、残りと動かした片をみな確定する（動かしていなければ書くものは無い）
@@ -524,13 +519,13 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
         if commit_floating_layers(tab, &to_commit).is_none() {
             return refuse(tab, None);
         }
-        if !fl.rebase_after_commit(tab.session.stage(), &to_commit) {
+        if !fl.rebase_after_commit(&tab.stage(), &to_commit) {
             return refuse(tab, Some(Refusal::Unplaceable));
         }
     }
     // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`。選び直しは
     // `Session::put_floating`）
-    tab.session.set_floating(Some(fl));
+    tab.session.set_floating(Some(fl), &tab.stage());
     tab.session.retain_existing_selection();
     true
 }

@@ -53,16 +53,15 @@ pub(in crate::canvas_tool) fn selected_content(tab: &Tab) -> Option<Content> {
     }
     let scope = session.editing_group_path();
     let tl = tab.active_timeline();
+    // 文書から作る土台の、今のコマのセル画を重ね順に（浮いた片の操作の土台は文書から：設計審査 b7208d9 の 8.）
+    let stage = tab.stage();
     let mut layers = Vec::new();
-    for &layer_id in session.base_cache().layer_order_ids() {
-        let Some(cel) = session.base_cache().cel(layer_id) else {
-            continue;
-        };
+    for (layer_id, cel) in stage.cels() {
         let float = session
             .floating()
             .and_then(|fl| fl.layers().iter().find(|l| l.layer_id == layer_id));
         let raw = match float {
-            Some(l) => Some(l.selected_map(session.stage(), &session.selection().shapes)?),
+            Some(l) => Some(l.selected_map(&stage, &session.selection().shapes)?),
             None => None,
         };
         let tween = tl
@@ -211,7 +210,7 @@ pub(in crate::canvas_tool) fn put_placements(tab: &mut Tab, placements: Vec<Plac
         }
     }
     finish_cel_writes(tab, &written);
-    tab.session.add_floating_maps(floats);
+    tab.session.add_floating_maps(&tab.stage(), floats);
     tab.session.retain_existing_selection();
 }
 
@@ -233,7 +232,7 @@ pub(crate) fn begin_move_selection_drag(
     } else {
         (None, Vec::new())
     };
-    tab.session.begin_move_overlay(alt_held, content, copy);
+    tab.session.begin_move_overlay(&tab.stage(), alt_held, content, copy);
     MoveSelectionDrag::new(pt, alt_held)
 }
 
