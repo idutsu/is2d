@@ -156,7 +156,16 @@ struct WriterCore {
     token: String,
     lock: Option<std::fs::File>,
     written: u64,
-    journals: HashMap<u64, Journal>,
+    journals: HashMap<u64, TabJournal>,
+}
+
+/// タブ1つの書き足すファイルと、最後に書いたときのタブ（中身の世代・保存先）。同じなら書かない：1回の操作で書くのは、
+/// 触ったタブの変わった所だけ（前はどれか1つのタブが変わると、変わっていない未保存のタブもみな書き足し、浮いた片を
+/// 置いたままのタブは、ほかのタブを触るたびに置いた文書を作り直して書いた：全体の点検 2026-11-27）
+struct TabJournal {
+    journal: Journal,
+    content_gen: u64,
+    file: Option<PathBuf>,
 }
 
 impl RecoveryWriter {
@@ -267,7 +276,7 @@ impl WriterCore {
         let gone: Vec<u64> = self.journals.keys().copied().filter(|id| !items.iter().any(|i| i.id == *id)).collect();
         for id in gone {
             if let Some(j) = self.journals.remove(&id) {
-                self.remove(id, &j);
+                self.remove(id, &j.journal);
             }
         }
         if items.is_empty() || std::fs::create_dir_all(&self.dir).is_err() {
@@ -276,9 +285,9 @@ impl WriterCore {
         for item in items {
             if !item.dirty {
                 if let Some(j) = self.journals.get_mut(&item.id) {
-                    if j.mark_saved().is_err() {
+                    if j.journal.mark_saved().is_err() {
                         if let Some(j) = self.journals.remove(&item.id) {
-                            self.remove(item.id, &j);
+                            self.remove(item.id, &j.journal);
                         }
                     }
                 }
@@ -287,12 +296,18 @@ impl WriterCore {
             let name = format!("{}-{}-{RECOVER_MARK}{}.is2dj", self.token, item.id, item.name());
             let path = self.dir.join(&name);
             let tmp = self.dir.join(format!(".{name}.tmp"));
-            let doc = item.document();
             let source = item.file.as_deref();
             match self.journals.get_mut(&item.id) {
-                // 同じ名前のファイルに書き足す
-                Some(j) if j.path() == path => {
-                    if j.write(&tmp, &doc, source).is_err() {
+                // 前に書いたときから変わっていない（中身の世代も保存先も同じ）：書かない
+                Some(j) if j.journal.path() == path && j.content_gen == item.content_gen && j.file == item.file => {
+                    continue;
+                }
+                // 同じ名前のファイルに、変わった所を書き足す
+                Some(j) if j.journal.path() == path => {
+                    if j.journal.write(&tmp, &item.document(), source).is_ok() {
+                        j.content_gen = item.content_gen;
+                        j.file.clone_from(&item.file);
+                    } else {
                         self.journals.remove(&item.id);
                     }
                     continue;
@@ -300,7 +315,7 @@ impl WriterCore {
                 // 名前が変わった：前のファイルを消して、新しく作る
                 Some(_) => {
                     if let Some(old) = self.journals.remove(&item.id) {
-                        self.remove(item.id, &old);
+                        self.remove(item.id, &old.journal);
                     }
                 }
                 None => {}
@@ -310,9 +325,9 @@ impl WriterCore {
             if std::fs::write(&entry, path.to_string_lossy().as_bytes()).is_err() {
                 continue;
             }
-            match Journal::create(&path, &tmp, &doc, source) {
-                Ok(j) => {
-                    self.journals.insert(item.id, j);
+            match Journal::create(&path, &tmp, &item.document(), source) {
+                Ok(journal) => {
+                    self.journals.insert(item.id, TabJournal { journal, content_gen: item.content_gen, file: item.file.clone() });
                 }
                 Err(_) => {
                     let _ = std::fs::remove_file(&entry);

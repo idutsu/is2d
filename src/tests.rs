@@ -22564,6 +22564,59 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
+/// 復旧の書き手は、1回の操作で、触ったタブの変わった所だけを書く：ほかのタブを触っても、変わっていない未保存のタブの
+/// 復旧ファイルには何も書き足さない（浮いた片を置いたままのタブも。前は、どれか1つのタブが変わると未保存のタブをみな
+/// 書き足し、浮いた片のあるタブは置いた文書を作り直して塊ごと書いた：全体の点検 2026-11-27）
+#[test]
+fn recovery_writer_writes_only_the_touched_tab() {
+    use crate::recovery::{RecoveryWriter, TabCopies};
+    let rec_dir = std::env::temp_dir().join(format!("is2d_writer_touched_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rec_dir);
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    let red = Color32::from_rgb(220, 40, 40);
+    let stroke = |app: &mut Is2dApp, y: f64| {
+        assert!(apply(app, Action::PaintStroke { points: vec![Point::new(30.0, y), Point::new(90.0, y)], radius: 6.0, color: red }));
+    };
+    // タブ0：描いて、絵を持ち上げて動かしたまま（浮いた片を置いていない）
+    stroke(&mut app, 30.0);
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 200.0), alt_duplicate: false }));
+    assert!(app.session.floating().is_some_and(|f| f.modified()));
+    // タブ1：描く
+    crate::project_io::new_project(&mut app, &ctx);
+    stroke(&mut app, 60.0);
+    let writer = RecoveryWriter::start(rec_dir.clone());
+    let copies = TabCopies::default();
+    let flush = |app: &Is2dApp| {
+        assert!(copies.refresh(&app.tabs));
+        writer.flush(copies.get());
+    };
+    flush(&app);
+    let journal_of = |id: u64| -> std::path::PathBuf {
+        std::fs::read_dir(&rec_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("is2dj") && p.to_string_lossy().contains(&format!("-{id}-")))
+            .expect("タブの復旧ファイル")
+    };
+    let tab0 = journal_of(app.tabs[0].id);
+    let size0 = std::fs::metadata(&tab0).unwrap().len();
+    // タブ1だけを何度か触る：タブ0の復旧ファイルは、書くたびに見て、1バイトも変わらない（終わりだけを見ると、書き足した
+    // 量が全体を超えて全体を書き直したときに、元の大きさに戻って見逃す）
+    for i in 0..3 {
+        stroke(&mut app, 100.0 + f64::from(i) * 20.0);
+        flush(&app);
+        assert_eq!(std::fs::metadata(&tab0).unwrap().len(), size0, "{i} 回目：触っていないタブの復旧ファイルに書いた");
+    }
+    // タブ1の復旧ファイルは、触るたびに書き足す
+    let tab1 = journal_of(app.tabs[1].id);
+    assert!(std::fs::metadata(&tab1).unwrap().len() > 0);
+    writer.finish(true);
+    let _ = std::fs::remove_dir_all(&rec_dir);
+}
+
 #[test]
 fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
     use crate::doc_actions::{apply, Action};
