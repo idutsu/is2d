@@ -88,7 +88,7 @@ impl Wireframe {
         let pad = f64::from(ANCHOR_RADIUS + ANCHOR_RING / 2.0) / tab.view.zoom() as f64;
         let view = tab
             .view
-            .visible_world_rect(painter, tab.doc.stage_size, tab.session.edit_path().shows_stage())
+            .visible_world_rect(painter, tab.doc().stage_size, tab.session.edit_path().shows_stage())
             .inflate(pad, pad);
         let stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(30, 80, 180, 140));
         for q in self.edges.drain(..) {

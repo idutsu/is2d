@@ -15,7 +15,7 @@ use crate::vector_engine::{LayerId, ShapeId};
 
 /// 現在の選択図形のうち `keep_indices` のみを選択に残し、選択から外れた変更済み生シェイプのみをキャンバスへ結合・切り抜き確定する
 /// （選択に残った図形は結合せず `Floating` のまま維持する）
-pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices: &[usize]) {
+pub(in crate::canvas_tool) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices: &[usize]) {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     if !any_valid {
         let _ = clear_selection(tab);
@@ -36,7 +36,7 @@ pub(crate) fn retain_selection_and_flush_deselected(tab: &mut Tab, keep_indices:
 }
 
 /// ダブルクリック位置 `pt` にシンボルがあればそのシンボルの独自タイムラインへ入り、グループがあればインプレイス編集モードへ移行する
-pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
+pub(in crate::canvas_tool) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
     let scene = tab.scene();
     let Some(hit_idx) = scene.topmost_shape_at(pt, tab.session.editing_group_path()) else {
         return false;
@@ -60,7 +60,7 @@ pub(crate) fn enter_group_at(tab: &mut Tab, pt: Point) -> bool {
 }
 
 /// 現在入っているグループまたはシンボルタイムライン編集階層から1段階上の親階層へ戻る
-pub(crate) fn exit_current_group(tab: &mut Tab) -> bool {
+pub(in crate::canvas_tool) fn exit_current_group(tab: &mut Tab) -> bool {
     if !tab.session.editing_group_path().is_empty() {
         if !clear_selection(tab) {
             return false;
@@ -106,7 +106,7 @@ pub(crate) fn handle_canvas_double_click(host: &mut impl ActionHost, pt: Point, 
 /// ダブルクリックで選ぶ：点 `pt` のいちばん上の、編集できるレイヤーの今の階層の生の図形（面か線）と、それにつながったもの
 /// （`LayerBase::connected_ids`）を選ぶ。`add`（Shift を押したダブルクリック）なら今の選択に足し、そうでなければ今の選択と
 /// 入れ替える（Shift クリックで足すのと同じ）。そういう図形が無ければ何もしない
-pub(crate) fn select_connected_at(tab: &mut Tab, pt: Point, add: bool) -> bool {
+pub(in crate::canvas_tool) fn select_connected_at(tab: &mut Tab, pt: Point, add: bool) -> bool {
     let scope = tab.session.editing_group_path().to_vec();
     let scene = tab.scene();
     let Some(hit) = scene
@@ -178,7 +178,7 @@ pub(crate) fn apply_click_selection(
 }
 
 /// Shift クリック等で指定シェイプ（またはグループ塊全体）の選択状態をトグルし、変形ピボットをリセットする
-pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
+pub(in crate::canvas_tool) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
     let scene = tab.scene();
     let unit = scene.expand_to_group_unit(scene_idx, tab.session.editing_group_path());
     let (sel_mask, _) = scene.selected_shape_mask(tab.session.selection());
@@ -200,7 +200,7 @@ pub(crate) fn toggle_shape_selection(tab: &mut Tab, scene_idx: usize) {
 }
 
 /// 既存の選択を確定解除した上で、指定座標 `pt` にある最前面シェイプ（塗り・境界線・頂点、またはグループ塊全体）を選択する
-pub(crate) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt: Point) -> bool {
+pub(in crate::canvas_tool) fn select_single_shape_at(tab: &mut Tab, sub_mode: SelectSubMode, pt: Point) -> bool {
     if !clear_selection(tab) {
         return false;
     }
@@ -273,7 +273,7 @@ pub(crate) fn finish_selection_drag(host: &mut impl ActionHost, mouse_pt: Option
 }
 
 /// Adobe Animate 風の矩形選択（Marquee Selection）
-pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, additive: bool) {
+pub(in crate::canvas_tool) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, additive: bool) {
     let min_x = p0.x.min(p1.x);
     let max_x = p0.x.max(p1.x);
     let min_y = p0.y.min(p1.y);
@@ -365,7 +365,7 @@ pub(crate) fn apply_marquee_selection(tab: &mut Tab, p0: Point, p1: Point, addit
 
 /// 2次ベジェ曲線の3制御点 `(p0, p1, p2)` の凸包AABB（余白 `margin` 付き）に点 `pt` が含まれるかを高速判定する
 #[inline]
-pub(crate) fn quad_control_bbox_contains(seg: &QuadBez, pt: Point, margin: f64) -> bool {
+pub(in crate::canvas_tool) fn quad_control_bbox_contains(seg: &QuadBez, pt: Point, margin: f64) -> bool {
     let min_x = seg.p0.x.min(seg.p1.x).min(seg.p2.x) - margin;
     let max_x = seg.p0.x.max(seg.p1.x).max(seg.p2.x) + margin;
     let min_y = seg.p0.y.min(seg.p1.y).min(seg.p2.y) - margin;
@@ -428,7 +428,7 @@ fn shape_overlaps_rect(shape: &FillShape, rect: KRect) -> bool {
 }
 
 /// 矩形 `rect` と交差する現在の編集スコープ直下の子グループID一覧を収集する
-pub(crate) fn collect_marquee_hit_groups(
+pub(in crate::canvas_tool) fn collect_marquee_hit_groups(
     scene: Scene<'_>,
     editing_group_path: &[u64],
     rect: KRect,
@@ -532,7 +532,7 @@ pub(crate) fn selected_single_layer_id(tab: &Tab) -> Option<LayerId> {
 }
 
 /// 選択中のオブジェクト（生シェイプ・既存グループ問わず）を新しい1つのグループにまとめる
-pub(crate) fn prepare_group_selected_shapes(
+pub(in crate::canvas_tool) fn prepare_group_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
     let Some(target_lid) = selected_single_layer_id(tab) else {
@@ -647,7 +647,6 @@ pub(crate) fn prepare_group_selected_shapes(
     if let Some(l_idx) = tab.active_timeline().layer_index_by_id(target_lid) {
         tab.set_active_layer(l_idx);
     }
-    tab.session.transform_pivot = None;
     true
 }
 
@@ -655,7 +654,7 @@ pub(crate) fn prepare_group_selected_shapes(
 /// 生の図形は、そのグループの地図を浮いた片にする）。インスタンスは、そのコマのシンボルの中身（`SymbolDef::detached_cels`）
 /// を、インスタンスの変換で今の階層に置き、インスタンスと入れ替える（`put_placements`。生の図形は浮いた片）。どれも地図で
 /// 運び、図形から地図は作らない。中身が格子の外にかかるなら、文書を変える前に断る
-pub(crate) fn prepare_ungroup_selected_shapes(
+pub(in crate::canvas_tool) fn prepare_ungroup_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
     if !tab
@@ -775,7 +774,6 @@ pub(crate) fn prepare_ungroup_selected_shapes(
         let _ = tab.session.lift_selected_raw_shapes_to_floating();
     }
     tab.session.retain_existing_selection();
-    tab.session.transform_pivot = None;
     true
 }
 
@@ -789,7 +787,7 @@ pub(crate) enum ArrangeMode {
 }
 
 /// 選択中のグループ・シンボルインスタンスの重ね順を、各レイヤー・現在の編集スコープ内で変更する
-pub(crate) fn prepare_arrange_selected(
+pub(in crate::canvas_tool) fn prepare_arrange_selected(
     tab: &mut Tab,
     mode: ArrangeMode,
 ) -> bool {
@@ -863,7 +861,7 @@ pub(crate) fn prepare_arrange_selected(
 }
 
 /// 選択中のオブジェクトをキャンバスから削除する
-pub(crate) fn prepare_delete_selected_shapes(
+pub(in crate::canvas_tool) fn prepare_delete_selected_shapes(
     tab: &mut Tab,
 ) -> bool {
     if tab.session.selection().is_empty() {
@@ -899,12 +897,11 @@ pub(crate) fn prepare_delete_selected_shapes(
     if tab.session.refusal.is_some() {
         return false;
     }
-    tab.session.transform_pivot = None;
     true
 }
 
 /// 現在の編集スコープの図形をすべて消去する
-pub(crate) fn prepare_clear_active_frame_shapes(
+pub(in crate::canvas_tool) fn prepare_clear_active_frame_shapes(
     tab: &mut Tab,
 ) -> bool {
     let layer_ids = editable_layer_ids(tab);

@@ -48,14 +48,14 @@ pub(crate) struct UnsavedTab {
 impl UnsavedTab {
     /// タブ `tab` の控え（保存したことがない・未保存の変更が無いタブは `None`）
     pub(crate) fn of(tab: &Tab) -> Option<Self> {
-        let file = tab.file.clone().filter(|_| tab.history.is_dirty())?;
+        let file = tab.file.clone().filter(|_| tab.history().is_dirty())?;
         Some(Self {
             id: tab.id,
             untitled_number: tab.untitled_number,
             file,
             #[cfg(any(target_os = "windows", test))]
-            content_gen: tab.history.content_gen,
-            doc: tab.doc.clone(),
+            content_gen: tab.history().content_gen,
+            doc: tab.doc().clone(),
             edit_path: tab.session.edit_path().clone(),
             editing_group_path: tab.session.editing_group_path().to_vec(),
             floating: tab.session.shared_floating(),
@@ -77,8 +77,8 @@ impl UnsavedTabs {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let now = tabs
             .iter()
-            .filter(|t| t.history.is_dirty() && t.file.is_some())
-            .map(|t| (t.id, t.history.content_gen, t.file.as_deref()));
+            .filter(|t| t.history().is_dirty() && t.file.is_some())
+            .map(|t| (t.id, t.history().content_gen, t.file.as_deref()));
         if !now.eq(held.iter().map(|u| (u.id, u.content_gen, Some(u.file.as_path())))) {
             *held = tabs.iter().filter_map(UnsavedTab::of).collect();
         }
@@ -218,7 +218,7 @@ impl Recovery {
                     .ok_or_else(|| "復旧ファイルに元のファイル場所がありません".to_owned())?;
                 open_document_in_new_tab(ws, proj_doc.into_document()?, Some(ctx))?;
                 ws.tab_mut().file = Some(src);
-                ws.tab_mut().history.mark_unsaved();
+                ws.tab_mut().mark_unsaved();
                 Ok(())
             });
 

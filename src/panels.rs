@@ -521,7 +521,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
             items.push(format!("{} Group #{gid}", icons::GROUP));
         }
         let sym_name = tab
-            .doc
+            .doc()
             .library()
             .iter()
             .find(|s| s.id == lvl.symbol_id)
@@ -948,7 +948,7 @@ fn draw_transform_tool_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
             has_sel
                 && tab.scene().has_custom_transform_pivot(
                     tab.session.selection(),
-                    tab.session.transform_pivot,
+                    tab.session.transform_pivot(),
                 ),
             egui::Button::new(format!(
                 "{} 変形中心（ピボット）をリセット",
@@ -1047,8 +1047,8 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
                 .size(11.5)
                 .color(Color32::from_rgb(70, 78, 90)),
         );
-        let mut w = tab.doc.stage_size.x.round() as i32;
-        let mut h = tab.doc.stage_size.y.round() as i32;
+        let mut w = tab.doc().stage_size.x.round() as i32;
+        let mut h = tab.doc().stage_size.y.round() as i32;
         let w_resp = ui
             .add(
                 egui::DragValue::new(&mut w)
@@ -1070,15 +1070,15 @@ fn draw_canvas_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
             if w_resp.changed() {
                 w as f32
             } else {
-                tab.doc.stage_size.x
+                tab.doc().stage_size.x
             },
             if h_resp.changed() {
                 h as f32
             } else {
-                tab.doc.stage_size.y
+                tab.doc().stage_size.y
             },
         );
-        if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc.stage_size {
+        if (w_resp.changed() || h_resp.changed()) && next_size != tab.doc().stage_size {
             actions.push(UiAction::Doc(Action::SetStageSize { size: next_size }));
         }
         if let Some(end) = coalesce_end(CoalesceKey::StageSize, &[&w_resp, &h_resp]) {
@@ -1263,7 +1263,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     };
     let current = tl.layers[l].keyframes[k].sound.map(|c| c.sound);
     let name_of = |id: Option<u64>| {
-        id.and_then(|id| tab.doc.sounds.iter().find(|s| s.id == id))
+        id.and_then(|id| tab.doc().sounds.iter().find(|s| s.id == id))
             .map_or("なし", |s| s.name.as_str())
     };
 
@@ -1275,7 +1275,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
         .selected_text(name_of(current))
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut chosen, None, "なし");
-            for s in tab.doc.sounds.iter() {
+            for s in tab.doc().sounds.iter() {
                 ui.selectable_value(&mut chosen, Some(s.id), s.name.as_str());
             }
         });
@@ -1488,7 +1488,7 @@ fn draw_symbol_color_effect(
 
 /// 「ライブラリ」タブの描画（シンボルのプレビュー・一覧・名前変更・ステージ配置・編集・削除）
 pub(crate) fn draw_library_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    if tab.doc.library().is_empty() {
+    if tab.doc().library().is_empty() {
         ui.label(
             egui::RichText::new(
                 "シンボルがありません。\n図形を選択して F8 キーを押すとシンボルを作成できます。",
@@ -1503,15 +1503,15 @@ pub(crate) fn draw_library_tab(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut 
 
         draw_panel_section_label(
             ui,
-            &format!("登録シンボル一覧 ({})", tab.doc.library().len()),
+            &format!("登録シンボル一覧 ({})", tab.doc().library().len()),
             4.0,
         );
         draw_library_symbol_list(tab, actions, ui);
     }
 
-    if !tab.doc.sounds.is_empty() {
+    if !tab.doc().sounds.is_empty() {
         draw_panel_separator(ui);
-        draw_panel_section_label(ui, &format!("音 ({})", tab.doc.sounds.len()), 4.0);
+        draw_panel_section_label(ui, &format!("音 ({})", tab.doc().sounds.len()), 4.0);
         draw_library_sound_list(tab, actions, ui);
     }
 }
@@ -1523,7 +1523,7 @@ fn draw_selected_library_symbol_controls(
     ui: &mut egui::Ui,
     sel_id: u64,
 ) {
-    if let Some(sym) = tab.doc.find_symbol(sel_id) {
+    if let Some(sym) = tab.doc().find_symbol(sel_id) {
         draw_symbol_mini_preview(tab, ui, sym);
         ui.add_space(6.0);
     }
@@ -1595,7 +1595,7 @@ fn draw_selected_library_symbol_controls(
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
 fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
     let entries: Vec<(u64, String)> = tab
-        .doc
+        .doc()
         .library()
         .iter()
         .map(|s| (s.id, s.name.clone()))
@@ -1607,7 +1607,7 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
 
     let active_doc_id = tab.id;
     // 下に音の一覧があるときは、残りの高さを2つの一覧で半分ずつ分ける（シンボルが少なければ、詰めた残りを音の一覧に回す）
-    let max_height = if tab.doc.sounds.is_empty() {
+    let max_height = if tab.doc().sounds.is_empty() {
         f32::INFINITY
     } else {
         ui.available_height() / 2.0
@@ -1690,7 +1690,7 @@ fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui
         .id_salt("library_sound_list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for s in tab.doc.sounds.iter() {
+            for s in tab.doc().sounds.iter() {
                 ui.push_id((tab.id, "sound", s.id), |ui| {
                     egui::Frame::NONE
                         .fill(Color32::from_rgb(252, 253, 255))
@@ -1772,7 +1772,7 @@ fn draw_symbol_mini_preview(tab: &Tab, ui: &mut egui::Ui, sym: &SymbolDef) {
     let drawn =
         tab.view
             .symbol_previews
-            .with(sym, &tab.doc, |bbox, mesh| {
+            .with(sym, tab.doc(), |bbox, mesh| {
                 let w = (bbox.x1 - bbox.x0).max(1.0) as f32;
                 let h = (bbox.y1 - bbox.y0).max(1.0) as f32;
                 let pad = 14.0;
@@ -1868,7 +1868,7 @@ pub(crate) fn draw_canvas_contents(
     let in_group_edit = !tab.session.editing_group_path().is_empty();
     let zoom = tab.view.zoom();
     let pan = tab.view.pan;
-    let stage_size = tab.doc.stage_size;
+    let stage_size = tab.doc().stage_size;
     let shows_stage = tab.session.edit_path().shows_stage();
     let artwork_painter =
         tab.view

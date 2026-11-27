@@ -7,7 +7,7 @@ use kurbo::{Affine, Point};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Session, Tab, UndoHistory, View};
+use crate::canvas_tool::{cancel_active_drag, SelectSubMode, Tab};
 use crate::stored_map::{ReadTiles, TileReader, WriteTiles};
 use crate::symbol::{
     ColorEffect, Document, SymbolDef, SymbolInstance, SymbolInstanceBinding, SymbolLoopMode,
@@ -121,7 +121,7 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
 /// 入力欄の的を初めに戻す（前は道ごとに後片付けが違い、まっさらなタブに開いたときと最後のタブを閉じたときは貼り付けの
 /// ずらしが前の作品の続きになった：約束の棚卸し 5616fcc の C の B2・D2）
 fn install_document(ws: &mut impl ProjectWorkspace, doc: Document, ctx: Option<&egui::Context>) {
-    install_document_in_tab(ws.tab_mut(), doc);
+    ws.tab_mut().install(doc);
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
     ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
@@ -130,28 +130,21 @@ fn install_document(ws: &mut impl ProjectWorkspace, doc: Document, ctx: Option<&
     }
 }
 
-/// タブ `tab` に文書 `doc` を入れる所のうち、タブの中の分（`install_document` の一部）
-fn install_document_in_tab(tab: &mut Tab, doc: Document) {
-    tab.doc = doc;
-    tab.history = UndoHistory::default();
-    tab.session = Session::default();
-    tab.view = View::default();
-    tab.refresh_scene_base();
-}
+
 
 /// 現在アクティブなタブが「起動直後・新規作成直後で一度も編集されていない白紙の無題タブ」であるかを判定する。文書を
 /// 変えるのはみな `apply` で、そのたびに世代 ID を進める（`UndoHistory::push`）ので、編集の有無はその1つの印で決める
 /// （既定値を写して推さない：レビュー f01d518 の N-5008）。ファイルが無いこと（保存も読み込みもしていない）と、未保存の
 /// 印が無いこと（別のタブの上書きでファイルから外したタブは、中身があっても編集していないので、この印で見分ける）も見る
 pub(crate) fn is_active_tab_pristine_empty(tab: &Tab) -> bool {
-    tab.file.is_none() && !tab.history.is_dirty() && tab.history.next_commit_id == 1
+    tab.file.is_none() && !tab.history().is_dirty() && tab.history().next_commit_id == 1
 }
 
 /// 指定したインデックス `index` のタブに未保存変更（`is_dirty() == true`）があるかを返す
 pub(crate) fn is_tab_dirty(ws: &impl ProjectWorkspace, index: usize) -> bool {
     ws.tabs()
         .get(index)
-        .is_some_and(|tab| tab.history.is_dirty())
+        .is_some_and(|tab| tab.history().is_dirty())
 }
 
 /// OSウィンドウの閉じる操作（`×` ボタンや `Cmd+Q` / `Alt+F4`）が要求された際、
@@ -873,7 +866,7 @@ impl<T: Serialize> ProjectDocument<T> {
     /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
     pub(crate) fn apply_to_app(self, tab: &mut Tab) {
         let doc = self.into_document().expect("正しい地図の文書");
-        install_document_in_tab(tab, doc);
+        tab.install(doc);
     }
 }
 
@@ -1422,12 +1415,12 @@ pub(crate) fn save_project_to_path(
                 tab.untitled_number = num;
             }
             tab.file = None;
-            tab.history.mark_unsaved();
+            tab.mark_unsaved();
         }
     }
 
     ws.tab_mut().file = Some(path.to_path_buf());
-    ws.tab_mut().history.mark_saved();
+    ws.tab_mut().mark_saved();
     Ok(())
 }
 
@@ -1471,7 +1464,7 @@ pub(crate) fn open_document_in_new_tab(
     // テストでは裏で確かめない（まだ確かめていない地図を調べるテストが、裏のスレッドと競わないように。裏で確かめる
     // テストは `check_maps_in_background` を直接呼ぶ）
     #[cfg(not(test))]
-    let _ = ws.tab().doc.check_maps_in_background();
+    let _ = ws.tab().doc().check_maps_in_background();
     Ok(())
 }
 
@@ -1502,9 +1495,9 @@ pub(crate) fn open_project_in_tab(
 
     ws.tab_mut().file = Some(path.to_path_buf());
     if trimmed {
-        ws.tab_mut().history.mark_unsaved();
+        ws.tab_mut().mark_unsaved();
     } else {
-        ws.tab_mut().history.mark_saved();
+        ws.tab_mut().mark_saved();
     }
     if let Some(c) = ctx {
         surrender_focused_widget(c);

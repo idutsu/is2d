@@ -397,7 +397,7 @@ impl Action {
     /// 操作ごとの表：入口 `apply` が、操作の前と後にすることを、ここだけで決める（呼ぶ側に前置きを覚えさせない：設計
     /// claude/約束を入口で守る設計_5616fcc.md の 1.）。全部の種類を書く（`_ =>` は使わない。種類を足すと、ここが組み立てで
     /// 止まるので、足した人が必ず決める）
-    pub(crate) fn policy(&self, tab: &Tab) -> Policy {
+    pub(in crate::canvas_tool) fn policy(&self, tab: &Tab) -> Policy {
         use FloatingUse::{CommitFirst, Handles, Untouched};
         let step = |floating| Policy::new(floating, UndoUse::Step);
         let none = |floating| Policy::new(floating, UndoUse::None);
@@ -824,6 +824,10 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     }
     let before = undo_snapshot(host.tab());
     host.tab_mut().history.before = Some(before);
+    let position_before = {
+        let tl = host.tab().active_timeline();
+        (tl.current_frame, tl.active_layer)
+    };
     let prev_library = host.tab().doc.library().clone();
     let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
     let prev_fps = host.tab().doc.fps;
@@ -857,8 +861,11 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     // N-4001・設計審査 de92ceb の D-5）
     // 入口が先に貼り戻したのに操作が何もしなかったときも、貼り戻す前に戻す（前は操作が条件を確かめてから貼り戻したので、
     // 何もしない操作は持ち上げた絵をそのままにした）
+    // 戻すかどうかは「操作が `false` で、中身か浮いた片が変わった（`ContentMark`）か、入口が先に貼り戻した」の1つで決める。
+    // 断りの知らせは知らせるだけ（前は知らせがあるときだけ戻したので、知らせを記し忘れて途中まで書いた操作は、書いたものが
+    // 残りえた：設計 入口の部屋の設計_27c4085 の 2.2）
     let refusal = tab.session.refusal.take();
-    if !res && (refusal.is_some() || commits_first) {
+    if !res && (changed || commits_first) {
         restore_state_before_action(tab);
     }
     if let Some(refusal) = refusal {
@@ -876,6 +883,22 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     // 5616fcc の A の P-15）
     if policy.undo == UndoUse::None && before.as_ref().is_some_and(|b| &b.selection != tab.session.selection()) {
         tab.history.end_coalesce();
+    }
+    // 自由変形の中心点は、選択か見ている場所（コマ・レイヤー・シンボルの中・グループの階層）が変わったら真ん中に戻す（戻す
+    // 所はここだけ：持ち主が決めた 2026-11-27。前は選択の入口・タイムラインの後片付け・取り消しの入れ替え・グループ化など
+    // 8 か所で戻していた：設計 入口の部屋の設計_27c4085 の 2.3）。断った操作は操作の前に戻してあるので（`before` は空）、
+    // 中心点もそのまま
+    let position = {
+        let tl = tab.active_timeline();
+        (tl.current_frame, tl.active_layer)
+    };
+    if before.as_ref().is_some_and(|b| {
+        &b.selection != tab.session.selection()
+            || &b.edit_path != tab.session.edit_path()
+            || b.editing_group_path != tab.session.editing_group_path()
+            || position != position_before
+    }) {
+        tab.session.transform_pivot = None;
     }
     match policy.panel {
         PanelFocus::Keep => {}
@@ -1156,7 +1179,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
                 }
                 tab.refresh_scene_base();
                 tab.session.set_floating(None);
-                tab.session.transform_pivot = None;
                 true
             } else {
                 false
@@ -1358,7 +1380,7 @@ fn apply_stroke_shapes(tab: &mut Tab, active_tool: Tool, shapes: Vec<FillShape>)
 /// 正しい地図にならなければ `Refusal::Unwritable` を知らせて、そこで止めて `false`（それまでに書いた所は、断った操作を
 /// `apply` が操作の前に戻す：全部か無しか。前はグループの変形だけがこの入口の中身を写した別の道で書き、断った理由を捨て、
 /// 断られたグループだけが黙って動かずに残った：レビュー de92ceb の N-4001。設計：claude/地図を書く入口を1つにする設計_904de4a.md）
-pub(crate) fn write_local(
+pub(in crate::canvas_tool) fn write_local(
     tab: &mut Tab,
     targets: &[(LayerId, Vec<u64>)],
     f: impl Fn(&crate::planar_map::LayerBase, &[u64]) -> crate::planar_map::LocalEdit,
@@ -2353,18 +2375,18 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32) -> bool {
 // ============================================================================
 
 #[cfg(test)]
-pub(crate) fn commit_raw_outline(host: &mut impl ActionHost, raw: &[Point]) {
+pub(in crate::canvas_tool) fn commit_raw_outline(host: &mut impl ActionHost, raw: &[Point]) {
     apply(host, Action::CommitRawOutline { raw: raw.to_vec() });
 }
 
 #[cfg(test)]
-pub(crate) fn bucket_fill_at(host: &mut impl ActionHost, pt: Point) -> bool {
+pub(in crate::canvas_tool) fn bucket_fill_at(host: &mut impl ActionHost, pt: Point) -> bool {
     let color = host.tool().brush_color;
     apply(host, Action::BucketFill { pt, color })
 }
 
 #[cfg(test)]
-pub(crate) fn finish_move_selection_drag(
+pub(in crate::canvas_tool) fn finish_move_selection_drag(
     host: &mut impl ActionHost,
     total_delta: KVec2,
     alt_duplicate: bool,
@@ -2379,7 +2401,7 @@ pub(crate) fn finish_move_selection_drag(
 }
 
 #[cfg(test)]
-pub(crate) fn group_selected_shapes(host: &mut impl ActionHost) -> Option<u64> {
+pub(in crate::canvas_tool) fn group_selected_shapes(host: &mut impl ActionHost) -> Option<u64> {
     if !apply(host, Action::Group) {
         return None;
     }
@@ -2392,42 +2414,42 @@ pub(crate) fn group_selected_shapes(host: &mut impl ActionHost) -> Option<u64> {
 }
 
 #[cfg(test)]
-pub(crate) fn ungroup_selected_shapes(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn ungroup_selected_shapes(host: &mut impl ActionHost) -> bool {
     apply(host, Action::Ungroup)
 }
 
 #[cfg(test)]
-pub(crate) fn nudge_selected_shapes(host: &mut impl ActionHost, delta: KVec2) -> bool {
+pub(in crate::canvas_tool) fn nudge_selected_shapes(host: &mut impl ActionHost, delta: KVec2) -> bool {
     apply(host, Action::NudgeSelection { delta })
 }
 
 #[cfg(test)]
-pub(crate) fn delete_selected_shapes(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn delete_selected_shapes(host: &mut impl ActionHost) -> bool {
     apply(host, Action::DeleteSelection)
 }
 
 #[cfg(test)]
-pub(crate) fn clear_active_frame_shapes(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn clear_active_frame_shapes(host: &mut impl ActionHost) -> bool {
     apply(host, Action::ClearActiveFrame)
 }
 
 #[cfg(test)]
-pub(crate) fn copy_selected_shapes(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn copy_selected_shapes(host: &mut impl ActionHost) -> bool {
     apply(host, Action::Copy)
 }
 
 #[cfg(test)]
-pub(crate) fn cut_selected_shapes(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn cut_selected_shapes(host: &mut impl ActionHost) -> bool {
     apply(host, Action::Cut)
 }
 
 #[cfg(test)]
-pub(crate) fn paste_clipboard(host: &mut impl ActionHost, in_place: bool) -> bool {
+pub(in crate::canvas_tool) fn paste_clipboard(host: &mut impl ActionHost, in_place: bool) -> bool {
     apply(host, Action::Paste { in_place })
 }
 
 #[cfg(test)]
-pub(crate) fn set_selected_symbol_world_pivot(
+pub(in crate::canvas_tool) fn set_selected_symbol_world_pivot(
     host: &mut impl ActionHost,
     world_pivot: Option<Point>,
 ) -> bool {
@@ -2435,32 +2457,32 @@ pub(crate) fn set_selected_symbol_world_pivot(
 }
 
 #[cfg(test)]
-pub(crate) fn scale_selected_shapes(host: &mut impl ActionHost, sx: f64, sy: f64) -> bool {
+pub(in crate::canvas_tool) fn scale_selected_shapes(host: &mut impl ActionHost, sx: f64, sy: f64) -> bool {
     apply(host, Action::ScaleSelection { sx, sy })
 }
 
 #[cfg(test)]
-pub(crate) fn flip_selected_shapes(host: &mut impl ActionHost, flip_x: bool, flip_y: bool) -> bool {
+pub(in crate::canvas_tool) fn flip_selected_shapes(host: &mut impl ActionHost, flip_x: bool, flip_y: bool) -> bool {
     apply(host, Action::FlipSelection { flip_x, flip_y })
 }
 
 #[cfg(test)]
-pub(crate) fn rotate_selected_shapes(host: &mut impl ActionHost, angle_rad: f64) -> bool {
+pub(in crate::canvas_tool) fn rotate_selected_shapes(host: &mut impl ActionHost, angle_rad: f64) -> bool {
     apply(host, Action::RotateSelection { angle_rad })
 }
 
 #[cfg(test)]
-pub(crate) fn convert_selection_to_symbol(host: &mut impl ActionHost) -> Option<u64> {
+pub(in crate::canvas_tool) fn convert_selection_to_symbol(host: &mut impl ActionHost) -> Option<u64> {
     apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library().last().map(|s| s.id))?
 }
 
 #[cfg(test)]
-pub(crate) fn place_symbol_instance_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
+pub(in crate::canvas_tool) fn place_symbol_instance_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
     apply(host, Action::PlaceSymbol { sym_id })
 }
 
 #[cfg(test)]
-pub(crate) fn rename_symbol_in_library(
+pub(in crate::canvas_tool) fn rename_symbol_in_library(
     host: &mut impl ActionHost,
     sym_id: u64,
     new_name: impl Into<String>,
@@ -2475,17 +2497,17 @@ pub(crate) fn rename_symbol_in_library(
 }
 
 #[cfg(test)]
-pub(crate) fn delete_symbol_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
+pub(in crate::canvas_tool) fn delete_symbol_from_library(host: &mut impl ActionHost, sym_id: u64) -> bool {
     apply(host, Action::DeleteSymbol { sym_id })
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_toggle_tween(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn timeline_toggle_tween(host: &mut impl ActionHost) -> bool {
     apply(host, Action::ToggleTween)
 }
 
 #[cfg(test)]
-pub(crate) fn set_active_keyframe_tween_rotate(
+pub(in crate::canvas_tool) fn set_active_keyframe_tween_rotate(
     host: &mut impl ActionHost,
     rotate: TweenRotate,
 ) -> bool {
@@ -2493,7 +2515,7 @@ pub(crate) fn set_active_keyframe_tween_rotate(
 }
 
 #[cfg(test)]
-pub(crate) fn set_selected_symbol_playback(
+pub(in crate::canvas_tool) fn set_selected_symbol_playback(
     host: &mut impl ActionHost,
     loop_mode: SymbolLoopMode,
     first_frame: usize,
@@ -2508,7 +2530,7 @@ pub(crate) fn set_selected_symbol_playback(
 }
 
 #[cfg(test)]
-pub(crate) fn switch_to_layer_and_frame(
+pub(in crate::canvas_tool) fn switch_to_layer_and_frame(
     host: &mut impl ActionHost,
     layer_idx: usize,
     frame: usize,
@@ -2517,12 +2539,12 @@ pub(crate) fn switch_to_layer_and_frame(
 }
 
 #[cfg(test)]
-pub(crate) fn scrub_ruler_to_frame(host: &mut impl ActionHost, frame: usize) {
+pub(in crate::canvas_tool) fn scrub_ruler_to_frame(host: &mut impl ActionHost, frame: usize) {
     apply(host, Action::ScrubRulerToFrame { frame });
 }
 
 #[cfg(test)]
-pub(crate) fn select_timeline_cells(
+pub(in crate::canvas_tool) fn select_timeline_cells(
     host: &mut impl ActionHost,
     l0: usize,
     f0: usize,
@@ -2533,27 +2555,27 @@ pub(crate) fn select_timeline_cells(
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_insert_keyframe(host: &mut impl ActionHost, copy_prev: bool) -> bool {
+pub(in crate::canvas_tool) fn timeline_insert_keyframe(host: &mut impl ActionHost, copy_prev: bool) -> bool {
     apply(host, Action::InsertKeyframe { copy_prev })
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_delete_keyframe(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn timeline_delete_keyframe(host: &mut impl ActionHost) -> bool {
     apply(host, Action::DeleteKeyframe)
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_extend_frame(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn timeline_extend_frame(host: &mut impl ActionHost) -> bool {
     apply(host, Action::ExtendFrame)
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_remove_frame(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn timeline_remove_frame(host: &mut impl ActionHost) -> bool {
     apply(host, Action::RemoveFrame)
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_move_or_copy_frames(
+pub(in crate::canvas_tool) fn timeline_move_or_copy_frames(
     host: &mut impl ActionHost,
     sel: TimelineCellSelection,
     layer_delta: isize,
@@ -2572,17 +2594,17 @@ pub(crate) fn timeline_move_or_copy_frames(
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_add_layer(host: &mut impl ActionHost) {
+pub(in crate::canvas_tool) fn timeline_add_layer(host: &mut impl ActionHost) {
     apply(host, Action::AddLayer);
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_delete_active_layer(host: &mut impl ActionHost) -> bool {
+pub(in crate::canvas_tool) fn timeline_delete_active_layer(host: &mut impl ActionHost) -> bool {
     apply(host, Action::DeleteActiveLayer)
 }
 
 #[cfg(test)]
-pub(crate) fn timeline_reorder_layer(
+pub(in crate::canvas_tool) fn timeline_reorder_layer(
     host: &mut impl ActionHost,
     src_idx: usize,
     dst_idx: usize,
@@ -2591,11 +2613,11 @@ pub(crate) fn timeline_reorder_layer(
 }
 
 #[cfg(test)]
-pub(crate) fn set_layer_visible(host: &mut impl ActionHost, layer_idx: usize, visible: bool) {
+pub(in crate::canvas_tool) fn set_layer_visible(host: &mut impl ActionHost, layer_idx: usize, visible: bool) {
     apply(host, Action::SetLayerVisible { layer_idx, visible });
 }
 
 #[cfg(test)]
-pub(crate) fn set_layer_locked(host: &mut impl ActionHost, layer_idx: usize, locked: bool) {
+pub(in crate::canvas_tool) fn set_layer_locked(host: &mut impl ActionHost, layer_idx: usize, locked: bool) {
     apply(host, Action::SetLayerLocked { layer_idx, locked });
 }

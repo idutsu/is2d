@@ -1120,7 +1120,10 @@ impl Document {
         true
     }
 
-    /// 指定した `symbol_id` をライブラリから削除し、ルートおよび全シンボルのタイムラインからそのインスタンスを取り除く
+    /// 指定した `symbol_id` をライブラリから削除し、ルートおよび全シンボルのタイムラインからそのインスタンスを取り除く。
+    /// 中身だけを消すので、呼ぶのは、段から出て選択を外してから消す入口 `Tab::remove_symbol` の1か所だけ（書ける作品は作業の
+    /// 部屋の中にしか無いので、部屋の外からは呼べない。部屋の中だけに見せることは、この関数を置いた部屋の都合でできない：
+    /// 設計 入口の部屋の設計_27c4085 の 2.4）
     pub(crate) fn remove_symbol_and_instances(&mut self, symbol_id: u64) -> bool {
         if !self.library.iter().any(|s| s.id == symbol_id) {
             return false;

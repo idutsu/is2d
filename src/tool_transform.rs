@@ -87,7 +87,7 @@ pub(crate) fn start_transform_drag(
         TransformHoverTarget::Pivot => {
             let tab = host.tab_mut();
             if let Some((_, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
-                let had_custom_pivot = tab.session.transform_pivot.is_some();
+                let had_custom_pivot = tab.session.transform_pivot().is_some();
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::MovePivot {
                     orig_pivot,
                     had_custom_pivot,
@@ -99,7 +99,7 @@ pub(crate) fn start_transform_drag(
         TransformHoverTarget::Scale(handle) => {
             let tab = host.tab_mut();
             if let Some((orig_bbox, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
-                let had_custom_pivot = tab.session.transform_pivot.is_some();
+                let had_custom_pivot = tab.session.transform_pivot().is_some();
                 let orig_shapes = tab.session.begin_transform_overlay();
                 // `Alt` の間は基準点を中心に拡大する（ドラッグの途中で押す・離すのに合わせて、毎回選ぶ）
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
@@ -120,7 +120,7 @@ pub(crate) fn start_transform_drag(
         TransformHoverTarget::Rotate => {
             let tab = host.tab_mut();
             if let Some((orig_bbox, pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
-                let had_custom_pivot = tab.session.transform_pivot.is_some();
+                let had_custom_pivot = tab.session.transform_pivot().is_some();
                 let orig_shapes = tab.session.begin_transform_overlay();
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
@@ -170,7 +170,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     *changed = true;
                 }
                 *last_pivot = pt;
-                tab.session.transform_pivot = Some(pt);
+                tab.session.drag_pivot_to(pt);
             }
             TransformDragState::Scale {
                 handle,
@@ -212,9 +212,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 *changed = transform_moves(&tab.view, affine, *orig_bbox);
                 *fits = fit.fits(affine);
                 tab.session.update_transform_overlay(orig_shapes, affine);
-                if tab.session.transform_pivot.is_some() {
-                    tab.session.transform_pivot = Some(affine * *orig_pivot);
-                }
+                tab.session.carry_pivot(affine, *orig_pivot);
             }
             TransformDragState::Rotate {
                 pivot,

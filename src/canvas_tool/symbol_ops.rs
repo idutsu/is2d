@@ -16,7 +16,7 @@ use crate::vector_engine::{invertible, union_bounding_boxes};
 
 /// 選択中のオブジェクトを新しい「シンボル」に変換するためのローカル図形抽出・インスタンスバインディング付与・ライブラリ登録を行い、
 /// `(sym_id, target_lid)` を返す
-pub(crate) fn prepare_convert_selection_to_symbol(
+pub(in crate::canvas_tool) fn prepare_convert_selection_to_symbol(
     tab: &mut Tab,
 ) -> Option<(u64, u64)> {
     if tab.session.selection().is_empty() {
@@ -180,7 +180,7 @@ pub(crate) fn swap_targets(tab: &Tab, symbol_id: u64) -> HashSet<u64> {
 
 /// キャンバスで選んでいるインスタンス（`swap_targets`）を、シンボル `symbol_id` に入れ替える（Adobe Animate の「入れ替え」）。
 /// 位置・大きさ・回転・中心点・色効果・再生設定はそのままで、シンボルだけを変える。選択はそのまま
-pub(crate) fn prepare_swap_selected_instances(
+pub(in crate::canvas_tool) fn prepare_swap_selected_instances(
     tab: &mut Tab,
     symbol_id: u64,
 ) -> bool {
@@ -200,7 +200,7 @@ pub(crate) fn prepare_swap_selected_instances(
 }
 
 /// ライブラリ内の指定シンボル `symbol_id` の新しいインスタンスを現在のステージ中央へ配置する
-pub(crate) fn prepare_place_symbol_instance(
+pub(in crate::canvas_tool) fn prepare_place_symbol_instance(
     tab: &mut Tab,
     symbol_id: u64,
 ) -> bool {
@@ -299,7 +299,7 @@ fn instance_binding_now(tab: &Tab, instance_gid: u64) -> Option<SymbolInstanceBi
 /// シンボルインスタンス `instance_gid` をダブルクリックして、そのシンボル専用の内部タイムライン編集モードへ入る。変換は
 /// タイムラインの結び付け（親の座標）をそのまま使う（画面の座標から取り戻さない：レビュー f01d518 の N-4006）。今のコマに
 /// 無ければ断る
-pub(crate) fn enter_symbol_timeline(tab: &mut Tab, instance_gid: u64) -> bool {
+pub(in crate::canvas_tool) fn enter_symbol_timeline(tab: &mut Tab, instance_gid: u64) -> bool {
     match instance_binding_now(tab, instance_gid) {
         Some(b) => enter_symbol_level(tab, instance_gid, b.symbol_id, b.xform),
         None => false,
@@ -361,7 +361,7 @@ fn enter_symbol_level(
 /// ライブラリのシンボル `symbol_id` を、どのインスタンスにも結び付けずに編集する（Adobe Animate の「シンボル編集」）。
 /// いったんシーンまで出てから入り、周りの絵もステージも見せない（`EditPath::shows_stage`・`first_level_showing_parent`）。
 /// 基準点はステージの真ん中に置く。いくつ置いてあっても、どれか1つを選んでその場で開くことはしない
-pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
+pub(in crate::canvas_tool) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
     if tab.doc.find_symbol(symbol_id).is_none() {
         return false;
     }
@@ -380,7 +380,7 @@ pub(crate) fn enter_symbol_from_library(tab: &mut Tab, symbol_id: u64) -> bool {
 }
 
 /// 現在入っているシンボル内部タイムライン編集モードから1段階上の親シーン（または親シンボル）タイムラインへ戻る
-pub(crate) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
+pub(in crate::canvas_tool) fn exit_symbol_timeline(tab: &mut Tab) -> bool {
     if tab.session.edit_path().is_empty() {
         return false;
     }

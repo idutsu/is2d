@@ -858,6 +858,15 @@ pub(crate) type Scope = Vec<u64>;
 
 mod cel_writes;
 mod scene_base_cache;
+// 作品の中身を書く所はみなこの部屋（`canvas_tool`）の中に置く：入口・選択・シンボル・貼り付け・セル画を書く所。作品
+// （`Tab::doc`）と取り消しの記録（`Tab::history`）は部屋の中だけで書け、部屋の外は読むだけ（設計：入口の部屋の設計_27c4085）
+pub(crate) mod clipboard_ops;
+pub(crate) mod doc_actions;
+pub(crate) mod select_ops;
+pub(crate) mod symbol_ops;
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
 pub(crate) use self::cel_writes::*;
 
 pub(crate) use crate::vector_engine::CelTint;
@@ -1395,12 +1404,14 @@ pub(crate) struct Session {
     pub(crate) hover_target: HoverTarget,
     /// 現在インプレイス編集で潜っているグループ階層のパス（空 `[]` ならルートシーン）。書くのは `edit_path` と同じ所だけ
     editing_group_path: Vec<u64>,
-    pub(crate) transform_pivot: Option<Point>,
+    /// 自由変形の中心点（`None`：選んだものの真ん中）。書くのは部屋の中だけ（選択が変わったら `change_selection` が真ん中に
+    /// 戻す）。部屋の外の道具は、中心点のドラッグの関数（`drag_pivot_to`・`carry_pivot`）を通す
+    transform_pivot: Option<Point>,
     pub(crate) transform_hover: TransformHoverTarget,
     /// 輪郭の変形のカーソル合わせに使う、境目の線で持つ地図（生の図形が変わるまで使い回す）
     pub(crate) planar_maps: SyncCache<Option<Arc<ScopeMaps>>>,
-    /// この操作で編集を断った理由（`apply` が知らせて戻す）
-    pub(crate) refusal: Option<Refusal>,
+    /// この操作で編集を断った理由（`apply` が知らせる）。書くのは部屋の中だけ
+    refusal: Option<Refusal>,
     /// ドラッグを始めるときに作った、離したときの計算の答え（離したときに使い回す：`DropAhead`）
     drop_ahead: Option<DropAhead>,
 }
@@ -1457,8 +1468,26 @@ impl Session {
 
     /// `Scene` の合成順序キャッシュを無効化する（土台または `overlay` の構成が変わったときに呼ぶ）
     #[inline]
-    pub(crate) fn invalidate_scene_order(&mut self) {
+    pub(in crate::canvas_tool) fn invalidate_scene_order(&mut self) {
         let _ = self.scene_order.take();
+    }
+
+    /// 自由変形の中心点（`None`：選んだものの真ん中）
+    pub(crate) fn transform_pivot(&self) -> Option<Point> {
+        self.transform_pivot
+    }
+
+    /// 中心点のドラッグ：中心点を `p` に置く
+    pub(crate) fn drag_pivot_to(&mut self, p: Point) {
+        self.transform_pivot = Some(p);
+    }
+
+    /// 拡大のドラッグ：置いた中心点があれば、ドラッグを始めたときの中心点 `orig` を変換 `affine` で動かした所へ運ぶ（真ん中
+    /// のままなら真ん中のまま）
+    pub(crate) fn carry_pivot(&mut self, affine: Affine, orig: Point) {
+        if self.transform_pivot.is_some() {
+            self.transform_pivot = Some(affine * orig);
+        }
     }
 
     /// 画面の土台（読むだけ）
@@ -1467,7 +1496,7 @@ impl Session {
     }
 
     /// 画面の土台を捨てる（途中で止まった操作のあと：次の `refresh_scene_base` が全部作り直す）。並びの写しも捨てる
-    pub(crate) fn drop_scene_base(&mut self) {
+    pub(in crate::canvas_tool) fn drop_scene_base(&mut self) {
         self.base_cache = Default::default();
         self.invalidate_scene_order();
     }
@@ -1502,12 +1531,12 @@ impl Session {
     }
 
     /// `Floating` を置き換え、`overlay` を同期再構築する
-    pub(crate) fn set_floating(&mut self, fl: Option<Floating>) {
+    pub(in crate::canvas_tool) fn set_floating(&mut self, fl: Option<Floating>) {
         self.put_floating(fl);
     }
 
     /// `Floating` を取り出し、`overlay` を同期再構築する（控えと分け合っていれば中身を写す）
-    pub(crate) fn take_floating(&mut self) -> Option<Floating> {
+    pub(in crate::canvas_tool) fn take_floating(&mut self) -> Option<Floating> {
         self.floating_rev += 1;
         let fl = self.floating.take().map(Arc::unwrap_or_clone);
         self.floating_view = FloatingView::default();
@@ -1516,7 +1545,7 @@ impl Session {
     }
 
     /// クロージャで `Floating` を更新し、`overlay` を同期再構築する（控えと分け合っていれば中身を写して書く）
-    pub(crate) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
+    pub(in crate::canvas_tool) fn update_floating<R>(&mut self, f: impl FnOnce(&mut Option<Floating>) -> R) -> R {
         let mut fl = self.floating.take().map(Arc::unwrap_or_clone);
         let res = f(&mut fl);
         self.put_floating(fl);
@@ -1558,7 +1587,7 @@ impl Session {
 
     /// 浮いた片の操作 `f` をする（浮いた片が無ければ、`modified` が `false` の空の浮いた片に。控えと分け合っていれば中身を
     /// 写して書く。片の選び直しは `put_floating`）
-    pub(crate) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
+    pub(in crate::canvas_tool) fn with_floating<R>(&mut self, f: impl FnOnce(&mut Floating, Stage<'_>) -> R) -> R {
         let mut fl = self
             .floating
             .take()
@@ -1597,7 +1626,7 @@ impl Session {
 
     /// ドラッグ用の仮表示 `Overlay` を解除し、`Floating` のみの上乗せ状態に戻す
     #[inline]
-    pub(crate) fn clear_overlay(&mut self) {
+    pub(in crate::canvas_tool) fn clear_overlay(&mut self) {
         self.rebuild_overlay_from_floating();
     }
 
@@ -1623,7 +1652,7 @@ impl Session {
 
     /// 選択移動または `Alt` 複製移動の仮表示用に、選択中図形を `Overlay` に載せる。複製のときは、写す中身 `content` と、
     /// 動かす生の絵 `copy`（離したときに置く写しの絵：`clipboard_ops::begin_move_selection_drag`）
-    pub(crate) fn begin_move_overlay(
+    pub(in crate::canvas_tool) fn begin_move_overlay(
         &mut self,
         alt_duplicate: bool,
         content: Option<crate::clipboard_ops::Content>,
@@ -1690,7 +1719,7 @@ impl Session {
 
     /// ドラッグを始めるときに作った、浮いた片 `fl` の確定の計画（使い回してよいときだけ。取り出す）。確定の答えの地図の
     /// 写しと、その図形の画面の写しは、画面の土台に渡す（書き戻しと、次の画面の土台の作り直しが使い回す）
-    pub(crate) fn take_ahead_commit(&mut self, fl: &Floating) -> Option<CommitPlan> {
+    pub(in crate::canvas_tool) fn take_ahead_commit(&mut self, fl: &Floating) -> Option<CommitPlan> {
         let ahead = self.drop_ahead.as_ref()?;
         if !self.ahead_holds(ahead, Some(fl)) {
             return None;
@@ -1707,7 +1736,7 @@ impl Session {
     }
 
     /// ドラッグを始めるときに作った、写す中身（使い回してよいときだけ。取り出す）
-    pub(crate) fn take_ahead_content(&mut self) -> Option<crate::clipboard_ops::Content> {
+    pub(in crate::canvas_tool) fn take_ahead_content(&mut self) -> Option<crate::clipboard_ops::Content> {
         let ahead = self.drop_ahead.as_ref()?;
         if !self.ahead_holds(ahead, self.floating.as_deref()) {
             return None;
@@ -1716,7 +1745,7 @@ impl Session {
     }
 
     /// 離したときの答えを捨てる（ドラッグを確定したあと）
-    pub(crate) fn drop_ahead_done(&mut self) {
+    pub(in crate::canvas_tool) fn drop_ahead_done(&mut self) {
         self.drop_ahead = None;
     }
 
@@ -1869,7 +1898,7 @@ impl Session {
     }
 
     /// 選択移動ドラッグ中、`overlay.add` 内の可動図形とカスタムピボットを `delta` だけ平行移動する
-    pub(crate) fn translate_move_overlay(&mut self, delta: KVec2) {
+    pub(in crate::canvas_tool) fn translate_move_overlay(&mut self, delta: KVec2) {
         let start = self.overlay_movable_start.min(self.overlay.add.len());
         for (_, shape) in &mut self.overlay.add[start..] {
             Arc::make_mut(shape).translate(delta);
@@ -1890,7 +1919,7 @@ impl Session {
     /// する前。持ち上げただけの組は置かない組で、動かす・色を変える・取り出すときに置く組になる：`Floating::place_all`）。レイヤーごとに、その面の所を選ぶ所にして切る（`Floating::cut`）。生の図形はいつも
     /// 片の地図で書くので、切れないレイヤー（地図にできない）があれば、浮いた片を元に戻して `false`（操作を断る呼ぶ側が
     /// `refusal` に記す）
-    pub(crate) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
+    pub(in crate::canvas_tool) fn lift_selected_raw_shapes_to_floating(&mut self) -> bool {
         // ドラッグを始めるときに同じ計算をしてあれば、それを使い回す（`DropAhead`）
         let holds = self
             .drop_ahead
@@ -2018,7 +2047,7 @@ impl Session {
     /// 地図 `maps`（レイヤーごと、下から順。文書の座標。面の番号が片の番号）を、それぞれ変換をかける浮いた片の組として
     /// 足す（置く組。確定のときに、変換をかけて、その階層の地図に重ねる）。グループの解除はグループの地図そのもの、
     /// 新しい中身（貼り付け・Alt 複製・シンボルの分解）は中身の生の図形の地図（`clipboard_ops::put_placements`）
-    pub(crate) fn add_floating_maps(
+    pub(in crate::canvas_tool) fn add_floating_maps(
         &mut self,
         maps: Vec<(LayerId, crate::planar_map::CheckedMap, Affine)>,
     ) {
@@ -2034,7 +2063,7 @@ impl Session {
 
     /// 浮いている残りの図形が選択に入ったら、片に持ち上げる（動かしていなければ、ほかの片と一緒に切り直して1つの組に
     /// する：同じ色でつながる片は1つになる）
-    pub(crate) fn promote_selected_remainder_to_pieces(&mut self) {
+    pub(in crate::canvas_tool) fn promote_selected_remainder_to_pieces(&mut self) {
         let by_layer = self.selected_raw_ids_by_layer(false);
         if by_layer.is_empty() {
             return;
@@ -2045,7 +2074,7 @@ impl Session {
     }
 
     /// 未変形スライスの `Floating` で選択中の片がなくなった場合は破棄する
-    pub(crate) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
+    pub(in crate::canvas_tool) fn drop_unmodified_slice_if_unselected(&mut self) -> bool {
         if self.floating.as_ref().is_some_and(|fl| {
             !fl.modified()
                 && !self
@@ -2098,33 +2127,28 @@ impl Session {
         &self.selection
     }
 
-    /// 選ぶ・外す操作で選択を `f` で変える（選択を変える所はみなここを通る）。選択が変わったら、自由変形の中心点を外す
-    /// （中心点は前の選択に合わせて置いたもの。新しい選択の真ん中に戻る：持ち主が決めた 2026-11-27。前は選び足す道ごとに
-    /// 決めたので、Shift クリックでは外し、Shift ダブルクリックでは残した：約束の棚卸し 5616fcc の B の G1）。浮いた片の片を
-    /// みな選ぶのは、浮いた片を書き換える入口（`put_floating`）：選択の一部を外すときは、外した片を確定してから浮いた片を
-    /// 書き換えるので、ここで選び直すと外せなくなる
+    /// 選ぶ・外す操作で選択を `f` で変える（選択を変える所はみなここを通る）。選択が変わったら自由変形の中心点を真ん中に
+    /// 戻すのは、入口 `apply` が操作のあとに決める（見ている場所が変わったときと一緒に1か所で）。浮いた片の片をみな選ぶのは、
+    /// 浮いた片を書き換える入口（`put_floating`）：選択の一部を外すときは、外した片を確定してから浮いた片を書き換えるので、
+    /// ここで選び直すと外せなくなる
     fn change_selection(&mut self, f: impl FnOnce(&mut Self)) {
-        let before = self.selection.clone();
         f(self);
-        if self.selection != before {
-            self.transform_pivot = None;
-        }
     }
 
     /// 選択を `sel` に入れ替える（選ぶ・外す操作）
-    pub(crate) fn replace_selection(&mut self, sel: Selection) {
+    pub(in crate::canvas_tool) fn replace_selection(&mut self, sel: Selection) {
         self.change_selection(|s| s.selection = sel);
     }
 
     /// 選択を取り出し、選択を空にする（選んだものを消すとき）
-    pub(crate) fn take_selection(&mut self) -> Selection {
+    pub(in crate::canvas_tool) fn take_selection(&mut self) -> Selection {
         let mut out = Selection::default();
         self.change_selection(|s| out = std::mem::take(&mut s.selection));
         out
     }
 
     /// 図形 `shapes`・インスタンス `instances` を選択に足す（貼り付けた中身を選ぶとき）
-    pub(crate) fn add_to_selection(
+    pub(in crate::canvas_tool) fn add_to_selection(
         &mut self,
         shapes: impl IntoIterator<Item = ShapeId>,
         instances: impl IntoIterator<Item = InstanceGid>,
@@ -2154,7 +2178,7 @@ impl Session {
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスのみを選択状態にする
-    pub(crate) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+    pub(in crate::canvas_tool) fn set_selected_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
         self.change_selection(|s| {
             s.selection.clear();
             s.select_shape_indices(indices);
@@ -2163,7 +2187,7 @@ impl Session {
     }
 
     /// 指定した `Scene` インデックス列に対応する図形・シンボルインスタンスを選択状態に追加する
-    pub(crate) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
+    pub(in crate::canvas_tool) fn select_shape_indices(&mut self, indices: impl IntoIterator<Item = usize>) {
         let scene = self.scene();
         let keys: Vec<_> = indices
             .into_iter()
@@ -2185,7 +2209,7 @@ impl Session {
     }
 
     /// `Scene` 上に現在存在する図形・シンボルインスタンスのみを選択に残す
-    pub(crate) fn retain_existing_selection(&mut self) {
+    pub(in crate::canvas_tool) fn retain_existing_selection(&mut self) {
         if self.selection.is_empty() {
             return;
         }
@@ -2216,7 +2240,7 @@ impl Session {
     }
 
     /// 現在の編集スコープ内で指定レイヤーID集合 `layer_ids` に属する全図形を選択状態にする
-    pub(crate) fn select_shapes_in_layers(&mut self, layer_ids: &HashSet<u64>) {
+    pub(in crate::canvas_tool) fn select_shapes_in_layers(&mut self, layer_ids: &HashSet<u64>) {
         let keys: Vec<_> = self
             .scene()
             .iter()
@@ -2232,7 +2256,7 @@ impl Session {
     }
 
     /// 指定レイヤーID集合 `layer_ids` に属する図形・シンボルインスタンスの選択のみを残し、それ以外を選択から外す
-    pub(crate) fn retain_selection_in_layers(&mut self, layer_ids: &HashSet<u64>) {
+    pub(in crate::canvas_tool) fn retain_selection_in_layers(&mut self, layer_ids: &HashSet<u64>) {
         if self.selection.is_empty() {
             return;
         }
@@ -2258,13 +2282,10 @@ impl Session {
                 .instances
                 .retain(|gid| valid_instances.contains(gid));
         }
-        if self.selection.is_empty() {
-            self.transform_pivot = None;
-        }
     }
 
     /// 指定した `instance_gid` に属するキャンバス上の図形をすべて選択状態にする
-    pub(crate) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
+    pub(in crate::canvas_tool) fn select_symbol_instance_by_gid(&mut self, instance_gid: u64) {
         let present = self.base_cache.shapes().iter().any(|s| {
             s.symbol_instance
                 .is_some_and(|b| b.instance_gid == instance_gid)
@@ -2278,7 +2299,7 @@ impl Session {
     }
 
     /// 選択ツールまたは自由変形ツールで進行中だった図形変形・移動ドラッグのみを中断して仮表示 `Overlay` を破棄する（ブラシのストローク状態には干渉しない）
-    pub(crate) fn rollback_shape_drag(&mut self) {
+    pub(in crate::canvas_tool) fn rollback_shape_drag(&mut self) {
         if matches!(
             self.drag,
             ActiveCanvasDrag::None | ActiveCanvasDrag::PaintStroke { .. }
@@ -2526,19 +2547,53 @@ pub(crate) struct Tab {
     pub(crate) untitled_number: usize,
     /// 現在開いている・保存先の `.is2d` プロジェクトファイルパス（未保存の新規ドキュメント時は `None`）
     pub(crate) file: Option<PathBuf>,
-    /// 保存対象のデータ（ルートタイムライン・シンボルライブラリ・ステージサイズ・採番カウンタ）
-    pub(crate) doc: Document,
+    /// 保存対象のデータ（ルートタイムライン・シンボルライブラリ・ステージサイズ・採番カウンタ）。書けるのはこの部屋
+    /// （`canvas_tool`：入口と作業）の中だけ。部屋の外は読むだけ（`Tab::doc`）
+    doc: Document,
     /// 今フレームの作業図形・選択・変形・排他ドラッグ・編集スタック
     pub(crate) session: Session,
     /// タブごとのキャンバス表示設定（ズーム・パン・枠外クリップ・ワイヤーフレーム・オニオンスキン・選択シンボル）
     pub(crate) view: View,
-    /// Undo / Redo 履歴スタック
-    pub(crate) history: UndoHistory,
+    /// Undo / Redo 履歴スタック。書けるのはこの部屋の中だけ（部屋の外は読むだけ：`Tab::history`。保存した・していないの
+    /// 印は `Tab::mark_saved`・`mark_unsaved`）
+    history: UndoHistory,
 }
 
 impl Default for Tab {
     fn default() -> Self {
         Self::new_empty(1, 1)
+    }
+}
+
+impl Tab {
+    /// 作品（読むだけ。書くのは部屋の中の入口と作業）
+    pub(crate) fn doc(&self) -> &Document {
+        &self.doc
+    }
+
+    /// 取り消しの記録（読むだけ）
+    pub(crate) fn history(&self) -> &UndoHistory {
+        &self.history
+    }
+
+    /// タブに作品 `doc` を入れる（新しい作品を入れる道はみなここを通る：新規・開く・最後のタブを閉じる：
+    /// `project_io::install_document`）。取り消しの記録・作業の状態・表示を初めに戻し、画面の土台を作る
+    pub(crate) fn install(&mut self, doc: Document) {
+        self.doc = doc;
+        self.history = UndoHistory::default();
+        self.session = Session::default();
+        self.view = View::default();
+        self.refresh_scene_base();
+    }
+
+    /// 今の作品を保存したと記す（作品の中身は変えない）
+    pub(crate) fn mark_saved(&mut self) {
+        self.history.mark_saved();
+    }
+
+    /// 今の作品を保存していないと記す（作品の中身は変えない）
+    pub(crate) fn mark_unsaved(&mut self) {
+        self.history.mark_unsaved();
     }
 }
 
@@ -2645,11 +2700,11 @@ impl Tab {
     }
 
     /// 編集中タイムラインの再生ヘッド（`current_frame`）を変え、画面の土台を作り直す（版は上げない）。コマを変える入口は
-    /// これ1つ（再生中に進める `advance_playback_frame` は、再生を始める入口が先に貼り戻してある）：先に持ち上げた絵を貼り
+    /// これ1つ（再生中に進める `play_to_frame` は、持ち上げた絵があれば断る）：先に持ち上げた絵を貼り
     /// 戻し（持ち上げた絵は今のコマのセル画から持ち上げたもの）、断られたら変えずに `false`（設計
     /// claude/約束を入口で守る設計_5616fcc.md の 3.）
     #[must_use]
-    pub(crate) fn set_active_frame(&mut self, frame: usize) -> bool {
+    fn set_active_frame(&mut self, frame: usize) -> bool {
         if !commit_floating(self) {
             return false;
         }
@@ -2663,7 +2718,7 @@ impl Tab {
     /// （持ち上げた絵は、今の見る場所の地図から持ち上げたもの）、断られたら変えずに `false`（設計
     /// claude/約束を入口で守る設計_5616fcc.md の 3.）
     #[must_use]
-    pub(crate) fn move_view(&mut self, f: impl FnOnce(&mut EditPath, &mut Vec<u64>)) -> bool {
+    fn move_view(&mut self, f: impl FnOnce(&mut EditPath, &mut Vec<u64>)) -> bool {
         if !commit_floating(self) {
             return false;
         }
@@ -2671,13 +2726,21 @@ impl Tab {
         true
     }
 
-    /// 再生中のフレーム進行用に、土台キャッシュを再構築せず編集中タイムラインの再生ヘッド（`current_frame`）のみを進める
-    pub(crate) fn advance_playback_frame(&mut self, frame: usize) {
+    /// 再生がコマを `frame` へ進める（部屋の外から見ている場所を変える入口はこれ1つ）。見ている場所だけを変え、画面の土台は
+    /// 作り直さない（再生中はセル画の結合メッシュの写しから描く）。持ち上げた絵があれば変えずに `false`（持ち上げた絵を貼り
+    /// 戻すのは作品を書くことなので、部屋の中の入口だけがする。再生を始める所は、先に入口で選択を外してある：設計
+    /// 入口の部屋の設計_27c4085 の 2.1）
+    #[must_use]
+    pub(crate) fn play_to_frame(&mut self, frame: usize) -> bool {
+        if self.session.floating().is_some() {
+            return false;
+        }
         self.active_timeline_raw_mut().current_frame = frame;
+        true
     }
 
     /// 編集中タイムラインの選択レイヤー（`active_layer`）のみを変更し、リビジョンは上げない
-    pub(crate) fn set_active_layer(&mut self, idx: usize) {
+    fn set_active_layer(&mut self, idx: usize) {
         let tl = self.active_timeline_raw_mut();
         if !tl.layers.is_empty() {
             tl.active_layer = idx.min(tl.layers.len() - 1);
@@ -2685,13 +2748,13 @@ impl Tab {
     }
 
     /// 編集中タイムラインのセル範囲選択（`cell_selection`）のみを変更し、リビジョンは上げない
-    pub(crate) fn set_active_cell_selection(&mut self, sel: Option<TimelineCellSelection>) {
+    fn set_active_cell_selection(&mut self, sel: Option<TimelineCellSelection>) {
         self.active_timeline_raw_mut().cell_selection = sel;
     }
 
     /// 現在編集中のタイムラインへの可変参照と文書への可変参照を渡して絵を変える編集を実行し（`write_active_timeline`）、
     /// 画面の土台を作り直す
-    pub(crate) fn with_active_timeline_mut<R>(
+    fn with_active_timeline_mut<R>(
         &mut self,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
@@ -2703,7 +2766,7 @@ impl Tab {
     /// 現在編集中のタイムラインを `f(タイムライン, 文書)` で書く。編集中のタイムラインの中身を書く所はこれ1つ：シンボルの
     /// 中なら、版を上げる入口 `Document::write_symbol_timeline` を通る（ルートでは `Document::revision` は上げない）。
     /// 画面の土台は作り直さない（書いた後の後始末は呼ぶ側：`with_active_timeline_mut`・`finish_cel_writes`）
-    pub(crate) fn write_active_timeline<R>(
+    fn write_active_timeline<R>(
         &mut self,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
@@ -3008,7 +3071,7 @@ impl Tab {
     /// 外してから消す（前は消す操作が段から出るのを手で書いた：約束の棚卸し 5616fcc の A の P-19。ライブラリで選んでいる
     /// シンボルは、読む所 `View::library_symbol` が決めるので直さない）。段から出られない・選択を外せない（浮いた片の確定が
     /// 断られた）ときは、文書を変えずに断る
-    pub(crate) fn remove_symbol(&mut self, sym_id: u64) -> bool {
+    fn remove_symbol(&mut self, sym_id: u64) -> bool {
         if self.doc.find_symbol(sym_id).is_none() {
             return false;
         }
@@ -3037,7 +3100,7 @@ impl Tab {
         )
     }
 
-    pub(crate) fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
+    fn restore_state_snapshot(&mut self, entry: UndoEntry) -> UndoEntry {
         self.history.last_coalesce_key = None;
         let prev_floating = self.session.shared_floating();
         // 控えと文書の項目は全部書く（どちらかに項目を足すと、ここが組み立てで止まるので、戻すか戻さないかを必ず決める。
@@ -3086,7 +3149,6 @@ impl Tab {
             &mut self.session.editing_group_path,
         );
         cancel_active_drag(self);
-        self.session.transform_pivot = None;
         self.refresh_scene_base();
         self.session.set_floating(floating.map(Arc::unwrap_or_clone));
         self.session.retain_existing_selection();
@@ -3099,7 +3161,7 @@ impl Tab {
         prev_entry
     }
 
-    pub(crate) fn undo(&mut self) -> bool {
+    fn undo(&mut self) -> bool {
         cancel_active_drag(self);
         if let Some(prev_entry) = self.history.pop_undo() {
             let curr = self.restore_state_snapshot(prev_entry);
@@ -3110,7 +3172,7 @@ impl Tab {
         }
     }
 
-    pub(crate) fn redo(&mut self) -> bool {
+    fn redo(&mut self) -> bool {
         cancel_active_drag(self);
         if let Some(next_entry) = self.history.pop_redo() {
             let curr = self.restore_state_snapshot(next_entry);

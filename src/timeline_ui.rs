@@ -5,13 +5,6 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 use crate::audio_out::AudioOut;
 use crate::canvas_tool::{cancel_active_drag, CoalesceKey, Tab};
 use crate::doc_actions::{apply, Action, ActionHost};
-#[cfg(test)]
-pub(crate) use crate::doc_actions::{
-    scrub_ruler_to_frame, select_timeline_cells, set_layer_locked, set_layer_visible,
-    switch_to_layer_and_frame, timeline_add_layer, timeline_delete_active_layer,
-    timeline_delete_keyframe, timeline_extend_frame, timeline_insert_keyframe,
-    timeline_move_or_copy_frames, timeline_remove_frame, timeline_reorder_layer,
-};
 use crate::sound::{frames_to_sound, SoundEdge};
 use crate::symbol::TweenState;
 use crate::timeline::{Layer, TimelineCellSelection};
@@ -257,7 +250,7 @@ impl TimelineUiState {
         let tl = tab.active_timeline();
         let end = tl.total_frames.max(1);
         self.audio
-            .play(&tab.doc, tl, tl.current_frame, end, self.loop_playback);
+            .play(tab.doc(), tl, tl.current_frame, end, self.loop_playback);
         self.is_playing = true;
     }
 
@@ -751,7 +744,7 @@ fn draw_control_bar_frame_and_fps(host: &mut impl TimelineHost, ui: &mut egui::U
     let current_frame = host.tab().active_timeline().current_frame + 1;
     ui.label(format!("{current_frame}F"));
 
-    let mut fps_val = host.tab().doc.fps;
+    let mut fps_val = host.tab().doc().fps;
     let fps_resp = ui.add(
         egui::DragValue::new(&mut fps_val)
             .range(1..=crate::symbol::MAX_FPS)
@@ -925,7 +918,7 @@ fn handle_timeline_pointer_input(
 ) -> Option<(usize, usize)> {
     let (primary_pressed, shift_held) =
         ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
-    let generation = host.tab().history.content_gen;
+    let generation = host.tab().history().content_gen;
     host.timeline_ui_mut().drop_drag_if_document_changed(generation);
     let handle_w = handle_width(ui.ctx());
     if response.hovered() && primary_pressed {
@@ -941,7 +934,7 @@ fn handle_timeline_pointer_input(
     update_timeline_grid_drag(host, ui.ctx(), layout, primary_down, alt_held, pointer_pos);
     let drag_layer_feedback =
         update_timeline_layer_drag(host, ui.ctx(), layout, primary_down, pointer_pos);
-    let generation = host.tab().history.content_gen;
+    let generation = host.tab().history().content_gen;
     host.timeline_ui_mut().remember_drag_generation(generation);
     update_timeline_cursor_icon(
         host,
@@ -1282,7 +1275,7 @@ fn update_timeline_grid_drag(
                 let tl = tab.active_timeline();
                 let range = tl.layers.get(layer).and_then(|l| {
                     let k = l.keyframe_index_starting_at(kf_start)?;
-                    l.sound_trim_range(k, edge, &tab.doc.sounds, tab.doc.fps)
+                    l.sound_trim_range(k, edge, &tab.doc().sounds, tab.doc().fps)
                 });
                 if let (Some(pos), Some(range)) = (pointer_pos, range) {
                     let scroll_x = host.timeline_ui().scroll_x;
@@ -1569,7 +1562,7 @@ fn sound_handle_at(
         return None;
     }
     let k = layer.keyframe_index_at(layout.frame_at_x(pos.x, scroll_x))?;
-    let frames = layer.sounding_frames(k, tab.doc.fps)?;
+    let frames = layer.sounding_frames(k, tab.doc().fps)?;
     let (xl, xr) = (
         layout.frame_x(frames.start, scroll_x),
         layout.frame_x(frames.end, scroll_x),
@@ -1606,7 +1599,7 @@ fn sound_trim_preview(host: &impl TimelineHost, layer_idx: usize) -> Option<Laye
         .filter(|_| layer == layer_idx)?
         .clone();
     let k = copy.keyframe_index_starting_at(kf_start)?;
-    copy.trim_sound(k, edge, frame, &tab.doc.sounds, tab.doc.fps);
+    copy.trim_sound(k, edge, frame, &tab.doc().sounds, tab.doc().fps);
     Some(copy)
 }
 
@@ -1909,7 +1902,7 @@ fn draw_sound_wave(
     kf_idx: usize,
     (y0, y1): (f32, f32),
 ) {
-    let doc = &host.tab().doc;
+    let doc = &host.tab().doc();
     let Some(frames) = layer.sounding_frames(kf_idx, doc.fps) else {
         return;
     };
@@ -2452,9 +2445,13 @@ pub(crate) fn toggle_playback(host: &mut impl TimelineHost) {
             (tl.current_frame, tl.total_frames)
         };
         let last_f = total_f.saturating_sub(1);
-        // 浮いた片は上で貼り戻してある（`Action::Deselect`）ので、コマを変える入口は断らない
-        if (curr_f >= total_f || (!loop_pb && curr_f >= last_f)) && !tab.set_active_frame(0) {
-            return;
+        // 浮いた片は上で貼り戻してある（`Action::Deselect`）ので、コマを変える入口は断らない。最初のコマから鳴らすときは
+        // 画面の土台も作り直す（再生の始まり）
+        if curr_f >= total_f || (!loop_pb && curr_f >= last_f) {
+            if !tab.play_to_frame(0) {
+                return;
+            }
+            tab.refresh_scene_base();
         }
         timeline_ui.start_playback(tab);
     }
@@ -2473,14 +2470,19 @@ pub(crate) fn update_playback(host: &mut impl TimelineHost, ctx: &egui::Context)
     if !timeline_ui.is_playing {
         return;
     }
-    let fps = tab.doc.fps;
+    let fps = tab.doc().fps;
     let now = ctx.input(|i| i.time);
     let rate = timeline_ui.audio.rate();
     match timeline_ui.audio.position(now) {
-        Some(pos) => tab.advance_playback_frame(crate::sound::frame_at(pos, rate, fps)),
+        Some(pos) => {
+            if !tab.play_to_frame(crate::sound::frame_at(pos, rate, fps)) {
+                timeline_ui.stop_playback(tab);
+                return;
+            }
+        }
         None => {
             let last = tab.active_timeline().total_frames.max(1) - 1;
-            tab.advance_playback_frame(last);
+            let _ = tab.play_to_frame(last);
             timeline_ui.stop_playback(tab);
             return;
         }
@@ -2502,5 +2504,5 @@ pub(crate) fn scrub_on_frame_change(host: &mut impl TimelineHost) {
     }
     timeline_ui
         .audio
-        .play(&tab.doc, tl, seen.1, seen.1 + 1, false);
+        .play(tab.doc(), tl, seen.1, seen.1 + 1, false);
 }

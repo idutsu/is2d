@@ -258,11 +258,11 @@ fn can_import_sound(tab: &Tab, _: &Clipboard) -> bool {
 }
 
 fn can_undo(tab: &Tab, _: &Clipboard) -> bool {
-    !tab.history.undo_stack.is_empty()
+    !tab.history().undo_stack.is_empty()
 }
 
 fn can_redo(tab: &Tab, _: &Clipboard) -> bool {
-    !tab.history.redo_stack.is_empty()
+    !tab.history().redo_stack.is_empty()
 }
 
 fn has_selection(tab: &Tab, _: &Clipboard) -> bool {

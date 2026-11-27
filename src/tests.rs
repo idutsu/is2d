@@ -1,4 +1,4 @@
-use super::*;
+use crate::*;
 use crate::canvas_tool::HoverTarget;
 use crate::select_ops::ArrangeMode;
 use kurbo::{Affine, ParamCurve, ParamCurveDeriv, QuadBez, Vec2 as KVec2};
@@ -2077,30 +2077,30 @@ fn test_timeline_f5_f6_f7_and_delete_keyframe_undo_redo() {
     );
     put_cel_shapes(&mut app, 0, 0, s0);
 
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
     assert_eq!(app.doc.root.current_frame, 1);
     assert_eq!(scene_summary(&app).shapes.len(), 1);
 
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.doc.root.current_frame, 2);
     assert!(scene_summary(&app).shapes.is_empty());
 
     let prev_total = app.doc.root.total_frames;
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert_eq!(app.doc.root.total_frames, prev_total + 1);
-    assert!(timeline_ui::timeline_remove_frame(&mut app));
+    assert!(doc_actions::timeline_remove_frame(&mut app));
     assert_eq!(app.doc.root.total_frames, prev_total);
 
-    timeline_ui::select_timeline_cells(&mut app, 0, 9, 0, 9);
+    doc_actions::select_timeline_cells(&mut app, 0, 9, 0, 9);
     assert_eq!(app.doc.root.current_frame, 9);
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert_eq!(app.doc.root.layers[0].frame_count, 10);
     assert_eq!(app.doc.root.total_frames, 10);
     app.undo();
     assert_eq!(app.doc.root.total_frames, prev_total);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
 
-    assert!(timeline_ui::timeline_delete_keyframe(&mut app));
+    assert!(doc_actions::timeline_delete_keyframe(&mut app));
     assert_eq!(scene_summary(&app).shapes.len(), 1);
     app.undo();
     assert!(scene_summary(&app).shapes.is_empty());
@@ -2121,7 +2121,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     );
     put_cel_shapes(&mut app, 0, 0, s0);
 
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     assert_eq!(app.doc.root.layers.len(), 2);
     assert_eq!(app.doc.root.active_layer, 1);
     assert!(app.doc.root.active_cel_shapes().is_empty());
@@ -2165,7 +2165,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     assert!(app.doc.root.layers[1].cel_at(0).unwrap().shapes()[0]
         .contains_point(Point::new(155.0, 100.0)));
 
-    timeline_ui::set_layer_locked(&mut app, 0, true);
+    doc_actions::set_layer_locked(&mut app, 0, true);
     select_ops::apply_marquee_selection(
         &mut app,
         Point::new(50.0, 50.0),
@@ -2174,15 +2174,15 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     );
     assert_eq!(app.session.selected_indices().len(), 1);
     assert!(canvas_tool::clear_selection(&mut app));
-    timeline_ui::set_layer_locked(&mut app, 0, false);
+    doc_actions::set_layer_locked(&mut app, 0, false);
     assert_eq!(scene_summary(&app).shapes.len(), 2);
 }
 
 #[test]
 fn test_timeline_layer_reorder_move_and_delete() {
     let mut app = Is2dApp::default();
-    timeline_ui::timeline_add_layer(&mut app);
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     assert_eq!(app.doc.root.layers.len(), 3);
     assert_eq!(
         app.doc
@@ -2194,7 +2194,7 @@ fn test_timeline_layer_reorder_move_and_delete() {
         vec!["Layer 1", "Layer 2", "Layer 3"]
     );
 
-    assert!(timeline_ui::timeline_reorder_layer(&mut app, 2, 0));
+    assert!(doc_actions::timeline_reorder_layer(&mut app, 2, 0));
     assert_eq!(app.doc.root.active_layer, 0);
     assert_eq!(
         app.doc
@@ -2226,11 +2226,11 @@ fn test_timeline_layer_reorder_move_and_delete() {
         vec!["Layer 3", "Layer 1", "Layer 2"]
     );
 
-    assert!(timeline_ui::timeline_reorder_layer(&mut app, 0, 1));
+    assert!(doc_actions::timeline_reorder_layer(&mut app, 0, 1));
     assert_eq!(app.doc.root.active_layer, 1);
-    assert!(timeline_ui::timeline_delete_active_layer(&mut app));
+    assert!(doc_actions::timeline_delete_active_layer(&mut app));
     assert_eq!(app.doc.root.layers.len(), 2);
-    assert!(timeline_ui::timeline_delete_active_layer(&mut app));
+    assert!(doc_actions::timeline_delete_active_layer(&mut app));
     assert_eq!(app.doc.root.layers.len(), 1);
 }
 
@@ -2247,7 +2247,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
             Point::new(40.0, 80.0),
         ],
     );
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     app.tool.brush_color = blue;
     doc_actions::commit_raw_outline(
         &mut app,
@@ -2260,18 +2260,18 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     );
     let base_len = app.doc.root.layers[0].frame_count;
 
-    timeline_ui::select_timeline_cells(&mut app, 1, 0, 1, 0);
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    doc_actions::select_timeline_cells(&mut app, 1, 0, 1, 0);
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert_eq!(app.doc.root.layers[0].frame_count, base_len);
     assert_eq!(app.doc.root.layers[1].frame_count, base_len + 1);
 
-    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
+    doc_actions::scrub_ruler_to_frame(&mut app, 0);
     assert!(app.doc.root.cell_selection.is_none());
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert_eq!(app.doc.root.layers[0].frame_count, base_len + 1);
     assert_eq!(app.doc.root.layers[1].frame_count, base_len + 2);
 
-    timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
+    doc_actions::select_timeline_cells(&mut app, 0, 0, 0, 0);
     assert_eq!(app.session.selected_indices().len(), 1);
     assert_eq!(
         scene_summary(&app).shapes[app.session.selected_indices()[0]].layer_id,
@@ -2279,7 +2279,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     );
 
     assert!(canvas_tool::clear_selection(&mut app));
-    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
+    doc_actions::scrub_ruler_to_frame(&mut app, 0);
     assert!(doc_actions::apply(
         &mut app,
         doc_actions::Action::SelectSingleAt {
@@ -2295,7 +2295,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
         Some((1, 1))
     );
 
-    timeline_ui::select_timeline_cells(&mut app, 0, 0, 1, 0);
+    doc_actions::select_timeline_cells(&mut app, 0, 0, 1, 0);
     assert_eq!(app.session.selected_indices().len(), 2);
 }
 
@@ -2312,7 +2312,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
             Point::new(40.0, 80.0),
         ],
     );
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     app.tool.brush_color = blue;
     doc_actions::commit_raw_outline(
         &mut app,
@@ -2323,11 +2323,11 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
             Point::new(140.0, 80.0),
         ],
     );
-    timeline_ui::scrub_ruler_to_frame(&mut app, 0);
-    timeline_ui::timeline_extend_frame(&mut app);
+    doc_actions::scrub_ruler_to_frame(&mut app, 0);
+    doc_actions::timeline_extend_frame(&mut app);
 
     let sel_l1_f0 = timeline::TimelineCellSelection::single(1, 0);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel_l1_f0, 0, 3, true
     ));
     assert!(!app.doc.root.layers[1].cel_at(0).unwrap().is_empty());
@@ -2337,7 +2337,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     // コマ 4 のキーフレームをコマ 6 へ動かす：空いたコマ 4 は前のキーフレーム（コマ 1）の絵が続く（Adobe Animate と同じ。
     // 空白キーフレームや写しのキーフレームはできない）
     let sel_l1_f3 = timeline::TimelineCellSelection::single(1, 3);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel_l1_f3, 0, 2, false
     ));
     let starts = |app: &Is2dApp, l: usize| -> Vec<usize> {
@@ -2353,7 +2353,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
 
     // コマ 1 のキーフレームをコマ 3 へ動かす：コマ 1 だけは空白キーフレームになり、コマ 2 も空（その続き）
     let sel_l0_f0 = timeline::TimelineCellSelection::single(0, 0);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel_l0_f0, 0, 2, false
     ));
     assert_eq!(starts(&app, 0), vec![0, 2]);
@@ -2364,12 +2364,12 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     insert_keyframe_at(&mut app.doc.root, 1, 3, false, 24);
     insert_keyframe_at(&mut app.doc.root, 1, 4, false, 24);
     let kf_count_before = app.doc.root.layers[1].keyframes.len();
-    timeline_ui::select_timeline_cells(&mut app, 1, 0, 1, 0);
-    assert!(timeline_ui::timeline_remove_frame(&mut app));
+    doc_actions::select_timeline_cells(&mut app, 1, 0, 1, 0);
+    assert!(doc_actions::timeline_remove_frame(&mut app));
     assert_eq!(app.doc.root.layers[1].keyframes.len(), kf_count_before);
 
-    timeline_ui::select_timeline_cells(&mut app, 1, 2, 1, 2);
-    assert!(timeline_ui::timeline_remove_frame(&mut app));
+    doc_actions::select_timeline_cells(&mut app, 1, 2, 1, 2);
+    assert!(doc_actions::timeline_remove_frame(&mut app));
     assert_eq!(app.doc.root.layers[1].keyframes.len(), kf_count_before - 1);
 
     let m1 = app
@@ -2722,7 +2722,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     assert_eq!(app.session.edit_path().len(), 1);
     assert_eq!(app.active_timeline().total_frames, 1);
 
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
     assert_eq!(app.active_timeline().total_frames, 2);
     assert_eq!(app.active_timeline().current_frame, 1);
 
@@ -2741,17 +2741,17 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     assert!(app.session.edit_path().is_empty());
     assert_eq!(app.doc.library()[0].timeline.total_frames, 2);
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert_eq!(app.doc.root.total_frames, 3);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(scene_summary(&app).len, 2);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
     assert_eq!(scene_summary(&app).len, 4);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     assert_eq!(scene_summary(&app).len, 2);
 }
 
@@ -2831,7 +2831,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     doc_actions::convert_selection_to_symbol(&mut app).unwrap();
     assert!(doc_actions::timeline_toggle_tween(&mut app));
     for _ in 0..4 {
-        assert!(timeline_ui::timeline_extend_frame(&mut app));
+        assert!(doc_actions::timeline_extend_frame(&mut app));
     }
     assert_eq!(app.doc.root.total_frames, 5);
     assert_eq!(
@@ -2839,8 +2839,8 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         TweenState::Incomplete
     );
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
     assert!(matches!(
         app.doc.root.layers[0].tween_state_at_keyframe(0),
         TweenState::Complete {
@@ -2853,21 +2853,21 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     app.session.set_selected_indices(vec![0]);
     doc_actions::nudge_selected_shapes(&mut app, KVec2::new(200.0, 80.0));
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     let mid_bbox = scene_summary(&app).shapes[0].bounding_box();
     let mid_cx = (mid_bbox.x0 + mid_bbox.x1) * 0.5;
     let mid_cy = (mid_bbox.y0 + mid_bbox.y1) * 0.5;
     assert!((mid_cx - 250.0).abs() < 1.0);
     assert!((mid_cy - 190.0).abs() < 1.0);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     let start_bbox = scene_summary(&app).shapes[0].bounding_box();
     let start_cx = (start_bbox.x0 + start_bbox.x1) * 0.5;
     let start_cy = (start_bbox.y0 + start_bbox.y1) * 0.5;
     assert!((start_cx - 150.0).abs() < 1.0);
     assert!((start_cy - 150.0).abs() < 1.0);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
     app.session.set_selected_indices(vec![0]);
     doc_actions::nudge_selected_shapes(&mut app, KVec2::new(-200.0, -80.0));
 
@@ -2896,7 +2896,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
         std::f64::consts::FRAC_PI_2
     ));
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     let mid_binding = scene_summary(&app).shapes[0].symbol_instance.unwrap();
     assert!((mid_binding.world_pivot() - joint_world).hypot() < 1e-4);
     let expected_mid_center = Point::new(
@@ -2905,7 +2905,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     );
     assert!(scene_summary(&app).shapes[0].contains_point(expected_mid_center));
 
-    timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
+    doc_actions::select_timeline_cells(&mut app, 0, 0, 0, 0);
     assert!(app.view.inspect_timeline_frame);
     doc_actions::apply(
         &mut app,
@@ -2915,12 +2915,12 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     );
     assert!(!app.view.inspect_timeline_frame);
 
-    timeline_ui::select_timeline_cells(&mut app, 0, 0, 0, 0);
+    doc_actions::select_timeline_cells(&mut app, 0, 0, 0, 0);
     assert!(doc_actions::set_active_keyframe_tween_rotate(
         &mut app,
         crate::symbol::TweenRotate::CounterClockwise
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     let expected_ccw_mid_center = Point::new(
         100.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
         150.0 - 50.0 * std::f64::consts::FRAC_1_SQRT_2,
@@ -2956,9 +2956,9 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         binding.instance_gid
     ));
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     put_cel_shapes(
         &mut app,
         0,
@@ -2971,9 +2971,9 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         ),
     );
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     put_cel_shapes(
         &mut app,
         0,
@@ -2989,13 +2989,13 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
 
     assert!(symbol_ops::exit_symbol_timeline(&mut app));
     for _ in 0..4 {
-        assert!(timeline_ui::timeline_extend_frame(&mut app));
+        assert!(doc_actions::timeline_extend_frame(&mut app));
     }
     assert_eq!(app.doc.root.total_frames, 5);
 
     let expected_loop = [red, green, blue, red, green];
     for (f, &col) in expected_loop.iter().enumerate() {
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
         assert_eq!(
             scene_summary(&app).shapes[0].color(),
             col,
@@ -3003,7 +3003,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         );
     }
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     app.session.set_selected_indices(vec![0]);
     assert!(doc_actions::set_selected_symbol_playback(
         &mut app,
@@ -3012,7 +3012,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     ));
     let expected_once = [red, green, blue, blue, blue];
     for (f, &col) in expected_once.iter().enumerate() {
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
         assert_eq!(
             scene_summary(&app).shapes[0].color(),
             col,
@@ -3020,7 +3020,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
         );
     }
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     app.session.set_selected_indices(vec![0]);
     assert!(doc_actions::set_selected_symbol_playback(
         &mut app,
@@ -3030,7 +3030,7 @@ fn test_symbol_playback_modes_loop_play_once_and_single_frame() {
     assert_eq!(scene_summary(&app).shapes[0].color(), green);
     assert_eq!(app.session.selected_indices(), vec![0]);
     for f in 0..5 {
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
         assert_eq!(scene_summary(&app).shapes[0].color(), green);
     }
 }
@@ -3059,9 +3059,9 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
         &mut app,
         child_binding.instance_gid
     ));
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     put_cel_shapes(
         &mut app,
         0,
@@ -3083,27 +3083,27 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
         &mut app,
         parent_sym_id
     ));
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    assert!(doc_actions::timeline_extend_frame(&mut app));
     assert!(symbol_ops::exit_symbol_timeline(&mut app));
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(scene_summary(&app).shapes[0].color(), red);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
     assert_eq!(scene_summary(&app).shapes[0].color(), blue);
 
     assert!(symbol_ops::enter_symbol_from_library(
         &mut app,
         child_sym_id
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.active_timeline().total_frames, 3);
     assert!(symbol_ops::exit_symbol_timeline(&mut app));
 
-    assert!(timeline_ui::timeline_extend_frame(&mut app));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    assert!(doc_actions::timeline_extend_frame(&mut app));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     assert_eq!(scene_summary(&app).len, 1);
     assert!(scene_summary(&app).shapes[0].is_empty_symbol_marker());
     canvas_tool::select_shapes_for_timeline_selection(&mut app);
@@ -3137,7 +3137,7 @@ fn test_nested_symbol_recursive_frame_evaluation_and_blank_frame_marker() {
     let mut shapes = scene_summary(&app).shapes;
     shapes.push(extra);
     put_cel_shapes(&mut app, 0, 2, shapes);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(scene_summary(&app).len, 2);
 }
 
@@ -3174,7 +3174,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
     app.undo();
     assert_eq!(app.doc.find_symbol(parent_sym_id).unwrap().name, orig_name);
 
-    timeline_ui::set_layer_locked(&mut app, 0, true);
+    doc_actions::set_layer_locked(&mut app, 0, true);
     assert!(app.doc.root.layers[0].locked);
     app.undo();
     assert!(!app.doc.root.layers[0].locked);
@@ -3215,7 +3215,7 @@ fn test_symbol_rename_library_delete_detach_and_inplace_child_symbol_creation() 
         &mut app,
         child_sym_id
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     app.session.set_selected_indices(vec![0]);
     let lib_len_before = app.doc.library().len();
     let grandchild_sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
@@ -3290,9 +3290,9 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
     assert!(!select_ops::exit_current_group(&mut app));
     app.undo();
     app.redo();
-    timeline_ui::set_layer_visible(&mut app, 999, false);
-    timeline_ui::set_layer_locked(&mut app, 999, true);
-    assert!(!timeline_ui::timeline_move_or_copy_frames(
+    doc_actions::set_layer_visible(&mut app, 999, false);
+    doc_actions::set_layer_locked(&mut app, 999, true);
+    assert!(!doc_actions::timeline_move_or_copy_frames(
         &mut app,
         crate::timeline::TimelineCellSelection::single(999, 999),
         1,
@@ -3793,11 +3793,11 @@ fn test_eyedropper_samples_interpolated_tween_position_on_locked_layer() {
     tween_eye_app.session.set_selected_indices(vec![0]);
     doc_actions::convert_selection_to_symbol(&mut tween_eye_app).unwrap();
     doc_actions::timeline_toggle_tween(&mut tween_eye_app);
-    timeline_ui::select_timeline_cells(&mut tween_eye_app, 0, 4, 0, 4);
-    timeline_ui::timeline_insert_keyframe(&mut tween_eye_app, true);
+    doc_actions::select_timeline_cells(&mut tween_eye_app, 0, 4, 0, 4);
+    doc_actions::timeline_insert_keyframe(&mut tween_eye_app, true);
     doc_actions::nudge_selected_shapes(&mut tween_eye_app, kurbo::Vec2::new(200.0, 0.0));
-    timeline_ui::set_layer_locked(&mut tween_eye_app, 0, true);
-    timeline_ui::scrub_ruler_to_frame(&mut tween_eye_app, 2);
+    doc_actions::set_layer_locked(&mut tween_eye_app, 0, true);
+    doc_actions::scrub_ruler_to_frame(&mut tween_eye_app, 2);
     assert_eq!(
         tool_paint::topmost_visible_color_at(&tween_eye_app, Point::new(200.0, 200.0)),
         Some(tween_color),
@@ -3833,7 +3833,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         &mut grp_sym_app,
         blink_binding.instance_gid
     ));
-    assert!(timeline_ui::timeline_insert_keyframe(
+    assert!(doc_actions::timeline_insert_keyframe(
         &mut grp_sym_app,
         false
     ));
@@ -3852,11 +3852,11 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     grp_sym_app.session.set_selected_indices(vec![0, 1]);
     assert!(doc_actions::group_selected_shapes(&mut grp_sym_app).is_some());
     // ルートシーンを3フレームに延長（F0: シンボル表示, F1: シンボル空白, F2: シンボルループ再表示）
-    timeline_ui::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
-    assert!(timeline_ui::timeline_extend_frame(&mut grp_sym_app));
+    doc_actions::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
+    assert!(doc_actions::timeline_extend_frame(&mut grp_sym_app));
 
     // F1（シンボルが空白フレームで消えている状態）へ移動し、親グループを (+150, 0) 平行移動する
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     assert_eq!(
         scene_summary(&grp_sym_app).len,
         2,
@@ -3875,7 +3875,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     ));
 
     // F2（シンボルがループして再び表示されるフレーム）へ進むと、空白フレーム中に移動した親グループに追従してシンボルも (+150, 0) 移動していること
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     assert_eq!(scene_summary(&grp_sym_app).len, 2);
     let summary_f2 = scene_summary(&grp_sym_app);
     let moved_sym_shape = summary_f2
@@ -3924,7 +3924,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     );
 
     // F1に戻って親グループを +90° 回転させても、空白フレーム中のシンボルが正確なアフィン変換で追従すること
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     {
         let sel = grp_sym_app
             .scene()
@@ -3935,7 +3935,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         &mut grp_sym_app,
         std::f64::consts::FRAC_PI_2
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     let summary_rot = scene_summary(&grp_sym_app);
     let rotated_sym_shape = summary_rot
         .shapes
@@ -3952,7 +3952,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
     );
 
     // F1に戻って親グループを削除すると、空白フレーム状態のシンボルインスタンスも一緒に削除されること
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     {
         let sel = grp_sym_app
             .scene()
@@ -3960,7 +3960,7 @@ fn test_blank_frame_symbol_in_parent_group_moves_rotates_and_deletes_synchronous
         grp_sym_app.session.set_selected_indices(sel);
     }
     assert!(doc_actions::delete_selected_shapes(&mut grp_sym_app));
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 2);
     assert!(
         scene_summary(&grp_sym_app).is_empty,
         "空白フレーム中に親グループを削除すると、内部の空白フレームシンボルも残骸にならず一緒に削除されること"
@@ -3990,13 +3990,13 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         &mut grp_sym_app,
         blink_binding.instance_gid
     ));
-    assert!(timeline_ui::timeline_insert_keyframe(
+    assert!(doc_actions::timeline_insert_keyframe(
         &mut grp_sym_app,
         false
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     assert!(doc_actions::clear_active_frame_shapes(&mut grp_sym_app));
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     put_cel_shapes(
         &mut grp_sym_app,
         0,
@@ -4010,11 +4010,11 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
     );
     assert!(symbol_ops::exit_symbol_timeline(&mut grp_sym_app));
 
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     assert!(doc_actions::clear_active_frame_shapes(&mut grp_sym_app));
-    timeline_ui::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
-    assert!(timeline_ui::timeline_extend_frame(&mut grp_sym_app));
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    doc_actions::select_timeline_cells(&mut grp_sym_app, 0, 2, 0, 2);
+    assert!(doc_actions::timeline_extend_frame(&mut grp_sym_app));
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     assert!(
         doc_actions::place_symbol_instance_from_library(&mut grp_sym_app, blink_sym_id),
         "Frame 0 が空白のマルチフレームシンボルでもライブラリからステージへ配置できること"
@@ -4027,7 +4027,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
         1,
         "Frame 0 時点で Cel::instances にシンボルインスタンスが登録されていること"
     );
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 1);
     assert_eq!(
         scene_summary(&grp_sym_app).len,
         1,
@@ -4123,7 +4123,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
             .maps(),
     );
     let inst_b = grp_sym_app.doc.root.layers[0].keyframes[0].cel.instances()[0].binding;
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     let mut shapes = scene_summary(&grp_sym_app).shapes;
     shapes.extend(make_stroke(
         Point::new(20.0, 20.0),
@@ -4150,7 +4150,7 @@ fn test_resolved_cel_screen_and_onion_mesh_cache_and_pan_invalidation() {
                 .all(|(a, b)| std::sync::Arc::ptr_eq(a, b)),
         "キャッシュ済みの backdrop メッシュが返ること"
     );
-    timeline_ui::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut grp_sym_app, 0, 0);
     doc_actions::apply(
         &mut grp_sym_app,
         doc_actions::Action::PaintStroke {
@@ -4196,7 +4196,7 @@ fn test_shape_id_layer_sort_and_empty_symbol_marker_invariants() {
     assert!(!sort_app.timeline_ui.loop_playback);
 
     // `FillShape::shape_id` によるレイヤー順展開後の選択状態追従
-    timeline_ui::timeline_add_layer(&mut sort_app);
+    doc_actions::timeline_add_layer(&mut sort_app);
     let lid_bottom = sort_app.doc.root.layers[0].id;
     let lid_top = sort_app.doc.root.layers[1].id;
     let shape_top = make_stroke(
@@ -4337,14 +4337,14 @@ fn eyedropper_and_bucket_see_locked_layers_through_the_drawn_copy() {
         &mut app,
         &brush_line(&[Point::new(100.0, 200.0), Point::new(300.0, 200.0)], 12.0),
     );
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     app.tool.brush_color = blue;
     commit_brush_line(
         &mut app,
         &brush_line(&[Point::new(200.0, 100.0), Point::new(200.0, 300.0)], 12.0),
     );
-    timeline_ui::set_layer_locked(&mut app, 1, true);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::set_layer_locked(&mut app, 1, true);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     // 重なる所は、上のロック中のレイヤーの青。赤だけの所は赤。何も無い所は無い
     let color_at = |app: &Is2dApp, p: Point| tool_paint::topmost_visible_color_at(app, p);
     let crossing = Point::new(200.0, 200.0);
@@ -4379,13 +4379,13 @@ fn test_bucket_fill_ignores_other_layer_walls_and_cluster_culling() {
     commit_brush_line(&mut bucket_app, &raw_ring);
 
     // Layer 2 を追加して円の中央 (x = 200) に縦の分割線を引き、Layer 2 をロック (🔒) する
-    timeline_ui::timeline_add_layer(&mut bucket_app);
+    doc_actions::timeline_add_layer(&mut bucket_app);
     let raw_div = brush_line(&[Point::new(200.0, 120.0), Point::new(200.0, 280.0)], 6.0);
     commit_brush_line(&mut bucket_app, &raw_div);
     // (b) で使う壁（円環と分割線）
     let walls_before = scene_summary(&bucket_app).shapes;
-    timeline_ui::set_layer_locked(&mut bucket_app, 1, true);
-    timeline_ui::switch_to_layer_and_frame(&mut bucket_app, 0, 0);
+    doc_actions::set_layer_locked(&mut bucket_app, 1, true);
+    doc_actions::switch_to_layer_and_frame(&mut bucket_app, 0, 0);
 
     bucket_app.tool.brush_color = red;
     assert!(doc_actions::bucket_fill_at(
@@ -4529,8 +4529,8 @@ fn test_tween_lru_cache_no_thrashing() {
         "移動確定後の fill_mesh 頂点座標が +10.0 シフトしていること"
     );
     assert!(doc_actions::timeline_toggle_tween(&mut lru_tween_app));
-    timeline_ui::select_timeline_cells(&mut lru_tween_app, 0, 11, 0, 11);
-    assert!(timeline_ui::timeline_insert_keyframe(
+    doc_actions::select_timeline_cells(&mut lru_tween_app, 0, 11, 0, 11);
+    assert!(doc_actions::timeline_insert_keyframe(
         &mut lru_tween_app,
         true
     ));
@@ -4925,12 +4925,12 @@ fn test_project_save_and_load_roundtrip() {
         &mut app,
         crate::symbol::TweenRotate::Clockwise
     ));
-    timeline_ui::select_timeline_cells(&mut app, 0, 5, 0, 5);
-    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    doc_actions::select_timeline_cells(&mut app, 0, 5, 0, 5);
+    doc_actions::timeline_insert_keyframe(&mut app, true);
     doc_actions::nudge_selected_shapes(&mut app, kurbo::Vec2::new(150.0, 40.0));
 
     // Layer 2: グループ化された図形 + 生シェイプ
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     let mut raw_and_group = make_stroke(
         Point::new(200.0, 220.0),
         Point::new(250.0, 220.0),
@@ -5031,7 +5031,7 @@ fn test_multitab_open_switch_symbol_copy_paste_and_close() {
     crate::project_io::open_project_in_tab(&mut loaded_app, &tmp_path, None).unwrap();
 
     // Tab 0 (loaded_app) でシンボルインスタンスを選択してコピー（同時に保存時の選択状態維持も検証）
-    timeline_ui::switch_to_layer_and_frame(&mut loaded_app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut loaded_app, 0, 0);
     let summary = scene_summary(&loaded_app);
     let sym_indices: Vec<usize> = (0..summary.len)
         .filter(|&i| summary.shapes[i].symbol_instance.is_some())
@@ -5475,12 +5475,12 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     self_union_app.session.set_selected_indices(vec![0]);
     assert!(doc_actions::copy_selected_shapes(&mut self_union_app));
 
-    timeline_ui::set_layer_locked(&mut self_union_app, 0, true);
+    doc_actions::set_layer_locked(&mut self_union_app, 0, true);
     assert!(
         !doc_actions::paste_clipboard(&mut self_union_app, true),
         "ロックされたレイヤー上へのペーストが拒否されること"
     );
-    timeline_ui::set_layer_locked(&mut self_union_app, 0, false);
+    doc_actions::set_layer_locked(&mut self_union_app, 0, false);
 
     assert!(canvas_tool::clear_selection(&mut self_union_app));
     select_ops::apply_marquee_selection(
@@ -5862,7 +5862,7 @@ fn test_eraser_only_erases_active_layer_and_preserves_other_unlocked_layers() {
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
 
     // Layer 2 (index 1, id 2) を追加して同じ座標に青い横線を描画（両レイヤーとも非ロック）
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     assert_eq!(app.doc.root.active_layer, 1);
     app.tool.brush_color = blue;
     let raw_blue = brush_line(&[Point::new(100.0, 200.0), Point::new(300.0, 200.0)], 14.0);
@@ -5904,14 +5904,14 @@ fn test_multilayer_f7_advances_frame_when_any_selected_layer_has_content() {
     app.tool.brush_color = red;
     let raw = brush_line(&[Point::new(100.0, 100.0), Point::new(160.0, 100.0)], 10.0);
     commit_brush_line(&mut app, &raw);
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     assert!(app.doc.root.layers[1].keyframes[0].cel.is_empty());
     assert!(!app.doc.root.layers[0].keyframes[0].cel.is_empty());
 
     // 両レイヤーの Frame 0 を範囲選択して F7 (空白キーフレーム挿入) を実行
     // → Layer 1 に絵があるため Frame 0 の絵を消去せず Frame 1 に進んで空白キーフレームを挿入すること
-    timeline_ui::select_timeline_cells(&mut app, 0, 0, 1, 0);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    doc_actions::select_timeline_cells(&mut app, 0, 0, 1, 0);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.doc.root.current_frame, 1);
     assert!(
         !app.doc.root.layers[0].keyframes[0].cel.is_empty(),
@@ -5925,7 +5925,7 @@ fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
     // 移動先に既存キーフレームがある状態でのフレーム区間移動（place_keyframes_at）の検証
     let mut move_app = Is2dApp::default();
     for _ in 0..5 {
-        timeline_ui::timeline_extend_frame(&mut move_app);
+        doc_actions::timeline_extend_frame(&mut move_app);
     }
     // Frame 0..=2 (3コマスパン) に赤い絵を描画し、Frame 3 に空白キーフレーム、Frame 4 に青い絵のキーフレームを作成
     put_cel_shapes(
@@ -5939,10 +5939,10 @@ fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
             red,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut move_app, 0, 3);
-    timeline_ui::timeline_insert_keyframe(&mut move_app, false);
-    timeline_ui::switch_to_layer_and_frame(&mut move_app, 0, 4);
-    timeline_ui::timeline_insert_keyframe(&mut move_app, false);
+    doc_actions::switch_to_layer_and_frame(&mut move_app, 0, 3);
+    doc_actions::timeline_insert_keyframe(&mut move_app, false);
+    doc_actions::switch_to_layer_and_frame(&mut move_app, 0, 4);
+    doc_actions::timeline_insert_keyframe(&mut move_app, false);
     put_cel_shapes(
         &mut move_app,
         0,
@@ -5958,7 +5958,7 @@ fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
     // Frame 0..=2 (3コマスパン) を選択して +3 コマ右（Frame 3..=5）へ移動
     // → 移動先 Frame 4 にあった既存キーフレームがクリアされ、Frame 3..=5 全体が移動した赤いスパンになること
     let sel = crate::timeline::TimelineCellSelection::from_corners(0, 0, 0, 2);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut move_app,
         sel,
         0,
@@ -5981,10 +5981,10 @@ fn test_move_frames_overwrites_destination_and_cross_layer_offset() {
     );
 
     // 別レイヤー（layer_offset = +1）へのフレーム区間移動で移動先レイヤーの layer_id に更新されること
-    timeline_ui::timeline_add_layer(&mut move_app);
+    doc_actions::timeline_add_layer(&mut move_app);
     let dst_layer_id = move_app.doc.root.layers[1].id;
     let sel_cross = crate::timeline::TimelineCellSelection::from_corners(0, 3, 0, 5);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut move_app,
         sel_cross,
         1,
@@ -6179,7 +6179,7 @@ fn test_step_frame_loop_mode_and_total_frames_over_600() {
 
     // loop_playback == true のとき、先頭フレーム (0) から -1 コマ送りで最終フレーム (1199) へ折り返すこと
     app.timeline_ui.loop_playback = true;
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     timeline_ui::step_frame(&mut app, -1);
     assert_eq!(app.doc.root.current_frame, 1199);
     timeline_ui::step_frame(&mut app, 1);
@@ -6189,7 +6189,7 @@ fn test_step_frame_loop_mode_and_total_frames_over_600() {
     app.timeline_ui.loop_playback = false;
     timeline_ui::step_frame(&mut app, -1);
     assert_eq!(app.doc.root.current_frame, 0);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1199);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1199);
     timeline_ui::step_frame(&mut app, 1);
     assert_eq!(app.doc.root.current_frame, 1199);
 }
@@ -6274,7 +6274,7 @@ fn test_f7_preserves_next_keyframe_by_pushing_tail() {
             red,
         ),
     );
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.doc.root.current_frame, 1);
     put_cel_shapes(
         &mut app,
@@ -6289,8 +6289,8 @@ fn test_f7_preserves_next_keyframe_by_pushing_tail() {
     );
 
     // Frame 0（赤い絵）に戻って F7 を押したとき、Frame 1 の青い絵を白紙消去せず Frame 2 へ押し出して Frame 1 に空白KFを挿入すること (H4)
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, false));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, false));
     assert_eq!(app.doc.root.current_frame, 1);
     assert!(
         app.doc.root.layers[0].cel_at(1).unwrap().is_empty(),
@@ -6319,21 +6319,21 @@ fn test_shift_f6_and_shift_f5_boundary_guards() {
             red,
         ),
     );
-    timeline_ui::timeline_extend_frame(&mut hold_app);
-    timeline_ui::timeline_extend_frame(&mut hold_app);
-    timeline_ui::switch_to_layer_and_frame(&mut hold_app, 0, 2);
+    doc_actions::timeline_extend_frame(&mut hold_app);
+    doc_actions::timeline_extend_frame(&mut hold_app);
+    doc_actions::switch_to_layer_and_frame(&mut hold_app, 0, 2);
     assert!(
-        !timeline_ui::timeline_delete_keyframe(&mut hold_app),
+        !doc_actions::timeline_delete_keyframe(&mut hold_app),
         "先頭キーフレームの保持フレーム（Frame 2）では Shift+F6 が無効であり、Frame 0 の絵を消去しないこと"
     );
     assert!(!hold_app.doc.root.layers[0].cel_at(0).unwrap().is_empty());
 
     // 2. 尺の短いレイヤーが含まれる状態で後ろのフレームで Shift+F5 を押した際、範囲外の短いレイヤーの末尾を削らないこと
-    timeline_ui::timeline_add_layer(&mut hold_app);
+    doc_actions::timeline_add_layer(&mut hold_app);
     hold_app.doc.root.layers[1].frame_count = 1;
     hold_app.doc.root.cell_selection = None;
     hold_app.doc.root.current_frame = 2;
-    assert!(timeline_ui::timeline_remove_frame(&mut hold_app));
+    assert!(doc_actions::timeline_remove_frame(&mut hold_app));
     assert_eq!(hold_app.doc.root.layers[0].frame_count, 2);
     assert_eq!(
         hold_app.doc.root.layers[1].frame_count, 1,
@@ -6384,9 +6384,9 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
     assert!(symbol_ops::exit_symbol_timeline(&mut sym_f6_app));
     extend_frame_at(&mut sym_f6_app.doc.root, 0, 4);
     sym_f6_app.doc.root.sync_total_frames();
-    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
     assert_eq!(scene_summary(&sym_f6_app).shapes[0].color(), blue);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
+    assert!(doc_actions::timeline_insert_keyframe(&mut sym_f6_app, true));
     assert_eq!(
         scene_summary(&sym_f6_app).shapes[0].color(),
         blue,
@@ -6395,15 +6395,15 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
 
     // トゥイーン区間（tween_rotate = Clockwise）の途中フレームでは直接のキャンバス編集は無効化され、
     // F6 キーフレーム挿入で分割した際に tween_rotate = Clockwise が引き継がれて編集可能になること (#10, M2-2)
-    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 4);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
-    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut sym_f6_app, 0, 4);
+    assert!(doc_actions::timeline_insert_keyframe(&mut sym_f6_app, true));
+    doc_actions::switch_to_layer_and_frame(&mut sym_f6_app, 0, 2);
     assert!(doc_actions::timeline_toggle_tween(&mut sym_f6_app));
     assert!(doc_actions::set_active_keyframe_tween_rotate(
         &mut sym_f6_app,
         crate::symbol::TweenRotate::Clockwise
     ));
-    timeline_ui::switch_to_layer_and_frame(&mut sym_f6_app, 0, 3);
+    doc_actions::switch_to_layer_and_frame(&mut sym_f6_app, 0, 3);
     sym_f6_app.session.set_selected_indices(vec![0]);
     assert!(
         !doc_actions::nudge_selected_shapes(&mut sym_f6_app, kurbo::Vec2::new(20.0, 0.0)),
@@ -6415,7 +6415,7 @@ fn test_loop_symbol_hold_span_f6_and_tween_split_preserves_phase_and_tween_rotat
             .is_none(),
         "トゥイーン途中のコマでの移動操作で自動キーフレームが生成されないこと"
     );
-    assert!(timeline_ui::timeline_insert_keyframe(&mut sym_f6_app, true));
+    assert!(doc_actions::timeline_insert_keyframe(&mut sym_f6_app, true));
     sym_f6_app.session.set_selected_indices(vec![0]);
     assert!(doc_actions::nudge_selected_shapes(
         &mut sym_f6_app,
@@ -6565,16 +6565,16 @@ fn test_symbol_delete_mid_tween_preserves_start_keyframe_pose() {
     let sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
     extend_frame_at(&mut app.doc.root, 0, 4);
     app.doc.root.sync_total_frames();
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
-    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
+    doc_actions::timeline_insert_keyframe(&mut app, true);
     app.session.set_selected_indices(vec![0]);
     doc_actions::nudge_selected_shapes(&mut app, KVec2::new(200.0, 0.0));
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     assert!(doc_actions::timeline_toggle_tween(&mut app));
     assert!(app.doc.root.layers[0].keyframes[0].tween);
 
     // シンボルを削除すると、全キーフレームからインスタンスが消え、トゥイーンは ON のまま未完になること
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
     assert!(doc_actions::delete_symbol_from_library(&mut app, sym_id));
     assert!(app.doc.find_symbol(sym_id).is_none());
     for kf in &app.doc.root.layers[0].keyframes {
@@ -6616,8 +6616,8 @@ fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools(
             red,
         ),
     );
-    timeline_ui::timeline_add_layer(&mut app);
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::timeline_add_layer(&mut app);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
 
     // 図形に当たらない空振り消しゴムで Undo が増えないこと (H7)
     let undo_before_noop_erase = app.history.undo_stack.len();
@@ -6631,7 +6631,7 @@ fn test_noop_eraser_does_not_push_undo_and_active_layer_lock_blocks_paint_tools(
     );
 
     // アクティブレイヤーがロック中は消しゴム・バケツが別レイヤーへフォールバックせず拒否されること
-    timeline_ui::set_layer_locked(&mut app, 1, true);
+    doc_actions::set_layer_locked(&mut app, 1, true);
     app.doc.root.active_layer = 1;
     app.tool.tool = Tool::Eraser;
     assert!(
@@ -7672,7 +7672,7 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
             red,
         ),
     );
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     let lid2 = app.doc.root.layers[1].id;
     put_cel_shapes(
         &mut app,
@@ -7691,7 +7691,7 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
     assert_eq!(scene_summary(&app).len, 2);
 
     // Layer 1 を非表示 (visible = false) に切り替えると、Scene から除外されること
-    timeline_ui::set_layer_visible(&mut app, 0, false);
+    doc_actions::set_layer_visible(&mut app, 0, false);
     assert_eq!(
         scene_summary(&app).len,
         1,
@@ -7712,7 +7712,7 @@ fn test_hidden_layer_shapes_excluded_from_canvas_and_preserved_on_sync() {
     );
 
     // 再び Layer 1 を表示に戻すと赤い図形が復活すること
-    timeline_ui::set_layer_visible(&mut app, 0, true);
+    doc_actions::set_layer_visible(&mut app, 0, true);
     assert_eq!(scene_summary(&app).len, 2);
 }
 
@@ -7742,8 +7742,8 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
             Color32::RED,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    doc_actions::timeline_insert_keyframe(&mut app, false);
     put_cel_shapes(
         &mut app,
         0,
@@ -7755,8 +7755,8 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
             Color32::GREEN,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::timeline_insert_keyframe(&mut app, false);
     put_cel_shapes(
         &mut app,
         0,
@@ -7770,7 +7770,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     );
 
     // Frame 1 でオニオンスキンを有効化して update_ui を実行し、前後のオニオンスキンキャッシュが構築・描画されることを検証
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
     app.view.onion_skin_enabled = true;
     let _ = ctx.run(
         egui::RawInput {
@@ -7784,7 +7784,7 @@ fn test_time_based_playback_advance_and_onion_skin_rendering() {
     );
 
     // 非ループ再生 (loop_playback = false) で Frame 0 から再生を開始し、時刻を進めて最終フレーム (Frame 2) で自動停止することを検証
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     app.timeline_ui.loop_playback = false;
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
@@ -8293,7 +8293,7 @@ fn test_copy_frames_within_layer_shares_cels_and_keeps_ids() {
         min_frame: 0,
         max_frame: 1,
     };
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel, 0, 3, true
     ));
 
@@ -8302,7 +8302,7 @@ fn test_copy_frames_within_layer_shares_cels_and_keeps_ids() {
     assert!(Arc::ptr_eq(cel0.maps(), cel3.maps()));
     assert_eq!(cel0.shapes()[0].shape_id, cel3.shapes()[0].shape_id);
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 3);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 3);
     assert!(doc_actions::apply(
         &mut app,
         doc_actions::Action::PaintStroke {
@@ -8332,8 +8332,8 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
         0,
         make_stroke(Point::new(60.0, 60.0), Point::new(100.0, 60.0), 10.0, red),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::timeline_insert_keyframe(&mut app, false);
     put_cel_shapes(
         &mut app,
         0,
@@ -8342,7 +8342,7 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
     );
 
     let sel_0_1 = timeline::TimelineCellSelection::from_corners(0, 0, 0, 1);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut app, sel_0_1, 0, 2, true
     ));
     assert_eq!(
@@ -8386,8 +8386,8 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
     tween_app.session.set_selected_indices(vec![0]);
     doc_actions::convert_selection_to_symbol(&mut tween_app).unwrap();
     assert!(doc_actions::timeline_toggle_tween(&mut tween_app));
-    timeline_ui::switch_to_layer_and_frame(&mut tween_app, 0, 4);
-    timeline_ui::timeline_insert_keyframe(&mut tween_app, true);
+    doc_actions::switch_to_layer_and_frame(&mut tween_app, 0, 4);
+    doc_actions::timeline_insert_keyframe(&mut tween_app, true);
     assert!(doc_actions::nudge_selected_shapes(
         &mut tween_app,
         kurbo::Vec2::new(200.0, 0.0)
@@ -8399,9 +8399,9 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
         .root
         .evaluate_layer_shapes_at(0, 2, tween_app.doc.library());
     let mid_center_x = mid_shapes[0].bounding_box().center().x;
-    timeline_ui::timeline_add_layer(&mut tween_app);
+    doc_actions::timeline_add_layer(&mut tween_app);
     let sel_mid = timeline::TimelineCellSelection::single(0, 2);
-    assert!(timeline_ui::timeline_move_or_copy_frames(
+    assert!(doc_actions::timeline_move_or_copy_frames(
         &mut tween_app,
         sel_mid,
         1,
@@ -8646,7 +8646,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     assert!(app.doc.library()[1].id <= project_io::MAX_SAFE_ENTITY_ID);
 
     // 読み込み後に新規レイヤー・新規シンボル・新規グループIDを追加しても既存IDと一切衝突しないこと (#13)
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     let layer_ids: std::collections::HashSet<u64> =
         app.doc.root.layers.iter().map(|l| l.id).collect();
     assert_eq!(
@@ -9041,7 +9041,7 @@ fn moving_a_keyframe_moves_it_without_blank_or_copied_keyframes() {
     };
     let go = |app: &mut Is2dApp, f: usize| {
         assert!(canvas_tool::clear_selection(app));
-        timeline_ui::select_timeline_cells(app, 0, f, 0, f);
+        doc_actions::select_timeline_cells(app, 0, f, 0, f);
     };
     let starts = |app: &Is2dApp| -> Vec<usize> {
         app.doc.root.layers[0]
@@ -14135,8 +14135,8 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
             Color32::RED,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 1);
-    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 1);
+    doc_actions::timeline_insert_keyframe(&mut app, false);
     put_cel_shapes(
         &mut app,
         0,
@@ -14148,8 +14148,8 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
             Color32::GREEN,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    timeline_ui::timeline_insert_keyframe(&mut app, false);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::timeline_insert_keyframe(&mut app, false);
     put_cel_shapes(
         &mut app,
         0,
@@ -14163,7 +14163,7 @@ fn test_g1_4_playback_advance_skips_base_cache_rebuild_and_stop_refreshes() {
     );
 
     // Frame 0 から再生開始（非ループ）
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     assert_eq!(app.session.base_cache().shapes()[0].color(), Color32::RED);
     app.timeline_ui.loop_playback = false;
     timeline_ui::toggle_playback(&mut app);
@@ -14466,8 +14466,8 @@ fn test_insert_keyframe_on_held_frame_shares_shapes() {
             Color32::RED,
         ),
     );
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 3);
-    assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 3);
+    assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
     let kfs = &app.doc.root.layers[0].keyframes;
     assert_eq!(kfs.len(), 2);
     assert_eq!(app.doc.root.layers[0].start_of(1), 3);
@@ -14526,8 +14526,8 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
         },
     );
 
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
-    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
+    doc_actions::timeline_insert_keyframe(&mut app, true);
     let inst4 = timeline::SymbolInstance {
         binding: symbol::SymbolInstanceBinding {
             instance_gid: 1,
@@ -14548,8 +14548,8 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
         .set_shapes_and_instances(Vec::new(), vec![inst4]);
 
     // 1. トゥイーン途中 (Frame 2) で F6 キーフレーム挿入：中割り座標 (200, 100)・first_frame=2・tween=true・Clockwise が引き継がれること
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
-    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
+    doc_actions::timeline_insert_keyframe(&mut app, true);
     let kf_mid = &app.doc.root.layers[0].keyframes[1];
     assert_eq!(app.doc.root.layers[0].start_of(1), 2);
     assert!(kf_mid.tween);
@@ -14559,8 +14559,8 @@ fn test_other_1_insert_keyframe_via_snapshot_keyframe_at() {
     assert_eq!(b_mid.first_frame, 2);
 
     // 2. 保持フレーム上 (Frame 6、Frame 4 キーフレームからの経過2コマ) で F6 キーフレーム挿入：first_frame が +2 進んだ値になること
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 6);
-    timeline_ui::timeline_insert_keyframe(&mut app, true);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 6);
+    doc_actions::timeline_insert_keyframe(&mut app, true);
     let kf_hold = &app.doc.root.layers[0].keyframes[3];
     assert_eq!(app.doc.root.layers[0].start_of(3), 6);
     assert_eq!(kf_hold.cel.instances()[0].binding.first_frame, 3);
@@ -18246,7 +18246,7 @@ impl OpRng {
 /// 手で書いた名簿でなく定義と突き合わせて確かめるため（種類を足すと、試しが作れるようにするまでテストが止まる：設計
 /// claude/約束を入口で守る設計_5616fcc.md の 7.）
 fn action_kind_names() -> Vec<String> {
-    enum_variant_names(include_str!("doc_actions.rs"), "pub(crate) enum Action {")
+    enum_variant_names(include_str!("canvas_tool/doc_actions.rs"), "pub(crate) enum Action {")
 }
 
 /// ソース `src` の、見出し `header`（`pub(crate) enum 名前 {`）で始まる列挙の種類の名前を、定義の順に全部読む
@@ -20950,7 +20950,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     doc_actions::apply(&mut app, doc_actions::Action::AddLayer);
     put_cel_shapes(&mut app, 1, 0, make_stroke(Point::new(100.0, 300.0), Point::new(300.0, 300.0), 25.0, blue));
     // 浮いた片に入らない、つかむための四角（レイヤー 0。浮いた片を置けなくしても、こちらはつかめる）
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     let mut both = make_stroke(Point::new(100.0, 200.0), Point::new(300.0, 200.0), 25.0, red);
     both.push(map_overlay::rect_shape(500.0, 500.0, 600.0, 600.0, green));
     put_cel_shapes(&mut app, 0, 0, both);
@@ -21034,7 +21034,7 @@ fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
         if let Some(wrap) = wrap.clone() {
             // 下のレイヤーの線だけを選んで包む（上のレイヤーは、包む間だけロック）
             app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = true);
-            timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+            doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
             apply(&mut app, Action::SetTool { tool: Tool::Select });
             assert!(apply(&mut app, Action::SelectAll));
             assert!(apply(&mut app, wrap));
@@ -22306,9 +22306,9 @@ fn locked_layers_are_drawn_finely_when_zoomed_in() {
 fn app_with_cels_every_three_frames() -> Is2dApp {
     let mut app = Is2dApp::default();
     for f in [0usize, 3, 6, 9] {
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
         if f > 0 {
-            assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+            assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
         }
         put_cel_shapes(&mut app, 0, f, vec![map_overlay::rect_shape(10.0 + f as f64, 10.0, 90.0, 90.0, Color32::RED)]);
     }
@@ -22379,7 +22379,7 @@ fn prefetched_cels_are_drawn_as_built_and_match_a_fresh_build() {
 #[test]
 fn the_app_prefetches_the_next_cel_and_never_shows_a_stale_one() {
     let mut app = app_with_cels_every_three_frames();
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
     let ctx = egui::Context::default();
     let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
     let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
@@ -22407,11 +22407,11 @@ fn the_app_prefetches_the_next_cel_and_never_shows_a_stale_one() {
 fn onion_skin_keeps_the_cel_copies_it_drew() {
     let mut app = Is2dApp::default();
     for f in [0usize, 2] {
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, f);
-        assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, f);
+        assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
         put_cel_shapes(&mut app, 0, f, vec![map_overlay::rect_shape(10.0 + f as f64, 10.0, 90.0, 90.0, Color32::RED)]);
     }
-    timeline_ui::switch_to_layer_and_frame(&mut app, 0, 0);
+    doc_actions::switch_to_layer_and_frame(&mut app, 0, 0);
     app.tab_mut().view.onion_skin_enabled = true;
     app.tab_mut().view.onion_next_frames = 2;
     let ctx = egui::Context::default();
@@ -28392,7 +28392,7 @@ mod map_overlay {
         let mut r = Rng(seed);
         for layer in 0..3 {
             if layer > 0 {
-                timeline_ui::timeline_add_layer(&mut app);
+                doc_actions::timeline_add_layer(&mut app);
             }
             for _ in 0..60 {
                 app.tool.brush_color = colors[(r.f() * 4.0) as usize % 4];
@@ -30365,14 +30365,14 @@ mod map_overlay {
             .cel
             .set_shapes_and_instances(Vec::new(), vec![inst(100.0, 0)]);
         let _ = doc_actions::apply(&mut app, doc_actions::Action::ToggleTween);
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, 4);
-        timeline_ui::timeline_insert_keyframe(&mut app, true);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, 4);
+        doc_actions::timeline_insert_keyframe(&mut app, true);
         app.doc.root.layers[0]
             .keyframe_mut(1)
             .cel
             .set_shapes_and_instances(Vec::new(), vec![inst(300.0, 0)]);
-        timeline_ui::timeline_add_layer(&mut app);
-        timeline_ui::switch_to_layer_and_frame(&mut app, 0, 2);
+        doc_actions::timeline_add_layer(&mut app);
+        doc_actions::switch_to_layer_and_frame(&mut app, 0, 2);
         let tweened = app.doc.root.layers[0]
             .interpolated_tween_binding_at(2)
             .expect("トゥイーンの途中");
@@ -30390,7 +30390,7 @@ mod map_overlay {
         assert_eq!(copied.binding.first_frame, tweened.first_frame);
         // 新しいレイヤー（編集できる）へ、その場に貼る
         let new_lid = app.doc.root.layers[1].id;
-        timeline_ui::switch_to_layer_and_frame(&mut app, 1, 2);
+        doc_actions::switch_to_layer_and_frame(&mut app, 1, 2);
         assert!(doc_actions::paste_clipboard(&mut app, true));
         let pasted = app.doc.root.layers[1]
             .cel_at(2)
@@ -30561,9 +30561,9 @@ mod map_overlay {
             "PROBE 初めて出すセル（図形 {n}）：画面の土台 平均 {ra:.1}ms・最大 {rm:.1}ms｜再生の1コマ 平均 {pa:.1}ms・最大 {pm:.1}ms"
         );
         for l in 0..ids.len() {
-            timeline_ui::switch_to_layer_and_frame(&mut app, l, 0);
+            doc_actions::switch_to_layer_and_frame(&mut app, l, 0);
             for f in 1..30 {
-                timeline_ui::switch_to_layer_and_frame(&mut app, l, f);
+                doc_actions::switch_to_layer_and_frame(&mut app, l, f);
                 doc_actions::timeline_insert_keyframe(&mut app, true);
             }
         }
@@ -32063,10 +32063,10 @@ fn moving_shared_keyframes_to_another_layer_keeps_their_maps_shared() {
     }
     let one_map = file(&app) - empty;
     for f in 1..N {
-        timeline_ui::scrub_ruler_to_frame(&mut app, f);
-        assert!(timeline_ui::timeline_insert_keyframe(&mut app, true));
+        doc_actions::scrub_ruler_to_frame(&mut app, f);
+        assert!(doc_actions::timeline_insert_keyframe(&mut app, true));
     }
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     // レイヤー `l` の地図の大きさ（塊の並びと辺のバイト。共有しているものは1回だけ数える）
     let map_bytes = |app: &Is2dApp, l: usize| {
         let mut seen = std::collections::HashSet::new();
@@ -32084,7 +32084,7 @@ fn moving_shared_keyframes_to_another_layer_keeps_their_maps_shared() {
     let before = file(&app);
     for copy_mode in [true, false] {
         let sel = timeline::TimelineCellSelection::from_corners(0, 0, 0, N - 1);
-        assert!(timeline_ui::timeline_move_or_copy_frames(
+        assert!(doc_actions::timeline_move_or_copy_frames(
             &mut app, sel, 1, 0, copy_mode
         ));
         assert_eq!(app.doc.root.layers[1].keyframes.len(), N);
@@ -32170,7 +32170,7 @@ fn a_curve_sharing_both_ends_with_a_straight_edge_is_not_the_same_line() {
 fn painting_faces_back_keeps_their_ids() {
     let mut tried = 0;
     for seed in 0..40 {
-        let map = tests::map_overlay::native_scene(seed, 12)
+        let map = crate::canvas_tool::tests::map_overlay::native_scene(seed, 12)
             .checked()
             .expect("正しい地図")
             .uniquely_labeled()
@@ -32204,7 +32204,7 @@ fn timeline_drags_are_dropped_when_the_document_changes_meanwhile() {
     use crate::timeline::TimelineCellSelection;
     use crate::timeline_ui::TimelineGridDrag;
     let mut app = Is2dApp::default();
-    timeline_ui::timeline_add_layer(&mut app);
+    doc_actions::timeline_add_layer(&mut app);
     let moving = TimelineGridDrag::MoveFrames {
         orig_sel: TimelineCellSelection::from_corners(0, 0, 0, 0),
         grab_layer: 0,
@@ -32229,7 +32229,7 @@ fn timeline_drags_are_dropped_when_the_document_changes_meanwhile() {
             app.timeline_ui.drop_drag_if_document_changed(g);
             assert!(app.timeline_ui.dragging_layer.is_some() || !matches!(app.timeline_ui.grid_drag, TimelineGridDrag::None));
             if change == 0 {
-                assert!(timeline_ui::timeline_extend_frame(&mut app));
+                assert!(doc_actions::timeline_extend_frame(&mut app));
             } else {
                 assert!(app.tab_mut().undo());
             }
@@ -32250,7 +32250,7 @@ fn realizing_a_broken_transform_keeps_the_lines() {
     let mut tried = 0;
     for seed in 0..40 {
         for only_lines in [false, true] {
-            let mut map = tests::map_overlay::native_scene(seed, 12);
+            let mut map = crate::canvas_tool::tests::map_overlay::native_scene(seed, 12);
             for e in &mut map.edges {
                 e.stroke = Some(ink);
                 if only_lines {
@@ -35800,7 +35800,7 @@ fn double_click_needs_both_clicks_at_the_same_place() {
 mod format_v9 {
     use crate::project_io::ProjectDocument;
     use crate::stored_map::{SavedStroke, SavedTile};
-    use crate::tests::SavedTiles;
+    use crate::canvas_tool::tests::SavedTiles;
     use serde::Deserialize;
 
     #[derive(Default, Deserialize)]
@@ -35863,7 +35863,7 @@ mod format_v9 {
 mod format_v8 {
     use crate::project_io::ProjectDocument;
     use crate::stored_map::{SavedEdge, SavedTile};
-    use crate::tests::SavedTiles;
+    use crate::canvas_tool::tests::SavedTiles;
     use serde::Deserialize;
 
     #[derive(Default, Deserialize)]
@@ -35916,7 +35916,7 @@ mod format_v7 {
         ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolDef, SavedSymbolInstance,
         SavedTimeline,
     };
-    use crate::tests::SavedTiles;
+    use crate::canvas_tool::tests::SavedTiles;
     use crate::timeline::SavedScopeMap;
     use crate::timeline::TweenRotate;
     use serde::Deserialize;
@@ -37125,6 +37125,58 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
         broken
     );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 自由変形の中心点は、選択か見ている場所（コマ・レイヤー・シンボルの中・グループの階層）が変わったら真ん中に戻す（戻すのは
+/// 入口 `apply` の1か所：持ち主が決めた 2026-11-27）。選んだ図形が同じままのグループ化では残る（持ち主が決めた）。前は
+/// グループ化・タイムラインの後片付け・取り消しなど 8 か所で手で戻していた（設計 入口の部屋の設計_27c4085 の 2.3）
+#[test]
+fn transform_pivot_resets_only_when_selection_or_view_changes() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    assert!(apply(&mut app, Action::ExtendFrame));
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectAll));
+    let pivot = Point::new(120.0, 130.0);
+    let set_pivot = |app: &mut Is2dApp| {
+        assert!(apply(app, Action::CommitPivotDrag { new_pivot: pivot, orig_pivot: Point::new(200.0, 200.0), had_custom_pivot: false, changed: true }));
+        assert_eq!(app.session.transform_pivot(), Some(pivot));
+    };
+    set_pivot(&mut app);
+    // 選んだものを動かしても（選択も見ている場所も同じ）真ん中には戻らず、一緒に動く
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(5.0, 0.0) }));
+    let moved = Some(pivot + KVec2::new(5.0, 0.0));
+    assert_eq!(app.session.transform_pivot(), moved, "動かしただけで中心点が戻った");
+    // グループ化（選んだ図形は同じ）では残る
+    assert!(apply(&mut app, Action::Group));
+    assert_eq!(app.session.transform_pivot(), moved, "グループ化で中心点が戻った");
+    // コマを変えると戻る
+    assert!(apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 1 }));
+    assert_eq!(app.session.transform_pivot(), None, "コマを変えても中心点が残った");
+    // 選択を変えると戻る
+    assert!(apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 0 }));
+    assert!(apply(&mut app, Action::SelectAll));
+    set_pivot(&mut app);
+    assert!(apply(&mut app, Action::Deselect));
+    assert_eq!(app.session.transform_pivot(), None, "選択を外しても中心点が残った");
+}
+
+/// 再生がコマを進める入口（`Tab::play_to_frame`：部屋の外から見ている場所を変える、ただ1つの入口）は、持ち上げた絵がある
+/// ときは変えずに断る（持ち上げた絵を貼り戻すのは作品を書くことなので、部屋の中の入口だけがする。直す前は、再生の関数が
+/// コマを直接書き、持ち上げた絵が見ていないコマに結び付きえた：設計 入口の部屋の設計_27c4085 の R6）
+#[test]
+fn playback_frame_entry_refuses_while_pieces_are_lifted() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    assert!(apply(&mut app, Action::ExtendFrame));
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
+    assert!(app.session.floating().is_some());
+    assert!(!app.play_to_frame(1), "持ち上げた絵があるのにコマを進めた");
+    assert_eq!(app.tab().active_timeline().current_frame, 0);
+    assert!(apply(&mut app, Action::Deselect));
+    assert!(app.play_to_frame(1));
+    assert_eq!(app.tab().active_timeline().current_frame, 1);
 }
 
 /// 文書 `doc` の、まだ確かめていない地図をみな確かめ（使うときと同じ入口：`UncheckedMaps::check`）、ファイルから読んだもの
@@ -40728,7 +40780,7 @@ fn scrub_plays_one_frame_when_the_frame_changes() {
 
     timeline_ui::toggle_playback(&mut app);
     assert_eq!(app.timeline_ui.audio.position(3.0), Some(start(5)));
-    app.advance_playback_frame(7);
+    assert!(app.play_to_frame(7));
     timeline_ui::scrub_on_frame_change(&mut app);
     assert_eq!(app.timeline_ui.audio.position(3.0), Some(start(5)), "再生中はスクラブしない");
     timeline_ui::toggle_playback(&mut app);

@@ -54,7 +54,7 @@ pub(crate) fn undo_exit_text() -> String {
 }
 
 /// 現在フレームで編集可能（表示中・非ロック・フレーム範囲内・非トゥイーン途中）な全レイヤーID一覧を背面→前面順で返す
-pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
+pub(in crate::canvas_tool) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
     let tl = tab.active_timeline();
     let frame = tl.current_frame;
     tl.layers
@@ -67,7 +67,7 @@ pub(crate) fn editable_layer_ids(tab: &Tab) -> Vec<LayerId> {
 /// セル画を書いたあとの後始末。セル画を書く入口（`write_cel`）のあとに、書いたレイヤーの一覧
 /// `lids` で1回だけ呼ぶ：画面の土台の、書いたレイヤーを作り直す（編集中のシンボルの版は、書いた所で上がっている：
 /// `Tab::write_active_timeline`）。編集中の階層が無くなっていれば、ある所まで戻る
-pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
+pub(in crate::canvas_tool) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
     for &lid in lids {
         tab.session.base_cache.invalidate_layer(lid);
     }
@@ -82,7 +82,7 @@ pub(crate) fn finish_cel_writes(tab: &mut Tab, lids: &[LayerId]) {
 /// 持ち上げた元の地図）を、確定のほかで書き換えることは無い（確定は浮いた片をセッションから取り出してから書く。設計
 /// claude/約束を入口で守る設計_5616fcc.md の 2.。前は操作ごとに先に確定する約束で、インクボトルが書き忘れた：審査
 /// 5616fcc の D-1）
-pub(crate) fn write_cel(
+pub(in crate::canvas_tool) fn write_cel(
     tab: &mut Tab,
     layer_id: LayerId,
     f: impl FnOnce(&mut crate::timeline::Cel) -> bool,
@@ -128,7 +128,7 @@ pub(crate) fn write_cel(
 /// 持つ（作り直すときに引き継ぐ。後始末の前に渡す）。`f` の `Ok(false)`：そのレイヤーは変わらない。`f` が断ったら
 /// （`Err`）、そこで止めて知らせを記し（`Session::refusal`）、`false` を返す（それまでに書いたレイヤーは、操作が断った
 /// ので `apply` が操作の前に戻す：`restore_state_before_action`）。`false`：どのレイヤーも書かなかったか、断った
-pub(crate) fn write_cels(
+pub(in crate::canvas_tool) fn write_cels(
     tab: &mut Tab,
     layer_ids: &[LayerId],
     f: impl Fn(
@@ -169,7 +169,7 @@ pub(crate) fn write_cels(
 /// する（`Cel::update_instances`・`write_cels`）。数が有限でない結び付けになるレイヤーがあれば断る（`Refusal::OffGrid`。
 /// 全部か無しかは、断った操作を `apply` が操作の前に戻すことで守る：`restore_state_before_action`。前は先に全レイヤーを
 /// 写して試してから書いたので、同じ判定を2回していた）。`false`：どのレイヤーも書かなかったか、断った
-pub(crate) fn update_instances(
+pub(in crate::canvas_tool) fn update_instances(
     tab: &mut Tab,
     layer_ids: &[LayerId],
     pick: impl Fn(u64) -> bool,
@@ -195,14 +195,14 @@ pub(crate) fn active_scope_layer_id(session: &Session, timeline: &Timeline) -> u
 }
 
 /// 指定した `shape_id` が属するレイヤーへ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
-pub(crate) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
+pub(in crate::canvas_tool) fn focus_active_layer_to_shape_by_id(tab: &mut Tab, shape_id: ShapeId) {
     if let Some(lid) = tab.scene().shape_by_id(shape_id).map(|s| s.layer_id) {
         focus_active_layer_by_id(tab, lid);
     }
 }
 
 /// レイヤー `lid` へ編集中タイムラインの `active_layer` およびタイムライン選択状態を追従させる
-pub(crate) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
+pub(in crate::canvas_tool) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
     let info = {
         let tl = tab.active_timeline();
         tl.layer_index_by_id(lid)
@@ -215,7 +215,7 @@ pub(crate) fn focus_active_layer_by_id(tab: &mut Tab, lid: LayerId) {
 }
 
 /// キャンバス上で選択されたシェイプ群（`tab.session.selection`）が所属するレイヤーをタイムライン上で選択状態にする
-pub(crate) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
+pub(in crate::canvas_tool) fn sync_timeline_layer_from_canvas_selection(tab: &mut Tab) {
     let mut min_l: Option<usize> = None;
     let mut max_l: Option<usize> = None;
     let mut last_l: Option<usize> = None;
@@ -249,22 +249,21 @@ pub(crate) fn cancel_active_drag(tab: &mut Tab) {
 /// ので、呼ぶ前に貼り戻すのを忘れると、動かした絵が黙って消えた：約束の棚卸し 5616fcc の B の B4）、断られたら `false`
 /// （浮いた片はそのまま。入口 `apply` は、表のとおりに操作の前に貼り戻してあるので、ふつうは貼り戻すものが無い）
 #[must_use]
-pub(crate) fn reset_session_after_timeline_change(tab: &mut Tab) -> bool {
+pub(in crate::canvas_tool) fn reset_session_after_timeline_change(tab: &mut Tab) -> bool {
     if !commit_floating(tab) {
         return false;
     }
-    tab.session.transform_pivot = None;
     tab.session.sanitize_editing_scope();
     true
 }
 
-pub(crate) fn set_tool(tab: &mut Tab, tool_settings: &mut ToolSettings, tool: Tool) {
+pub(in crate::canvas_tool) fn set_tool(tab: &mut Tab, tool_settings: &mut ToolSettings, tool: Tool) {
     cancel_active_drag(tab);
     tool_settings.tool = tool;
     tool_settings.select_sub_mode = SelectSubMode::Reshape;
 }
 
-pub(crate) fn toggle_select_sub_mode(
+pub(in crate::canvas_tool) fn toggle_select_sub_mode(
     tab: &mut Tab,
     tool_settings: &mut ToolSettings,
     target_mode: SelectSubMode,
@@ -280,7 +279,7 @@ pub(crate) fn toggle_select_sub_mode(
 }
 
 /// タイムライン上で選択されたセル範囲（単一キーフレームまたは複数レイヤー範囲）に属するすべての図形をキャンバス上で選択状態にする
-pub(crate) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
+pub(in crate::canvas_tool) fn select_shapes_for_timeline_selection(tab: &mut Tab) {
     if !clear_selection(tab) {
         return;
     }
@@ -352,7 +351,7 @@ pub(crate) type CommitPlan = Vec<(
 /// `None` を返して知らせる（浮いた片を残すのは呼ぶ側。
 /// 片はいつも文書か浮いた片のどちらかにあり、黙って消えない）。片の組の変換はかける前に確定と同じ式で確かめてある（変形
 /// は `TransformFit::fits`、新しい中身は `prepare_placement`）
-pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
+pub(in crate::canvas_tool) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
     use crate::planar_map::LocalEdit;
     // 画面の土台はいつも最新（`apply` の入口で作り直し、文書を変えた所は後始末で作り直す。Undo・保存の写しは確定の前に
     // 作り直す）ので、ここでは作り直さない
@@ -391,7 +390,7 @@ pub(crate) fn plan_commit(tab: &mut Tab, fl: &Floating) -> Option<CommitPlan> {
 
 /// `plan_commit` で決めたものを、今の階層の地図に書く（`write_maps`）。戻り値は、セル画を書き換えたか（`None`：断った）
 #[must_use]
-pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> Option<bool> {
+pub(in crate::canvas_tool) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> Option<bool> {
     let scope = tab.session.editing_group_path.clone();
     write_maps(tab, &scope, plan)
 }
@@ -400,7 +399,7 @@ pub(crate) fn write_commit(tab: &mut Tab, plan: CommitPlan) -> Option<bool> {
 /// 今の地図から作ったものでなければ（`Cel::put_local` が断る）、そこで止めて知らせを記し（`Session::refusal`）、`None` を
 /// 返す（それまでに書いたレイヤーは、断った操作を `apply` が操作の前に戻す）
 #[must_use]
-pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> Option<bool> {
+pub(in crate::canvas_tool) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> Option<bool> {
     let mut written: Vec<LayerId> = Vec::new();
     for (layer_id, w, prev) in plan {
         let mut held = None;
@@ -433,7 +432,7 @@ pub(crate) fn write_maps(tab: &mut Tab, scope: &[u64], plan: CommitPlan) -> Opti
 
 /// 浮いた片 `fl` を確定する（`plan_commit`・`write_commit`）。`None`：書けない（何も書かず、知らせを記す）。`Some`：
 /// セル画を書き換えたか
-pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
+pub(in crate::canvas_tool) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<bool> {
     let plan = plan_commit(tab, fl)?;
     write_commit(tab, plan)
 }
@@ -442,7 +441,7 @@ pub(crate) fn commit_floating_layers(tab: &mut Tab, fl: &Floating) -> Option<boo
 /// （未変形スライスなら外した片を残りに戻すだけで文書は変更せず、変更済みなら外した片と残りを確定して文書へ書き込む）。
 /// `false`：確定を断った（`commit_floating_layers`。浮いた片と選択は前のまま。知らせは `Session::refusal`）
 #[must_use]
-pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
+pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> bool {
     let (is_sel, any_valid) = tab.session.selected_shape_mask();
     let mut is_keep = vec![false; is_sel.len()];
     let mut any_keep = false;
@@ -543,14 +542,14 @@ pub(crate) fn commit_floating_except(tab: &mut Tab, keep_indices: &[usize]) -> b
 /// 進行中のドラッグを中断し、`tab.session.floating` をすべて確定する。`false`：確定を断った（浮いた片と選択は前のまま。
 /// 呼ぶ側は、浮いた片が無いことを前提にする操作をせずに断る）
 #[must_use]
-pub(crate) fn commit_floating(tab: &mut Tab) -> bool {
+pub(in crate::canvas_tool) fn commit_floating(tab: &mut Tab) -> bool {
     cancel_active_drag(tab);
     commit_floating_except(tab, &[])
 }
 
 /// 選択を外す（浮いた片は確定する）。`false`：確定を断った（浮いた片と選択は前のまま。呼ぶ側は断る）
 #[must_use]
-pub(crate) fn clear_selection(tab: &mut Tab) -> bool {
+pub(in crate::canvas_tool) fn clear_selection(tab: &mut Tab) -> bool {
     tab.session.rollback_shape_drag();
     if !commit_floating_except(tab, &[]) {
         return false;

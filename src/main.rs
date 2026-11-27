@@ -4,10 +4,10 @@ mod app_menu_macos;
 mod audio_latency_macos;
 mod audio_out;
 mod canvas_tool;
+// 作業の部屋（`canvas_tool`）の中のファイルを、今までの名前で呼べるようにする
+use canvas_tool::{clipboard_ops, doc_actions, select_ops, symbol_ops};
 mod chunked_list;
-mod clipboard_ops;
 mod color_picker;
-mod doc_actions;
 mod floating;
 mod map_hover;
 mod menu;
@@ -16,11 +16,9 @@ mod planar_map;
 mod prefetch;
 mod project_io;
 mod recovery;
-mod select_ops;
 mod sound;
 mod stored_map;
 mod symbol;
-mod symbol_ops;
 mod timeline;
 mod timeline_ui;
 mod tool_paint;
@@ -258,7 +256,7 @@ impl Default for Is2dApp {
 impl Is2dApp {
     /// 今のタブのステージ全体が、キャンバス領域に収まるようズーム・パンを調整する（「ウィンドウに合わせる」）
     pub(crate) fn fit_stage_to_window(&mut self) {
-        let (stage_size, rect) = (self.tab().doc.stage_size, self.canvas_rect);
+        let (stage_size, rect) = (self.tab().doc().stage_size, self.canvas_rect);
         self.tab_mut().view.fit_stage_to_window(stage_size, rect);
     }
 }
@@ -996,7 +994,7 @@ impl Is2dApp {
                     self.handle_canvas_tool_input(ui, &response, mouse_pt, tool_allowed);
                 }
 
-                let stage_size = self.tab().doc.stage_size;
+                let stage_size = self.tab().doc().stage_size;
                 let shows_stage = self.tab().session.edit_path().shows_stage();
 
                 // 2. ステージ背景（ペーストボード＋白いステージ矩形。ライブラリから入ったシンボルの編集では全面を白）の描画
@@ -1040,7 +1038,7 @@ impl Is2dApp {
         }
         // ファイルから読んだもので、切り直した地図・何も無いものとして見せている地図・読めない音があれば知らせる（地図は
         // 使うときに確かめるので、あとから増える）
-        if let Some(text) = load_notice_text(&self.tab().doc.load_notices.take()) {
+        if let Some(text) = load_notice_text(&self.tab().doc().load_notices.take()) {
             self.notify_warning(text);
             ctx.request_repaint();
         }
@@ -1154,5 +1152,3 @@ impl eframe::App for Is2dApp {
     }
 }
 
-#[cfg(test)]
-mod tests;

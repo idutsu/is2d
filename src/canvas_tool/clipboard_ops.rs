@@ -46,7 +46,7 @@ impl Content {
 /// （`Cel::picked`）。浮いた片のあるレイヤーの生の図形は、残りの選んだ所に片を重ねた地図（確定と同じ重ね方：
 /// `FloatLayer::selected_map`）。トゥイーンの途中のインスタンスは、そのコマの結び付け。`None`：選んでいるものが無いか、
 /// 浮いた片を地図にできない
-pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
+pub(in crate::canvas_tool) fn selected_content(tab: &Tab) -> Option<Content> {
     let session = &tab.session;
     if session.selection().is_empty() {
         return None;
@@ -88,7 +88,7 @@ pub(crate) fn selected_content(tab: &Tab) -> Option<Content> {
 /// 中身の座標（文書の座標 → ステージの変換が `from`）から、置く先の文書の座標（同じく `to`）への変換。ステージで
 /// `offset` ずらす。同じ所（`from == to`）なら、ずらす量を置く先の座標に写した平行移動（`to⁻¹·T(offset)·to` と同じ値を、
 /// 丸めを入れずに作る。ずらさなければ恒等の変換で、地図はそのまま写る）
-pub(crate) fn content_xform(from: Affine, to: Affine, offset: KVec2) -> Affine {
+pub(in crate::canvas_tool) fn content_xform(from: Affine, to: Affine, offset: KVec2) -> Affine {
     if from == to {
         let [a, b, c, d, _, _] = to.as_coeffs();
         let linear_inv = Affine::new([a, b, c, d, 0.0, 0.0]).inverse();
@@ -116,7 +116,7 @@ struct PlacedLayer {
 
 impl Placement {
     /// 浮いた片にする地図があるか
-    pub(crate) fn has_pieces(&self) -> bool {
+    pub(in crate::canvas_tool) fn has_pieces(&self) -> bool {
         self.layers.iter().any(|l| !l.pieces.is_empty())
     }
 }
@@ -126,7 +126,7 @@ impl Placement {
 /// 浮いた片にする（変換は確定のときにかける）。グループの地図は、その座標の格子で正しい地図にする（`Cel::transformed`）。
 /// `replacing`：（レイヤー, インスタンス）があれば、そのレイヤーでは中身をそのインスタンスと入れ替える。`None`：格子に
 /// 置けない座標がある（呼ぶ側は文書を変えずに断る）
-pub(crate) fn prepare_placement(
+pub(in crate::canvas_tool) fn prepare_placement(
     tab: &Tab,
     content: &Content,
     xform: Affine,
@@ -181,7 +181,7 @@ pub(crate) fn prepare_placement(
 /// 準備した中身 `placements` を、今の階層に置く（文書を変える）。グループとインスタンスには新しい番号を振り（中身ごとに。
 /// シンボルの番号は `sym` で付け替える）、セル画に入れる（`Cel::insert_content`）。生の図形の地図は、浮いた片の組にする。
 /// 置いたものを選択に足す（呼ぶ側は、要るなら先に選択を外す）
-pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: impl Fn(u64) -> u64) {
+pub(in crate::canvas_tool) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: impl Fn(u64) -> u64) {
     let scope = tab.session.editing_group_path().to_vec();
     let mut written: Vec<LayerId> = Vec::new();
     let mut floats = Vec::new();
@@ -213,7 +213,6 @@ pub(crate) fn put_placements(tab: &mut Tab, placements: Vec<Placement>, sym: imp
     finish_cel_writes(tab, &written);
     tab.session.add_floating_maps(floats);
     tab.session.retain_existing_selection();
-    tab.session.transform_pivot = None;
 }
 
 /// 選択オブジェクトの移動ドラッグ（`Alt` 複製移動を含む）の初期状態を構築する共通ヘルパー
@@ -278,7 +277,7 @@ fn collect_symbol_and_descendants(
 
 /// 別タブから移植されるシンボルの内部タイムライン内の子シンボル参照ID（`sym_map` にあるもの）・音の区間の音の番号
 /// （`sound_map` にあるもの）と全グループIDを、貼り付け先タブの `Document` のIDへ一括リマップする
-pub(crate) fn remap_timeline_ids(
+pub(in crate::canvas_tool) fn remap_timeline_ids(
     tl: &mut Timeline,
     doc: &mut Document,
     sym_map: &HashMap<u64, u64>,
@@ -312,7 +311,7 @@ pub(crate) fn remap_timeline_ids(
 
 /// `copy_selected_shapes`（`Cmd+C`）実行時に、クリップボード内の図形が参照しているシンボル定義（入れ子含む）と、
 /// そのタイムラインの音の区間が指す音を `Arc` 共有スナップショットとして退避する
-pub(crate) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
+pub(in crate::canvas_tool) fn capture_clipboard_symbols(tab: &Tab, clipboard: &mut Clipboard) {
     clipboard.source_doc_id = tab.id;
     clipboard.symbols.clear();
 
@@ -391,7 +390,7 @@ fn existing_reusable_target_symbol_id(
 /// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキストに対して循環参照を起こさずに配置可能かを判定する：
 /// 中身を（貼り先のシンボルを使えるものは、そのシンボルの中身を）たどって、編集中のシンボルに行き着かないか
 /// （`symbol::reaches`。同じタブのクリップボードのシンボルは、同じ番号の文書のシンボルそのもの）
-pub(crate) fn can_paste_clipboard_symbol(
+pub(in crate::canvas_tool) fn can_paste_clipboard_symbol(
     tab: &Tab,
     clipboard: &Clipboard,
     src_sym_id: u64,
@@ -472,7 +471,7 @@ fn collect_needed_clipboard_imports(
 
 /// クリップボードの中身のうち、今の編集の所に置けるもの（循環参照になるシンボルのインスタンスを除いたもの。文書は変えない）
 /// と、除いたものがあったか。置けるものが無ければ `None`
-pub(crate) fn pasteable_content(tab: &Tab, clipboard: &Clipboard) -> (Option<Content>, bool) {
+pub(in crate::canvas_tool) fn pasteable_content(tab: &Tab, clipboard: &Clipboard) -> (Option<Content>, bool) {
     let Some(content) = &clipboard.content else {
         return (None, false);
     };
@@ -496,7 +495,7 @@ pub(crate) fn pasteable_content(tab: &Tab, clipboard: &Clipboard) -> (Option<Con
 
 /// 中身 `content` が参照するシンボルのうち、今のタブのライブラリに無いものを、クリップボードの写し（壊さない）から移植する。
 /// 戻り値は、クリップボードのシンボルの番号 → 今のタブのシンボルの番号（変わるものだけ）
-pub(crate) fn import_clipboard_symbols(
+pub(in crate::canvas_tool) fn import_clipboard_symbols(
     tab: &mut Tab,
     clipboard: &mut Clipboard,
     content: &Content,
@@ -573,7 +572,7 @@ pub(crate) fn import_clipboard_symbols(
 }
 
 /// 選択中のオブジェクト（生シェイプ・部分スライス領域・グループ問わず）を内部クリップボードにコピーする（`Cmd+C`）
-pub(crate) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipboard) -> bool {
+pub(in crate::canvas_tool) fn prepare_copy_selected_shapes(tab: &mut Tab, clipboard: &mut Clipboard) -> bool {
     let Some(content) = selected_content(tab) else {
         return false;
     };
