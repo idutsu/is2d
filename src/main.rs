@@ -41,7 +41,7 @@ use eframe::egui::{self, Color32, CursorIcon, Pos2, Sense, Stroke, Vec2};
 use kurbo::Point;
 
 use canvas_tool::{
-    Clipboard, NoticeKind, SelectSubMode, StatusToast, Tab, Tool,
+    Clipboard, NoticeKind, SelectSubMode, Notices, Tab, Tool,
     ToolSettings,
 };
 use doc_actions::{apply, Action, ActionHost};
@@ -208,7 +208,7 @@ pub(crate) struct Is2dApp {
     /// アプリ全体で共有するクリップボード状態
     pub(crate) clipboard: Clipboard,
     /// アプリ全体で共有する一時トースト通知
-    pub(crate) toast: Option<StatusToast>,
+    pub(crate) notices: Notices,
     /// 右端パネルで現在選択中のタブ（プロパティ / カラー / ライブラリ / キャンバス）
     pub(crate) right_panel_tab: RightPanelTab,
     /// タイムラインパネルの再生・スクロール・D&D等の一時UI状態
@@ -234,6 +234,8 @@ pub(crate) struct Is2dApp {
     pub(crate) recovery_writer: Option<recovery::RecoveryWriter>,
     /// 先読みの係（次に見るセル画の写しを、裏で作って持つ：`prefetch`）
     pub(crate) prefetch: prefetch::Prefetch,
+    /// 出ている読み込みの知らせに足し合わせた、ファイルから読んだものの知らせ（知らせが消えたら捨てる）
+    pub(crate) shown_load_notices: Vec<timeline::LoadNotice>,
     /// 砦の外まで止まって終わった裏のスレッドの記録を、どこまで読んだか（毎コマ読んで知らせる）
     pub(crate) stopped_threads: vector_engine::StoppedThreads,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
@@ -252,7 +254,7 @@ impl Default for Is2dApp {
             active: 0,
             tool: ToolSettings::default(),
             clipboard: Clipboard::default(),
-            toast: None,
+            notices: Notices::default(),
             right_panel_tab: RightPanelTab::default(),
             timeline_ui: TimelineUiState::default(),
             next_untitled_number: 2,
@@ -265,6 +267,7 @@ impl Default for Is2dApp {
             tab_copies: recovery::TabCopies::default(),
             recovery_writer: None,
             prefetch: prefetch::Prefetch::default(),
+            shown_load_notices: Vec::new(),
             stopped_threads: vector_engine::StoppedThreads::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
@@ -302,8 +305,8 @@ impl ActionHost for Is2dApp {
         &mut self.clipboard
     }
 
-    fn toast_mut(&mut self) -> &mut Option<StatusToast> {
-        &mut self.toast
+    fn notices_mut(&mut self) -> &mut Notices {
+        &mut self.notices
     }
 
     fn parts_mut(
@@ -312,13 +315,13 @@ impl ActionHost for Is2dApp {
         &mut Tab,
         &mut ToolSettings,
         &mut Clipboard,
-        &mut Option<StatusToast>,
+        &mut Notices,
     ) {
         (
             &mut self.tabs[self.active],
             &mut self.tool,
             &mut self.clipboard,
-            &mut self.toast,
+            &mut self.notices,
         )
     }
 
@@ -871,15 +874,12 @@ impl Is2dApp {
             notices.push((kind, msg.to_owned()));
         }
 
-        if let Some(toast) = &self.toast {
-            let now = Instant::now();
-            if now < toast.expires_at {
-                ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
-                if !notices.iter().any(|(_, m)| m == &toast.message) {
-                    notices.push((toast.kind, toast.message.clone()));
-                }
-            } else {
-                self.toast = None;
+        let now = Instant::now();
+        self.notices.drop_expired(now);
+        for toast in self.notices.iter() {
+            ctx.request_repaint_after(toast.expires_at.saturating_duration_since(now));
+            if !notices.iter().any(|(_, m)| m == &toast.message) {
+                notices.push((toast.kind, toast.message.clone()));
             }
         }
 
@@ -1081,9 +1081,18 @@ impl Is2dApp {
         }
         // ファイルから読んだもので、切り直した地図・何も無いものとして見せている地図・読めない音があれば知らせる（地図は
         // 使うときに確かめるので、あとから増える）
-        if let Some(text) = load_notice_text(&self.tab().doc().load_notices.take()) {
-            self.notify_warning(text);
-            ctx.request_repaint();
+        // 知らせが出ている間に見つかった分を足し合わせて、1つの知らせを書き直す（裏の確かめで少しずつ見つかっても「ほか N か所」
+        // にまとまる。知らせが消えたら足し合わせを捨てる：設計審査 b7208d9 の 4.）
+        let found = self.tab().doc().load_notices.take();
+        if !self.notices.has(canvas_tool::NoticeKey::Load) {
+            self.shown_load_notices.clear();
+        }
+        if !found.is_empty() {
+            self.shown_load_notices.extend(found);
+            if let Some(text) = load_notice_text(&self.shown_load_notices) {
+                canvas_tool::show_keyed_notice(&mut self.notices, canvas_tool::NoticeKey::Load, NoticeKind::Warning, text);
+                ctx.request_repaint();
+            }
         }
         // そのフレームの操作をすべて適用した後の状態から、OS のメニューの見せ方とウィンドウタイトルを更新し、コマが
         // 変わっていれば音を鳴らす
@@ -1107,13 +1116,11 @@ impl Is2dApp {
                 w.submit(self.tab_copies.get());
             }
         }
-        // 裏の書き手が、書く途中で止まったタブ（内部の不具合）を知らせる
+        // 作業の控え（復旧ファイル）を書けなかったことを知らせる（書き手の失敗はみな1つの受け箱から：設計審査 b7208d9 の 1.）
         let failed = self.recovery_writer.as_ref().map(recovery::RecoveryWriter::take_failures).unwrap_or_default();
-        if !failed.is_empty() {
-            self.notify_warning(format!(
-                "内部の不具合で、タブ「{}」の作業の控え（復旧ファイル）を書けませんでした。保存しておいてください",
-                failed.join("」「")
-            ));
+        for f in failed {
+            let what = f.tab.map_or_else(|| "作業の控え（復旧ファイル）".to_owned(), |t| format!("タブ「{t}」の作業の控え（復旧ファイル）"));
+            self.notify_warning(format!("{what}を書けません（{}）。保存しておいてください", f.why));
         }
         // 砦の外まで止まって終わった裏のスレッド（内部の不具合）を知らせる
         let stopped = self.stopped_threads.take_new();

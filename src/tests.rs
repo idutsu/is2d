@@ -4306,7 +4306,7 @@ fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
     );
     assert!(!app.session.drag.unplaceable(), "ふつうの拡大は置ける");
     tool_transform::update_transform_drag(&mut app, collapsed, false, false);
-    app.toast = None;
+    app.notices = Default::default();
     tool_transform::finish_transform_drag(&mut app, Some(collapsed));
     let after = app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert_eq!(after.len(), before.len());
@@ -4315,7 +4315,7 @@ fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
         .zip(&before)
         .all(|(a, b)| a.exterior().segments == b.exterior().segments));
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some(canvas_tool::Refusal::OffGrid.message().as_str())
     );
 }
@@ -8710,7 +8710,6 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                 current_frame: 0,
                 active_layer: 0,
                 next_layer_number: 2,
-                next_layer_id: 2,
                 layers: vec![project_io::SavedLayer {
                     id: 1,
                     name: "L1".to_owned(),
@@ -8740,6 +8739,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
         map_tiles: Default::default(),
         sounds: Vec::new(),
         next_sound_id: 1,
+        next_layer_id: 2,
     };
 
     let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
@@ -9979,7 +9979,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
             .push(timeline::Layer::new_with_id((i + 1) as u64, "L"));
     }
     assert_eq!(tl.layers.len(), project_io::MAX_LAYERS_PER_TIMELINE);
-    tl.add_layer_above_active();
+    tl.add_layer_above_active(10_000);
     assert_eq!(
         tl.layers.len(),
         project_io::MAX_LAYERS_PER_TIMELINE,
@@ -13540,7 +13540,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     let undo_before_f8 = app.history.undo_stack.len();
     let lib_len_before = app.doc.library().len();
     let root_inst_before = app.doc.root.layers[0].keyframes[0].cel.instances().clone();
-    app.toast = None;
+    app.notices = Default::default();
     let _ = apply(&mut app, Action::SelectAll);
     let res_f8 = apply(&mut app, Action::ConvertToSymbol);
     assert!(!res_f8, "9段目になるF8は拒否されること");
@@ -13551,7 +13551,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     );
     assert_eq!(app.history.undo_stack.len(), undo_before_f8);
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some("シンボルの入れ子は8段までです")
     );
     assert!(!app.doc.symbol_nest_exceeded());
@@ -13595,7 +13595,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
     .cel
     .instances()
     .len();
-    app.toast = None;
+    app.notices = Default::default();
     let res_paste = apply(&mut app, Action::Paste { in_place: true });
     assert!(!res_paste, "9段になるペーストは拒否されること");
     assert_eq!(app.history.undo_stack.len(), undo_before_paste);
@@ -13607,13 +13607,13 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         host_inst_before
     );
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some("シンボルの入れ子は8段までです")
     );
 
     // 3b. ライブラリからの配置で9段になる場合
     let undo_before_place = app.history.undo_stack.len();
-    app.toast = None;
+    app.notices = Default::default();
     let res_place = apply(&mut app, Action::PlaceSymbol { sym_id: top_sym_id });
     assert!(!res_place, "9段になるライブラリからの配置は拒否されること");
     assert_eq!(app.history.undo_stack.len(), undo_before_place);
@@ -13625,7 +13625,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         host_inst_before
     );
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some("シンボルの入れ子は8段までです")
     );
     let _ = apply(&mut app, Action::ExitSymbolTimeline);
@@ -13662,7 +13662,6 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                     current_frame: 0,
                     active_layer: 0,
                     next_layer_number: 2,
-                    next_layer_id: 2,
                     layers: vec![project_io::SavedLayer {
                         id: 1,
                         name: "L1".to_owned(),
@@ -13691,6 +13690,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             map_tiles: Default::default(),
             sounds: Vec::new(),
             next_sound_id: 1,
+            next_layer_id: 2,
         }
     };
 
@@ -13944,7 +13944,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
-        app.doc.root.next_layer_id = 11;
+        app.doc.next_layer_id = 11;
         app.doc.root.next_layer_number = 11;
         app.doc.root.current_frame = 1_500;
         app.doc.root.active_layer = 0;
@@ -14008,7 +14008,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
-        app.doc.root.next_layer_id = 21;
+        app.doc.next_layer_id = 21;
         app.doc.root.next_layer_number = 21;
         app.doc.root.current_frame = 0;
         app.doc.root.active_layer = 0;
@@ -14653,7 +14653,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     let doc_rev_before = app.doc.revision;
     let total_before = app.doc.library().at(0).unwrap().timeline.total_frames;
     let next_num_before = app.doc.library().at(0).unwrap().timeline.next_layer_number;
-    let next_id_before = app.doc.library().at(0).unwrap().timeline.next_layer_id;
+    let next_id_before = app.doc.next_layer_id;
     assert_eq!(total_before, 1);
     assert_eq!(next_num_before, 2);
     assert_eq!(next_id_before, 2);
@@ -14670,18 +14670,18 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
         app.doc.library().at(0).unwrap().timeline.next_layer_number,
         next_num_before
     );
-    assert_eq!(app.doc.library().at(0).unwrap().timeline.next_layer_id, next_id_before);
+    assert_eq!(app.doc.next_layer_id, next_id_before);
 
     // 不正な total_frames=0, next_layer_number=0, next_layer_id=0 を持つファイルを読み込んだ時点で正規化されていること
     let mut pd = project_io::ProjectDocument::from_app(&app).unwrap();
     pd.library[0].timeline.total_frames = 0;
     pd.library[0].timeline.next_layer_number = 0;
-    pd.library[0].timeline.next_layer_id = 0;
+    pd.next_layer_id = 0;
     pd.library[0].timeline.layers[0].frame_count = 0;
     let loaded_doc = pd.into_document().unwrap();
     assert!(loaded_doc.library().at(0).unwrap().timeline.total_frames >= 1);
     assert!(loaded_doc.library().at(0).unwrap().timeline.next_layer_number >= 2);
-    assert!(loaded_doc.library().at(0).unwrap().timeline.next_layer_id >= 2);
+    assert!(loaded_doc.next_layer_id >= 2);
 }
 
 #[test]
@@ -19383,12 +19383,13 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(broken_app.tabs.iter().any(|t| t.file.as_deref() == Some(saved_proj_path.as_path())));
     assert!(broken_app.tabs.iter().any(|t| t.file.is_none() && t.history.is_dirty()), "元のファイル場所の無い復旧ファイルを無題で開いていない");
     assert_eq!(
-        broken_app.toast.as_ref().map(|t| t.kind),
+        broken_app.notices.iter().last().map(|t| t.kind),
         Some(crate::canvas_tool::NoticeKind::Error)
     );
     assert!(broken_app
-        .toast
-        .as_ref()
+        .notices
+        .iter()
+        .last()
         .is_some_and(|t| t.message.contains("RECOVER_corrupted.is2d.broken")
             && t.message.contains("RECOVER_headonly.is2d.broken")));
 
@@ -21097,26 +21098,26 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
         (Point::new(550.0, 550.0), true),
     ];
     for (grab, alt) in grabs {
-        app.toast = None;
+        app.notices = Default::default();
         tool_select::start_reshape_drag(&mut app, grab, false, alt);
-        assert!(app.toast.is_some(), "{grab:?}：置けないことを知らせない");
+        assert!(app.notices.iter().next().is_some(), "{grab:?}：置けないことを知らせない");
         assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}（Alt {alt}）：断られたのにドラッグを始めた");
         assert!(app.session.floating().is_some());
         assert_eq!(app.session.selection(), &before, "{grab:?}（Alt {alt}）：浮いた片の選択が変わった");
     }
     // 自由変形ツールで、選んでいない図形をつかむ（N-3003）
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
-    app.toast = None;
+    app.notices = Default::default();
     tool_transform::start_transform_drag(&mut app, Point::new(550.0, 550.0), false, false);
-    assert!(app.toast.is_some(), "自由変形：置けないことを知らせない");
+    assert!(app.notices.iter().next().is_some(), "自由変形：置けないことを知らせない");
     assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "自由変形：断られたのにドラッグを始めた");
     assert_eq!(app.session.selection(), &before);
     // 再生を押す（レビュー 41766f9 の N-5001：前は断られても再生を始め、止めたあとの確定で、止まったコマの絵が消えた）
     let frame = app.tab().active_timeline().current_frame;
-    app.toast = None;
+    app.notices = Default::default();
     timeline_ui::toggle_playback(&mut app);
     assert!(!app.timeline_ui.is_playing, "断られたのに再生を始めた");
-    assert!(app.toast.is_some(), "再生：置けないことを知らせない");
+    assert!(app.notices.iter().next().is_some(), "再生：置けないことを知らせない");
     assert_eq!(app.tab().active_timeline().current_frame, frame);
     assert!(app.session.floating().is_some());
     assert_eq!(app.session.selection(), &before);
@@ -21641,13 +21642,13 @@ fn committing_floating_pieces_onto_a_changed_cel_is_refused() {
     // 確定を通らずに、同じセル画が別の絵に変わる（確定の呼び忘れの代わり）
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(500.0, 100.0, 600.0, 200.0, Color32::BLUE)]);
     let maps_before = app.doc.root.layers[0].keyframes[0].cel.maps().clone();
-    app.toast = None;
+    app.notices = Default::default();
     assert!(!apply(&mut app, Action::Deselect), "変わったセル画に浮いた片を確定した");
-    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some(crate::canvas_tool::Refusal::Unplaceable.message().as_str()));
+    assert_eq!(app.notices.iter().last().map(|t| t.message.as_str()), Some(crate::canvas_tool::Refusal::Unplaceable.message().as_str()));
     assert!(std::sync::Arc::ptr_eq(app.doc.root.layers[0].keyframes[0].cel.maps(), &maps_before), "変わった絵が書き換わった");
     // 断った知らせは、出口（取り消し）を案内する。取り消しは確定を断られたときも効き、動かす前に戻る（新しい操作は作らない：
     // 持ち主が決めた 2026-11-27。審査 5616fcc の D-2）
-    assert!(app.toast.as_ref().unwrap().message.contains("取り消し（"), "知らせが出口を案内しない");
+    assert!(app.notices.iter().last().unwrap().message.contains("取り消し（"), "知らせが出口を案内しない");
     assert!(apply(&mut app, Action::Undo), "確定を断られたあとの取り消しが効かない");
     assert!(app.session.floating().is_none_or(|f| !f.modified()), "取り消しても動かしたまま");
     assert!(crate::project_io::ProjectDocument::from_app(app.tab()).is_ok(), "取り消したあとも保存できない");
@@ -21814,7 +21815,7 @@ fn a_panic_inside_a_frame_cancels_the_drags_and_keeps_the_work() {
     app.timeline_ui.dragging_layer = Some(0);
     let doc_before = app.doc.clone();
     let undo_before = app.history.undo_stack.len();
-    app.toast = None;
+    app.notices = Default::default();
     // 1コマの仕事の途中で止まる
     app.run_frame(|app| {
         crate::tool_select::update_reshape_drag(app, Point::new(210.0, 50.0));
@@ -21822,7 +21823,7 @@ fn a_panic_inside_a_frame_cancels_the_drags_and_keeps_the_work() {
     });
     assert!(matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None), "止まったコマのドラッグが残った");
     assert_eq!(app.timeline_ui.dragging_layer, None, "止まったコマのタイムラインのドラッグが残った");
-    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合で画面の処理を続けられませんでした（それまでの作業は残っています）"));
+    assert_eq!(app.notices.iter().last().map(|t| t.message.as_str()), Some("内部の不具合で画面の処理を続けられませんでした（それまでの作業は残っています）"));
     assert!(
         app.doc.root.layers.iter().zip(doc_before.root.layers.iter()).all(|(a, b)| a.keyframes.iter().zip(b.keyframes.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(x.cel.maps(), y.cel.maps()))),
         "作品がコマの前と違う"
@@ -21852,7 +21853,7 @@ fn a_panic_in_the_middle_of_an_operation_puts_the_work_back() {
     assert!(apply(&mut app, Action::PaintStroke { points: vec![Point::new(400.0, 400.0), Point::new(450.0, 420.0)], radius: 10.0, color: Color32::BLUE }));
     let before = app.history.undo_stack.back().cloned().expect("ブラシの控えがある");
     let undo_len = app.history.undo_stack.len();
-    app.toast = None;
+    app.notices = Default::default();
     app.run_frame(|app| {
         // 操作の途中：操作の前の写しを持ち、作品を書きかけたところで止まる
         app.history.before = Some(before);
@@ -21865,7 +21866,7 @@ fn a_panic_in_the_middle_of_an_operation_puts_the_work_back() {
         "作品が操作の前に戻っていない"
     );
     assert_eq!(app.history.undo_stack.len(), undo_len, "取り消しの控えが変わった");
-    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
+    assert_eq!(app.notices.iter().last().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
     assert!(app.scene_base_is_fresh(), "画面の土台を作り直していない");
 }
 
@@ -21936,10 +21937,10 @@ fn a_stroke_off_the_grid_is_refused_before_making_its_shape() {
         },
     ];
     for action in far {
-        app.toast = None;
+        app.notices = Default::default();
         assert!(!apply(&mut app, action), "格子の外の線を断らない");
         assert_eq!(
-            app.toast.as_ref().map(|t| t.message.as_str()),
+            app.notices.iter().last().map(|t| t.message.as_str()),
             Some("地図の範囲（±65,536px）の外や、潰れるほど小さくには置けません")
         );
         assert!(
@@ -21968,7 +21969,7 @@ fn ink_bottle_again_where_a_line_was_moved_away() {
     assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, -50.0) }));
     assert!(apply(&mut app, Action::Deselect));
     assert!(app.session.floating().is_none());
-    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }), "かけ直したインクボトルが断られた: {:?}", app.toast.as_ref().map(|t| &t.message));
+    assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }), "かけ直したインクボトルが断られた: {:?}", app.notices.iter().last().map(|t| &t.message));
     let ids: Vec<u64> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| s.shape_id).collect();
     let mut uniq = ids.clone();
     uniq.sort_unstable();
@@ -22831,6 +22832,228 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
 /// 復旧の書き手は、1回の操作で、触ったタブの変わった所だけを書く：ほかのタブを触っても、変わっていない未保存のタブの
 /// 復旧ファイルには何も書き足さない（浮いた片を置いたままのタブも。前は、どれか1つのタブが変わると未保存のタブをみな
 /// 書き足し、浮いた片のあるタブは置いた文書を作り直して塊ごと書いた：全体の点検 2026-11-27）
+/// 選択は「どのキーフレームの絵を選んだか」を持ち、見えるキーフレームが変わったら、どの道でも外れる（設計審査 b7208d9 の
+/// 2.。前は選択を番号だけで持ち、F6 の写しは元と同じ番号なので、F6 のあと絵を選んで `Shift+F6` を押すと、選択がコマ 1 の
+/// 絵に残り、`Delete` でコマ 1 の絵が消えた。ルーラーで移ると外れた）。同じキーフレームの中でコマを送っても残る
+#[test]
+fn the_selection_leaves_when_the_shown_keyframe_changes_on_every_path() {
+    use crate::doc_actions::{apply, Action};
+    let drawn = |app: &Is2dApp| -> usize { app.doc.root.layers[0].keyframes[0].cel.maps().len() };
+    let setup = || {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+        assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true }));
+        assert_eq!(app.active_timeline().current_frame, 1);
+        assert!(apply(&mut app, Action::SelectAll));
+        assert!(!app.session.selection().is_empty());
+        app
+    };
+    // Shift+F6（タイムラインを書き換える道）：コマ 1 の絵が見えるようになり、選択は外れ、Delete してもコマ 1 の絵は消えない
+    let mut app = setup();
+    let before = drawn(&app);
+    assert!(apply(&mut app, Action::DeleteKeyframe));
+    assert!(app.session.selection().is_empty(), "タイムラインを書き換えたあと、選択が別のキーフレームの絵に残った");
+    apply(&mut app, Action::DeleteSelection);
+    assert_eq!(drawn(&app), before, "選んでいないコマ 1 の絵が消えた");
+    // ルーラー（コマを移る道）：外れる
+    let mut app = setup();
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 0 }));
+    assert!(app.session.selection().is_empty(), "コマを移ったあと、選択が別のキーフレームの絵に残った");
+    // 取り消し（戻す道）：選んだときのキーフレームが見えていれば、取り消しのあとも残る
+    let mut app = setup();
+    assert!(apply(&mut app, Action::ExtendFrame));
+    assert!(apply(&mut app, Action::Undo));
+    // 同じキーフレームの中でコマを送る：残る
+    let mut app = setup();
+    assert!(apply(&mut app, Action::ExtendFrame));
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ScrubRulerToFrame { frame: 2 }));
+    assert!(!app.session.selection().is_empty(), "同じキーフレームの中のコマ送りで選択が外れた");
+}
+
+/// セル画の作りの決まり（グループの入れ子は `MAX_GROUP_DEPTH` 段まで など）は1つで、読み込みとセル画を書く入口の両方で
+/// 使う：上限を超えるグループ化は断って知らせ、作れる作品はみな保存して開ける（設計審査 b7208d9 の 5.。前は読み込みに
+/// だけ決まりがあり、`Cmd+G` を 1,001 回押した作品は保存でき、開けなかった）
+#[test]
+fn a_work_the_app_can_make_always_opens() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectAll));
+    for _ in 0..crate::timeline::MAX_GROUP_DEPTH {
+        assert!(apply(&mut app, Action::Group));
+    }
+    app.notices = Default::default();
+    assert!(!apply(&mut app, Action::Group), "上限を超えるグループ化を断らない");
+    assert!(
+        app.notices.iter().any(|t| t.message.contains(&format!("{} 段", crate::timeline::MAX_GROUP_DEPTH))),
+        "断ったわけを知らせない"
+    );
+    let bytes = project_io::project_file_bytes(&project_io::ProjectDocument::of(app.tab().doc())).unwrap();
+    let back = project_io::read_project::<crate::stored_map::ReadTiles>(&bytes[..]).and_then(|d| d.into_document());
+    assert!(back.is_ok(), "アプリで作った作品が開けない：{:?}", back.err());
+}
+
+/// 復元でも、読み込みで外したもの（上限を超えたレイヤーなど）があれば、作品を開くときと同じく知らせる（設計審査 b7208d9
+/// の 5.。前は黙って外した）
+#[test]
+fn restoring_a_recovery_file_reports_what_was_trimmed() {
+    let rec_dir = std::env::temp_dir().join(format!("is2d_restore_trimmed_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&rec_dir);
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let app = Is2dApp::default();
+    let mut saved = project_io::ProjectDocument::of(app.tab().doc());
+    let extra = saved.timeline.layers[0].clone();
+    while saved.timeline.layers.len() <= crate::timeline::MAX_LAYERS_PER_TIMELINE {
+        let id = saved.timeline.layers.len() as u64 + 1;
+        saved.timeline.layers.push(project_io::SavedLayer { id, ..extra.clone() });
+    }
+    saved.next_layer_id = saved.timeline.layers.len() as u64 + 1;
+    let rec = rec_dir.join("0_0-1-RECOVER_無題-1.is2d");
+    write_project_file(&rec, &saved);
+    std::fs::write(rec_dir.join("0_0-1.entry"), rec.to_string_lossy().as_bytes()).unwrap();
+    let ctx = egui::Context::default();
+    let mut next = Is2dApp::default();
+    next.recovery.dir = Some(rec_dir.clone());
+    next.recovery.find_leftovers();
+    assert_eq!(next.recovery.found.len(), 1);
+    next.apply_action(UiAction::RestoreRecovered, &ctx);
+    // まっさらなタブに開くので、タブの数は増えない
+    assert_eq!(next.tab().doc().root.layers.len(), crate::timeline::MAX_LAYERS_PER_TIMELINE, "復元できない");
+    assert!(next.notices.iter().any(|t| t.message.contains("除きました")), "復元で外したものを知らせない");
+    let _ = std::fs::remove_dir_all(&rec_dir);
+}
+
+/// 知らせは並びで持ち、あとの知らせが前の知らせを消さない（同じ瞬間の「保存すると元のファイルからも消えます」と「音を
+/// 読めなかった」が両方出る）。ファイルから読んだものの知らせは、出ている間に別のコマで見つかった分も「ほか N か所」に
+/// まとまる（設計審査 b7208d9 の 4.。前は箱が1枠で上書きし、まとめも1コマの中だけだった）
+#[test]
+fn notices_stack_and_load_notices_add_up_while_shown() {
+    use crate::doc_actions::ActionHost;
+    let mut app = Is2dApp::default();
+    app.notify_warning("一つ目".to_owned());
+    app.notify_warning("二つ目".to_owned());
+    app.notify_warning("一つ目".to_owned());
+    let shown: Vec<&str> = app.notices.iter().map(|t| t.message.as_str()).collect();
+    assert_eq!(shown, vec!["二つ目", "一つ目"], "あとの知らせが前の知らせを消した・同じ文が2つ出た");
+    // 裏の確かめが、別のコマで1つずつ見つける
+    let ctx = egui::Context::default();
+    let frame = |app: &mut Is2dApp| {
+        let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.frame(ctx));
+    };
+    app.tab().doc().load_notices.push(crate::timeline::LoadNotice::Blank("コマ 3".to_owned()));
+    frame(&mut app);
+    app.tab().doc().load_notices.push(crate::timeline::LoadNotice::Blank("コマ 9".to_owned()));
+    frame(&mut app);
+    let load: Vec<&str> = app.notices.iter().map(|t| t.message.as_str()).filter(|m| m.contains("何も無いもの")).collect();
+    assert_eq!(load.len(), 1, "読み込みの知らせが2つに分かれた：{load:?}");
+    assert!(load[0].starts_with("コマ 3 ほか 1 か所"), "別のコマで見つかった分がまとまらない：{load:?}");
+    assert!(app.notices.iter().any(|t| t.message == "二つ目"), "読み込みの知らせが前の知らせを消した");
+}
+
+/// 作業の控えの書き手は、書けなかったことを知らせ、前に書けた控えを消さない（設計審査 b7208d9 の 1.。前は、書けなかった
+/// ことを黙って捨て、書き足しに失敗すると控えを忘れて、次に作り直すのに失敗すると一覧の札を消し、名前が変わったタブは
+/// 前の控えを先に消していた）：(A) 置き場を作れないと、わけを1回だけ知らせ、書けるようになったら書く。(B) 書き足しにも
+/// 全体の書き直しにも失敗しても、前に書けた控えが復元の一覧に残り、読める。(C) 名前が変わったタブで新しい控えを作れなく
+/// ても、前の控えが残る。(D) 指す札の無い控え（札を替える前に落ちた新しい控え）は、起動したときに消える
+#[cfg(unix)]
+#[test]
+fn the_recovery_writer_reports_failures_and_keeps_the_previous_copy() {
+    use crate::recovery::{Recovery, RecoveryWriter, TabCopies};
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(format!("is2d_writer_fail_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let stroke = |app: &mut Is2dApp, y: f64| {
+        assert!(apply(
+            app,
+            Action::PaintStroke { points: vec![Point::new(30.0, y), Point::new(90.0, y)], radius: 6.0, color: Color32::RED },
+        ));
+    };
+    let with_ext = |dir: &std::path::Path, ext: &str| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some(ext)).collect())
+            .unwrap_or_default()
+    };
+    // (A) 置き場の所にファイルがあって、置き場を作れない
+    let rec = base.join("a");
+    std::fs::write(&rec, b"file").unwrap();
+    let writer = RecoveryWriter::start(rec.clone());
+    let copies = TabCopies::default();
+    let mut app = Is2dApp::default();
+    let flush = |app: &Is2dApp, writer: &RecoveryWriter| {
+        copies.refresh(&app.tabs);
+        writer.flush(copies.get());
+    };
+    stroke(&mut app, 30.0);
+    flush(&app, &writer);
+    assert!(!writer.take_failures().is_empty(), "置き場を作れないことを知らせない");
+    stroke(&mut app, 40.0);
+    flush(&app, &writer);
+    assert!(writer.take_failures().is_empty(), "同じわけを2回知らせた");
+    std::fs::remove_file(&rec).unwrap();
+    stroke(&mut app, 50.0);
+    flush(&app, &writer);
+    assert!(writer.take_failures().is_empty());
+    assert_eq!(with_ext(&rec, "is2dj").len(), 1, "書けるようになったのに書かない");
+    writer.finish(true);
+    // (B) 書き足しにも、全体の書き直しにも失敗する
+    let rec = base.join("b");
+    let writer = RecoveryWriter::start(rec.clone());
+    let copies = TabCopies::default();
+    let mut app = Is2dApp::default();
+    stroke(&mut app, 30.0);
+    copies.refresh(&app.tabs);
+    writer.flush(copies.get());
+    let journal = with_ext(&rec, "is2dj").pop().expect("控え");
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::create_dir(project_io::tmp_path_for(&journal)).unwrap();
+    for y in [40.0, 50.0] {
+        stroke(&mut app, y);
+        copies.refresh(&app.tabs);
+        writer.flush(copies.get());
+    }
+    assert!(!writer.take_failures().is_empty(), "書けなかったことを知らせない");
+    writer.finish(false);
+    let mut recovery = Recovery { dir: Some(rec.clone()), ..Default::default() };
+    recovery.find_leftovers();
+    assert_eq!(recovery.found.len(), 1, "前に書けた控えが復元の一覧から外れた");
+    assert!(crate::recovery_journal::read(&journal).is_ok(), "前に書けた控えが読めない");
+    // (C) 名前が変わったタブで、新しい控えを作れない
+    let rec = base.join("c");
+    let writer = RecoveryWriter::start(rec.clone());
+    let copies = TabCopies::default();
+    let mut app = Is2dApp::default();
+    stroke(&mut app, 30.0);
+    copies.refresh(&app.tabs);
+    writer.flush(copies.get());
+    let old = with_ext(&rec, "is2dj").pop().expect("控え");
+    app.tabs[0].file = Some(base.join("名前を付けた.is2d"));
+    stroke(&mut app, 40.0);
+    let renamed = rec.join(old.file_name().unwrap().to_string_lossy().replace("無題-1", "名前を付けた"));
+    std::fs::create_dir(project_io::tmp_path_for(&renamed)).unwrap();
+    copies.refresh(&app.tabs);
+    writer.flush(copies.get());
+    assert!(!writer.take_failures().is_empty(), "新しい控えを作れなかったことを知らせない");
+    writer.finish(false);
+    let mut recovery = Recovery { dir: Some(rec.clone()), ..Default::default() };
+    recovery.find_leftovers();
+    assert_eq!(recovery.found.len(), 1, "名前が変わったタブの前の控えが消えた");
+    assert!(old.is_file());
+    // (D) 指す札の無い控えは、起動したときに消える
+    let rec = base.join("d");
+    std::fs::create_dir_all(&rec).unwrap();
+    let orphan = rec.join("1_2-3-RECOVER_無題-1.is2dj");
+    std::fs::copy(&old, &orphan).unwrap();
+    let mut recovery = Recovery { dir: Some(rec.clone()), ..Default::default() };
+    recovery.find_leftovers();
+    assert!(recovery.found.is_empty());
+    assert!(!orphan.exists(), "指す札の無い控えが残った");
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn recovery_writer_writes_only_the_touched_tab() {
     use crate::recovery::{RecoveryWriter, TabCopies};
@@ -24099,6 +24322,7 @@ fn test_reshape_edge_with_floating_commits_first_and_empty_v1_file_rejected() {
         map_tiles: Default::default(),
         sounds: Vec::new(),
         next_sound_id: 1,
+        next_layer_id: 2,
     };
     let mut v2_bytes = project_io::project_file_bytes(&empty_doc).unwrap();
     v2_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -31576,8 +31800,9 @@ mod map_overlay {
     #[test]
     fn off_grid_edits_are_refused_before_changing_the_document() {
         let warned = |app: &mut Is2dApp| {
-            app.toast
-                .take()
+            std::mem::take(&mut app.notices)
+                .iter()
+                .last()
                 .is_some_and(|t| t.message.contains("±65,536px"))
         };
         let mut app = Is2dApp::default();
@@ -31600,7 +31825,7 @@ mod map_overlay {
         doc_actions::group_selected_shapes(&mut app).expect("グループ化");
         let cel = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].cel.clone();
         let before = cel(&app);
-        app.toast = None;
+        app.notices = Default::default();
 
         // グループの変形：格子の外へ出るなら何も動かさない
         assert!(!doc_actions::apply(
@@ -31630,7 +31855,7 @@ mod map_overlay {
             },
         ));
         let before = cel(&app);
-        app.toast = None;
+        app.notices = Default::default();
         assert!(!doc_actions::ungroup_selected_shapes(&mut app));
         assert!(warned(&mut app));
         let after = cel(&app);
@@ -34014,7 +34239,7 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
         ),
     );
     // ブラシ
-    app.toast = None;
+    app.notices = Default::default();
     assert!(!doc_actions::apply(
         &mut app,
         doc_actions::Action::PaintStroke {
@@ -34024,11 +34249,11 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
         },
     ));
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some(off_grid.as_str())
     );
     // 輪郭の変形（辺を格子の外へ引っぱる）
-    app.toast = None;
+    app.notices = Default::default();
     doc_actions::apply(
         &mut app,
         doc_actions::Action::SetTool { tool: Tool::Select },
@@ -34041,11 +34266,11 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
         },
     ));
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some(off_grid.as_str())
     );
     // 格子の中のブラシは知らせない
-    app.toast = None;
+    app.notices = Default::default();
     assert!(doc_actions::apply(
         &mut app,
         doc_actions::Action::PaintStroke {
@@ -34054,7 +34279,7 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
             color: red,
         },
     ));
-    assert!(app.toast.is_none());
+    assert!(app.notices.iter().next().is_none());
 }
 
 /// A-3：矩形で切っただけで動かしていない片の上でも、アンカーの追加のカーソル合わせが出る（クリックすると、片を戻して
@@ -36207,6 +36432,100 @@ fn double_click_needs_both_clicks_at_the_same_place() {
 /// 版 7 の保存用の型（版 8 で、キーフレームの音と音のライブラリを足す前のもの）。計測用の作品を今の版に直すためだけに
 /// 使う（アプリは前の版を開かない）。中身は今の型と同じで、音の項目だけが無い
 /// 版 8 の保存の形（塊の表に線の並びが無い）。版 9 との違いは塊の表だけなので、塊の表だけを版 8 の形で読み、線の無い塊の表にする
+/// 版 6〜版 10 の保存用の型のうち、版 11 で変わった所（タイムラインごとにレイヤーの番号の数え札を持った）。版 8〜版 10 の
+/// ファイルはこの型で読んでから、今の版にする（版 11 で、レイヤーの番号の数え札を作品に1つにした）
+mod format_v10 {
+    use crate::project_io::{ProjectDocument, SavedLayer, SavedSound, SavedSymbolDef, SavedTimeline};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub(super) struct Timeline {
+        pub(super) fps: u32,
+        pub(super) total_frames: usize,
+        pub(super) current_frame: usize,
+        pub(super) active_layer: usize,
+        pub(super) next_layer_number: usize,
+        pub(super) next_layer_id: u64,
+        pub(super) layers: Vec<SavedLayer>,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    pub(super) struct Symbol {
+        pub(super) id: u64,
+        pub(super) name: String,
+        pub(super) timeline: Timeline,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    pub(super) struct Document<T> {
+        pub(super) stage_size: [f32; 2],
+        pub(super) timeline: Timeline,
+        pub(super) library: Vec<Symbol>,
+        pub(super) next_symbol_id: u64,
+        pub(super) next_group_id: u64,
+        pub(super) recovery_source: Option<std::path::PathBuf>,
+        pub(super) map_tiles: T,
+        pub(super) sounds: Vec<SavedSound>,
+        pub(super) next_sound_id: u64,
+    }
+
+    impl Timeline {
+        pub(super) fn current(self) -> SavedTimeline {
+            SavedTimeline {
+                fps: self.fps,
+                total_frames: self.total_frames,
+                current_frame: self.current_frame,
+                active_layer: self.active_layer,
+                next_layer_number: self.next_layer_number,
+                layers: self.layers,
+            }
+        }
+    }
+
+    impl<T> Document<T> {
+        /// 塊の表を `f` で今の版の形にしたもの
+        pub(super) fn with_tiles<U>(self, f: impl FnOnce(T) -> U) -> Document<U> {
+            Document {
+                stage_size: self.stage_size,
+                timeline: self.timeline,
+                library: self.library,
+                next_symbol_id: self.next_symbol_id,
+                next_group_id: self.next_group_id,
+                recovery_source: self.recovery_source,
+                map_tiles: f(self.map_tiles),
+                sounds: self.sounds,
+                next_sound_id: self.next_sound_id,
+            }
+        }
+
+        /// 今の版の保存用の型（作品のレイヤーの番号の数え札は、どのタイムラインの数え札よりも後。読み込みが、どのレイヤーの
+        /// 番号よりも後にそろえる）
+        pub(super) fn current(self) -> ProjectDocument<T> {
+            let next_layer_id = std::iter::once(&self.timeline)
+                .chain(self.library.iter().map(|s| &s.timeline))
+                .map(|t| t.next_layer_id)
+                .max()
+                .unwrap_or(1);
+            ProjectDocument {
+                stage_size: self.stage_size,
+                timeline: self.timeline.current(),
+                library: self
+                    .library
+                    .into_iter()
+                    .map(|s| SavedSymbolDef { id: s.id, name: s.name, timeline: s.timeline.current() })
+                    .collect(),
+                next_symbol_id: self.next_symbol_id,
+                next_group_id: self.next_group_id,
+                recovery_source: self.recovery_source,
+                map_tiles: self.map_tiles,
+                sounds: self.sounds,
+                next_sound_id: self.next_sound_id,
+                next_layer_id,
+            }
+        }
+    }
+}
+
 mod format_v9 {
     use crate::project_io::ProjectDocument;
     use crate::stored_map::{SavedStroke, SavedTile};
@@ -36231,7 +36550,7 @@ mod format_v9 {
 
     /// 版 9 の文書を、今の版の保存用の型にする（線に、文書の中で重ならない新しい印を振る：側の図形の印のいちばん大きいものの
     /// 次から）
-    pub(super) fn current(v9: ProjectDocument<Tiles>) -> ProjectDocument<SavedTiles> {
+    pub(super) fn current(v9: super::format_v10::Document<Tiles>) -> ProjectDocument<SavedTiles> {
         let last = v9
             .map_tiles
             .tiles
@@ -36252,21 +36571,7 @@ mod format_v9 {
                 id: last + k as u64 + 1,
             })
             .collect();
-        ProjectDocument {
-            stage_size: v9.stage_size,
-            timeline: v9.timeline,
-            library: v9.library,
-            next_symbol_id: v9.next_symbol_id,
-            next_group_id: v9.next_group_id,
-            recovery_source: v9.recovery_source,
-            map_tiles: SavedTiles {
-                colors: v9.map_tiles.colors,
-                tiles: v9.map_tiles.tiles,
-                strokes,
-            },
-            sounds: v9.sounds,
-            next_sound_id: v9.next_sound_id,
-        }
+        v9.with_tiles(|t| SavedTiles { colors: t.colors, tiles: t.tiles, strokes }).current()
     }
 }
 
@@ -36289,18 +36594,8 @@ mod format_v8 {
     }
 
     /// 版 8 の文書を、今の版の保存用の型にする（辺はみな線なし）
-    pub(super) fn current(v8: ProjectDocument<Tiles>) -> ProjectDocument<SavedTiles> {
-        ProjectDocument {
-            stage_size: v8.stage_size,
-            timeline: v8.timeline,
-            library: v8.library,
-            next_symbol_id: v8.next_symbol_id,
-            next_group_id: v8.next_group_id,
-            recovery_source: v8.recovery_source,
-            map_tiles: tiles(v8.map_tiles),
-            sounds: v8.sounds,
-            next_sound_id: v8.next_sound_id,
-        }
+    pub(super) fn current(v8: super::format_v10::Document<Tiles>) -> ProjectDocument<SavedTiles> {
+        v8.with_tiles(tiles).current()
     }
 
     /// 版 8（と版 7）の塊の表を、今の版の塊の表にする（辺はみな線なし）
@@ -36322,10 +36617,7 @@ mod format_v8 {
 }
 
 mod format_v7 {
-    use crate::project_io::{
-        ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolDef, SavedSymbolInstance,
-        SavedTimeline,
-    };
+    use crate::project_io::{ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolInstance};
     use crate::canvas_tool::tests::SavedTiles;
     use crate::timeline::SavedScopeMap;
     use crate::timeline::TweenRotate;
@@ -36380,8 +36672,8 @@ mod format_v7 {
     }
 
     impl Timeline {
-        fn current(self) -> SavedTimeline {
-            SavedTimeline {
+        fn current(self) -> super::format_v10::Timeline {
+            super::format_v10::Timeline {
                 fps: self.fps,
                 total_frames: self.total_frames,
                 current_frame: self.current_frame,
@@ -36418,17 +36710,13 @@ mod format_v7 {
     impl Document {
         /// 今の版の保存用の型（音は無い）
         pub(super) fn current(self) -> ProjectDocument<SavedTiles> {
-            ProjectDocument {
+            super::format_v10::Document {
                 stage_size: self.stage_size,
                 timeline: self.timeline.current(),
                 library: self
                     .library
                     .into_iter()
-                    .map(|s| SavedSymbolDef {
-                        id: s.id,
-                        name: s.name,
-                        timeline: s.timeline.current(),
-                    })
+                    .map(|s| super::format_v10::Symbol { id: s.id, name: s.name, timeline: s.timeline.current() })
                     .collect(),
                 next_symbol_id: self.next_symbol_id,
                 next_group_id: self.next_group_id,
@@ -36437,6 +36725,7 @@ mod format_v7 {
                 sounds: Vec::new(),
                 next_sound_id: 1,
             }
+            .current()
         }
     }
 }
@@ -36528,18 +36817,22 @@ fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
-            "直せるのは、版 5 の JSON と版 6〜版 9 のファイルだけ"
+            "直せるのは、版 5 の JSON と版 6〜版 10 のファイルだけ"
         );
         (
             serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
             5,
         )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 10u32.to_le_bytes() {
+        let v10: format_v10::Document<SavedTiles> =
+            postcard::from_bytes(&bytes[20..]).expect("版 10 の中身として読めること");
+        return Some((v10.current(), 10));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 9u32.to_le_bytes() {
-        let v9: project_io::ProjectDocument<format_v9::Tiles> =
+        let v9: format_v10::Document<format_v9::Tiles> =
             postcard::from_bytes(&bytes[20..]).expect("版 9 の中身として読めること");
         return Some((format_v9::current(v9), 9));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 8u32.to_le_bytes() {
-        let v8: project_io::ProjectDocument<format_v8::Tiles> =
+        let v8: format_v10::Document<format_v8::Tiles> =
             postcard::from_bytes(&bytes[20..]).expect("版 8 の中身として読めること");
         return Some((format_v8::current(v8), 8));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 7u32.to_le_bytes() {
@@ -36591,7 +36884,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
             None => StoredMap::from_dense(&map, None),
         }
     };
-    let timeline = |tl: old_format::Timeline| project_io::SavedTimeline {
+    let timeline = |tl: old_format::Timeline| format_v10::Timeline {
         fps: tl.fps,
         total_frames: tl.total_frames,
         current_frame: tl.current_frame,
@@ -36638,17 +36931,13 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
             })
             .collect(),
     };
-    let mut pd = project_io::ProjectDocument {
+    let mut pd: project_io::ProjectDocument = format_v10::Document {
         stage_size: old.stage_size,
         timeline: timeline(old.timeline),
         library: old
             .library
             .into_iter()
-            .map(|s| project_io::SavedSymbolDef {
-                id: s.id,
-                name: s.name,
-                timeline: timeline(s.timeline),
-            })
+            .map(|s| format_v10::Symbol { id: s.id, name: s.name, timeline: timeline(s.timeline) })
             .collect(),
         next_symbol_id: old.next_symbol_id,
         next_group_id: old.next_group_id,
@@ -36656,7 +36945,8 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
         map_tiles: Default::default(),
         sounds: Vec::new(),
         next_sound_id: 1,
-    };
+    }
+    .current();
     pd.write_map_tiles();
     pd
 }
@@ -36706,13 +36996,13 @@ fn convert_work_files_to_current_format() {
         .map(std::path::Path::new)
     {
         let bytes = std::fs::read(path).expect("作品を読めること");
-        // 前の版の復旧ファイル（版 1）は、隣に今の版の作品ファイル（`<名前>.is2d`）を書く（元のファイルはそのまま）
-        if bytes.starts_with(journal_v1::HEAD) {
+        // 前の版の復旧ファイル（版 1・版 2）は、隣に今の版の作品ファイル（`<名前>.is2d`）を書く（元のファイルはそのまま）
+        if journal_v1::is_old(&bytes) {
             let target = path.with_extension("is2d");
             assert!(!target.exists(), "直した作品を書く所に、もうファイルがある：{}", target.display());
             journal_v1::convert(path, &target);
             assert!(opens(&target), "直した作品を開けること");
-            eprintln!("直した（版 1 の復旧ファイル → 今の版の作品ファイル）：{}", target.display());
+            eprintln!("直した（前の版の復旧ファイル → 今の版の作品ファイル）：{}", target.display());
             continue;
         }
         let Some((doc, version)) = old_format_document(&bytes) else {
@@ -38153,7 +38443,7 @@ fn a_recovery_file_of_another_version_is_kept_and_reported() {
     next.apply_action(UiAction::RestoreRecovered, &ctx);
     let kept = written[0].with_extension("is2d.broken");
     assert_eq!(std::fs::read(&kept).ok(), Some(bytes), "版の違う復旧ファイルの中身が残っていない");
-    assert!(next.toast.as_ref().is_some_and(|t| t.message.contains("未対応の復旧ファイルの版")), "版の違いを知らせない");
+    assert!(next.notices.iter().last().is_some_and(|t| t.message.contains("未対応の復旧ファイルの版")), "版の違いを知らせない");
     assert_eq!(next.tabs.len(), 1, "版の違う復旧ファイルを開いた");
     let _ = std::fs::remove_dir_all(&rec_dir);
 }
@@ -38187,17 +38477,82 @@ fn an_old_recovery_file_converts_to_the_current_project_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 前の版の復旧ファイル（版 1：頭が `IS2DJRN1`。音の記録が名前とデータを1つにした `SavedSound`）を、今の版にする変換
-/// （テスト用の変換の道具 `convert_work_files_to_current_format` が使う）。記録の並びは版 1 と今の版で同じで、違うのは音の
-/// 記録（並びの2番目）と、今の版で足した音のデータの記録（並びの10番目）だけ
+/// 前の版の復旧ファイルを、今の版（記録の版 3）にする変換（テスト用の変換の道具 `convert_work_files_to_current_format` が
+/// 使う）。記録の並びはどの版も同じで、違うのは：版 1（頭が `IS2DJRN1`）は音の記録が名前とデータを1つにした `SavedSound`
+/// で、音のデータの記録（並びの10番目）が無い。版 2 まで（保存の形の版 10）は、タイムラインの頭にレイヤーの番号の数え札を
+/// 持ち、目録に作品の数え札が無い（ライブラリの塊（並びの6番目）と目録（並びの8番目）が違う）
 mod journal_v1 {
     use super::*;
+    use serde::{Deserialize, Serialize};
 
     /// 版 1 の頭
     pub(super) const HEAD: &[u8; 8] = b"IS2DJRN1";
-    /// 音の記録・音のデータの記録の並びの番号（postcard は列挙の何番目かを先頭に書く）
+    /// 記録の並びの番号（postcard は列挙の何番目かを先頭に書く）
     const SOUND: u8 = 1;
+    const SYMBOLS: u8 = 5;
+    const MANIFEST: u8 = 7;
     const SOUND_BYTES: u8 = 9;
+
+    /// 版 2 の頭（保存の形の版 10・記録の版 2）
+    fn head_v2() -> Vec<u8> {
+        let mut h = b"IS2J".to_vec();
+        h.extend_from_slice(&10u32.to_le_bytes());
+        h.extend_from_slice(&2u32.to_le_bytes());
+        h
+    }
+
+    /// 前の版の復旧ファイルか（版 1・版 2）
+    pub(super) fn is_old(bytes: &[u8]) -> bool {
+        bytes.starts_with(HEAD) || bytes.starts_with(&head_v2())
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Layer {
+        header: project_io::SavedLayer,
+        keyframes: u64,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Timeline<H> {
+        header: H,
+        layers: Vec<Layer>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Symbol<H> {
+        id: u64,
+        name: String,
+        timeline: Timeline<H>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ManifestV2 {
+        stage_size: [f32; 2],
+        fps: u32,
+        next_symbol_id: u64,
+        next_group_id: u64,
+        next_sound_id: u64,
+        recovery_source: Option<std::path::PathBuf>,
+        timeline: Timeline<format_v10::Timeline>,
+        library: Vec<u64>,
+        order: Vec<u64>,
+        sounds: u64,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ManifestV3 {
+        stage_size: [f32; 2],
+        fps: u32,
+        next_symbol_id: u64,
+        next_group_id: u64,
+        next_sound_id: u64,
+        next_layer_id: u64,
+        recovery_source: Option<std::path::PathBuf>,
+        timeline: Timeline<project_io::SavedTimeline>,
+        library: Vec<u64>,
+        order: Vec<u64>,
+        sounds: u64,
+    }
 
     /// 記録の列（長さ・CRC32・中身）を読む
     fn records(mut at: &[u8]) -> Vec<Vec<u8>> {
@@ -38216,51 +38571,163 @@ mod journal_v1 {
         out.extend_from_slice(body);
     }
 
-    /// 版 1 の復旧ファイルの中身を、今の版の中身にする
-    pub(super) fn to_current(bytes: &[u8]) -> Vec<u8> {
-        let mut out = project_io::file_identity(project_io::SaveKind::Journal);
-        for body in records(bytes.strip_prefix(HEAD.as_slice()).expect("版 1 の頭")) {
+    fn record(kind: u8, payload: &impl Serialize) -> Vec<u8> {
+        let mut body = vec![kind];
+        body.extend(postcard::to_allocvec(payload).unwrap());
+        body
+    }
+
+    fn timeline_v3(t: Timeline<format_v10::Timeline>) -> Timeline<project_io::SavedTimeline> {
+        Timeline { header: t.header.current(), layers: t.layers }
+    }
+
+    fn timeline_v2(t: Timeline<project_io::SavedTimeline>, next_layer_id: u64) -> Timeline<format_v10::Timeline> {
+        let h = t.header;
+        Timeline {
+            header: format_v10::Timeline {
+                fps: h.fps,
+                total_frames: h.total_frames,
+                current_frame: h.current_frame,
+                active_layer: h.active_layer,
+                next_layer_number: h.next_layer_number,
+                next_layer_id,
+                layers: h.layers,
+            },
+            layers: t.layers,
+        }
+    }
+
+    /// 版 1 の記録の列を、版 2 の記録の列にする（音の記録を、音のデータの記録と音の記録に分ける）
+    fn v1_to_v2(rest: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for body in records(rest) {
             if body[0] == SOUND {
                 let s: project_io::SavedSound = postcard::from_bytes(&body[1..]).expect("版 1 の音の記録");
                 // データの記録の番号は音の番号を使う（データの記録の番号は、データの記録の中で重ならなければよい）
-                let mut data = vec![SOUND_BYTES];
-                data.extend(postcard::to_allocvec(&(s.id, &*s.bytes)).unwrap());
-                frame(&mut out, &data);
-                let mut entry = vec![SOUND];
-                entry.extend(postcard::to_allocvec(&(s.id, &s.name, s.id)).unwrap());
-                frame(&mut out, &entry);
+                out.push(record(SOUND_BYTES, &(s.id, &*s.bytes)));
+                out.push(record(SOUND, &(s.id, &s.name, s.id)));
             } else {
-                frame(&mut out, &body);
+                out.push(body);
             }
         }
         out
     }
 
-    /// 今の版の復旧ファイルの中身から、版 1 の中身を作る（変換を確かめるテストの材料）
+    /// 版 2 の記録の列を、今の版の記録の列にする（タイムラインの頭から数え札を外し、目録に作品の数え札を足す：どの
+    /// タイムラインの数え札よりも後）
+    fn v2_to_v3(bodies: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut most = 1u64;
+        let mut out = Vec::new();
+        for body in bodies {
+            match body[0] {
+                SYMBOLS => {
+                    let (id, syms): (u64, Vec<Symbol<format_v10::Timeline>>) = postcard::from_bytes(&body[1..]).unwrap();
+                    let syms: Vec<Symbol<project_io::SavedTimeline>> = syms
+                        .into_iter()
+                        .map(|s| {
+                            most = most.max(s.timeline.header.next_layer_id);
+                            Symbol { id: s.id, name: s.name, timeline: timeline_v3(s.timeline) }
+                        })
+                        .collect();
+                    out.push(record(SYMBOLS, &(id, syms)));
+                }
+                MANIFEST => {
+                    let m: ManifestV2 = postcard::from_bytes(&body[1..]).unwrap();
+                    most = most.max(m.timeline.header.next_layer_id);
+                    out.push(record(
+                        MANIFEST,
+                        &ManifestV3 {
+                            stage_size: m.stage_size,
+                            fps: m.fps,
+                            next_symbol_id: m.next_symbol_id,
+                            next_group_id: m.next_group_id,
+                            next_sound_id: m.next_sound_id,
+                            next_layer_id: most,
+                            recovery_source: m.recovery_source,
+                            timeline: timeline_v3(m.timeline),
+                            library: m.library,
+                            order: m.order,
+                            sounds: m.sounds,
+                        },
+                    ));
+                }
+                _ => out.push(body),
+            }
+        }
+        out
+    }
+
+    /// 前の版（版 1・版 2）の復旧ファイルの中身を、今の版の中身にする
+    pub(super) fn to_current(bytes: &[u8]) -> Vec<u8> {
+        let bodies = match bytes.strip_prefix(HEAD.as_slice()) {
+            Some(rest) => v1_to_v2(rest),
+            None => records(bytes.strip_prefix(head_v2().as_slice()).expect("版 2 の頭")),
+        };
+        let mut out = project_io::file_identity(project_io::SaveKind::Journal);
+        for body in v2_to_v3(bodies) {
+            frame(&mut out, &body);
+        }
+        out
+    }
+
+    /// 今の版の復旧ファイルの中身から、版 1 の中身を作る（変換を確かめるテストの材料。タイムラインの数え札は目録の作品の
+    /// 数え札にする）
     pub(super) fn from_current(bytes: &[u8]) -> Vec<u8> {
         let id_len = project_io::SaveKind::Journal.identity_len();
+        let bodies = records(&bytes[id_len..]);
+        let most = bodies
+            .iter()
+            .filter(|b| b[0] == MANIFEST)
+            .map(|b| postcard::from_bytes::<ManifestV3>(&b[1..]).unwrap().next_layer_id)
+            .max()
+            .unwrap_or(1);
         let mut data: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
         let mut out = HEAD.to_vec();
-        for body in records(&bytes[id_len..]) {
-            match body[0] {
+        for body in bodies {
+            let body = match body[0] {
                 SOUND_BYTES => {
                     let (id, b): (u64, Vec<u8>) = postcard::from_bytes(&body[1..]).unwrap();
                     data.insert(id, b);
+                    continue;
                 }
                 SOUND => {
                     let (id, name, b): (u64, String, u64) = postcard::from_bytes(&body[1..]).unwrap();
-                    let s = project_io::SavedSound { id, name, bytes: data[&b].clone().into() };
-                    let mut entry = vec![SOUND];
-                    entry.extend(postcard::to_allocvec(&s).unwrap());
-                    frame(&mut out, &entry);
+                    record(SOUND, &project_io::SavedSound { id, name, bytes: data[&b].clone().into() })
                 }
-                _ => frame(&mut out, &body),
-            }
+                SYMBOLS => {
+                    let (id, syms): (u64, Vec<Symbol<project_io::SavedTimeline>>) = postcard::from_bytes(&body[1..]).unwrap();
+                    let syms: Vec<Symbol<format_v10::Timeline>> = syms
+                        .into_iter()
+                        .map(|s| Symbol { id: s.id, name: s.name, timeline: timeline_v2(s.timeline, most) })
+                        .collect();
+                    record(SYMBOLS, &(id, syms))
+                }
+                MANIFEST => {
+                    let m: ManifestV3 = postcard::from_bytes(&body[1..]).unwrap();
+                    record(
+                        MANIFEST,
+                        &ManifestV2 {
+                            stage_size: m.stage_size,
+                            fps: m.fps,
+                            next_symbol_id: m.next_symbol_id,
+                            next_group_id: m.next_group_id,
+                            next_sound_id: m.next_sound_id,
+                            recovery_source: m.recovery_source,
+                            timeline: timeline_v2(m.timeline, m.next_layer_id),
+                            library: m.library,
+                            order: m.order,
+                            sounds: m.sounds,
+                        },
+                    )
+                }
+                _ => body,
+            };
+            frame(&mut out, &body);
         }
         out
     }
 
-    /// 版 1 の復旧ファイル `old` を、今の版の作品ファイル `target` にする
+    /// 前の版の復旧ファイル `old` を、今の版の作品ファイル `target` にする
     pub(super) fn convert(old: &std::path::Path, target: &std::path::Path) {
         let current = target.with_extension("converting.is2dj");
         std::fs::write(&current, to_current(&std::fs::read(old).unwrap())).unwrap();
@@ -39130,9 +39597,9 @@ fn project_file_with_huge_counts_or_cut_body_is_refused_without_taking_memory() 
         project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1)).unwrap();
     let good = project_io::project_file_bytes(&pd).unwrap();
     let body = &good[20..];
-    // 中身の終わりは、復旧の元の場所（無し）・色の数・塊の数・音の数・次の音の番号
-    let (prefix, tail) = body.split_at(body.len() - 5);
-    assert_eq!(tail, [0, 0, 0, 0, 1]);
+    // 中身の終わりは、復旧の元の場所（無し）・色の数・塊の数・音の数・次の音の番号・次のレイヤーの番号
+    let (prefix, tail) = body.split_at(body.len() - 6);
+    assert_eq!(tail, [0, 0, 0, 0, 1, 2]);
     let file = |body: &[u8], crc: u32| -> Vec<u8> {
         let mut b = good[..8].to_vec();
         b.extend_from_slice(&(body.len() as u64).to_le_bytes());
@@ -39242,7 +39709,7 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
     let binding = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].cel.instances()[0].binding;
     let before = binding(&app);
     let undo_before = app.history.undo_stack.len();
-    app.toast = None;
+    app.notices = Default::default();
     // 中心点を有限でない所に置く（変換の逆で写すと NaN）：書く入口で断る
     assert!(!apply(
         &mut app,
@@ -39253,7 +39720,7 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
     assert_eq!(binding(&app), before, "インスタンスは変わらない");
     assert_eq!(app.history.undo_stack.len(), undo_before);
     assert_eq!(
-        app.toast.as_ref().map(|t| t.message.as_str()),
+        app.notices.iter().last().map(|t| t.message.as_str()),
         Some(crate::canvas_tool::Refusal::OffGrid.message().as_str())
     );
     // 書く入口そのもの：断るときは何も変えない
@@ -43783,4 +44250,21 @@ fn extreme_inputs_never_stop_a_computation() {
     for u in uniq.iter().take(40) { eprintln!("  {u}"); }
     eprintln!("受け止めた所: {caught:?}");
     assert!(uniq.is_empty(), "計算が止まる道がある：{uniq:?}");
+}
+
+/// レイヤーの番号は作品の数え札から配り、取り消しで戻さない：レイヤーを足す → 取り消す → また足すと、前と違う番号（設計
+/// 審査 b7208d9 の 7.。前はタイムラインの数え札で、取り消すと戻り、同じ番号をまた使った）
+#[test]
+fn a_layer_number_is_never_given_twice_even_after_undo() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    let ids = |app: &Is2dApp| -> Vec<u64> { app.doc.root.layers.iter().map(|l| l.id).collect() };
+    assert!(apply(&mut app, Action::AddLayer));
+    let first = ids(&app);
+    assert!(apply(&mut app, Action::Undo));
+    assert!(apply(&mut app, Action::AddLayer));
+    let again = ids(&app);
+    let new_first: Vec<u64> = first.iter().copied().filter(|i| *i != 1).collect();
+    let new_again: Vec<u64> = again.iter().copied().filter(|i| *i != 1).collect();
+    assert_ne!(new_first, new_again, "取り消したあとに足したレイヤーが、前と同じ番号をまた使った");
 }

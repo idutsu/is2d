@@ -9,7 +9,7 @@ use crate::canvas_tool::{
     focus_active_layer_to_shape_by_id, reset_session_after_timeline_change,
     select_shapes_for_timeline_selection, set_tool, show_notice, toggle_select_sub_mode,
     update_instances, Clipboard, CoalesceKey, HoverTarget, MapOwner, NoticeKind,
-    SelectSubMode, StatusToast, Tab, Tool, ToolSettings, UndoEntry,
+    SelectSubMode, Notices, Tab, Tool, ToolSettings, UndoEntry,
 };
 use crate::clipboard_ops::{
     content_xform, import_clipboard_symbols, pasteable_content, prepare_copy_selected_shapes,
@@ -46,14 +46,14 @@ pub(crate) trait ActionHost {
     fn tool(&self) -> &ToolSettings;
     fn tool_mut(&mut self) -> &mut ToolSettings;
     fn clipboard_mut(&mut self) -> &mut Clipboard;
-    fn toast_mut(&mut self) -> &mut Option<StatusToast>;
+    fn notices_mut(&mut self) -> &mut Notices;
     fn parts_mut(
         &mut self,
     ) -> (
         &mut Tab,
         &mut ToolSettings,
         &mut Clipboard,
-        &mut Option<StatusToast>,
+        &mut Notices,
     );
     fn stop_playback(&mut self);
     /// 再生中なら、今のコマから鳴らし直す（再生のコマは鳴らした数から決めるので、fps が変わったら鳴らし直す。入口 `apply`
@@ -74,15 +74,15 @@ pub(crate) trait ActionHost {
     }
 
     fn notify_error(&mut self, message: impl Into<String>) {
-        show_notice(self.toast_mut(), NoticeKind::Error, message);
+        show_notice(self.notices_mut(), NoticeKind::Error, message);
     }
 
     fn notify_info(&mut self, message: impl Into<String>) {
-        show_notice(self.toast_mut(), NoticeKind::Info, message);
+        show_notice(self.notices_mut(), NoticeKind::Info, message);
     }
 
     fn notify_warning(&mut self, message: impl Into<String>) {
-        show_notice(self.toast_mut(), NoticeKind::Warning, message);
+        show_notice(self.notices_mut(), NoticeKind::Warning, message);
     }
 }
 
@@ -701,7 +701,7 @@ fn undo_snapshot(tab: &Tab) -> UndoEntry {
 /// 付けられる所が無ければ断る。波形にできないバイト・長さが 0 の音は、知らせて断る（文書は変えない）
 fn apply_import_sound(
     tab: &mut Tab,
-    toast: &mut Option<StatusToast>,
+    toast: &mut Notices,
     name: String,
     bytes: std::sync::Arc<[u8]>,
 ) -> bool {
@@ -821,6 +821,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     if policy.finishes_drag {
         host.tab_mut().session.clear_overlay();
     }
+    // 選択に、選んだときに見えていたキーフレームを覚えさせる（操作の前の状態で：入口の外の道具の入力で選んだ分も）
+    host.tab_mut().settle_selection();
     let before = undo_snapshot(host.tab());
     host.tab_mut().history.before = Some(before);
     let position_before = {
@@ -828,7 +830,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         (tl.current_frame, tl.active_layer)
     };
     let prev_library = host.tab().doc.library().clone();
-    let prev_ids = (host.tab().doc.next_symbol_id, host.tab().doc.next_group_id);
+    let prev_ids = host.tab().doc.counters();
     let prev_fps = host.tab().doc.fps;
     // 断った操作は、クリップボード（移植の控え・貼るたびのずらし・カットで書き換えた中身）も操作の前に戻す。どの操作が
     // クリップボードを書くかを並べず、いつも写しておく（写すのは中身の `Arc` と移植の控えの表だけ。前は貼り付けの移植の
@@ -873,6 +875,8 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         show_notice(toast, NoticeKind::Warning, "シンボルの入れ子は8段までです");
         res = false;
     }
+    // 見えるキーフレームが変わったレイヤーの選択を外す（どの操作でも同じ決まり：`Tab::settle_selection`）
+    tab.settle_selection();
     let before = tab.history.before.take();
     // 選ぶ・外す操作（取り消しの1手にしない操作）で選択が変わったら、続けた編集のまとめを区切る（区切る所はここだけ。前は
     // 選ぶ道ごとに区切り、選び足す道のいくつかが区切らなかったので、まれに1回の取り消しで2つの操作が戻った：約束の棚卸し
@@ -915,7 +919,7 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
         }
     }
     if !res {
-        (tab.doc.next_symbol_id, tab.doc.next_group_id) = prev_ids;
+        tab.doc.set_counters(prev_ids);
         *clipboard = prev_clipboard;
     }
     // ドラッグを始めるときに作った答えは、ドラッグの直後の操作（離す）の1回だけ使う（捨てる所は、ここと、ドラッグをやめる
@@ -1950,7 +1954,7 @@ fn apply_paste_clipboard(
     tab: &mut Tab,
     tool: &mut ToolSettings,
     clipboard: &mut Clipboard,
-    toast: &mut Option<StatusToast>,
+    toast: &mut Notices,
     in_place: bool,
 ) -> bool {
     if clipboard.content.is_none() {
@@ -2054,7 +2058,7 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     true
 }
 
-fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Option<StatusToast>) -> bool {
+fn apply_timeline_toggle_tween(tab: &mut Tab, toast: &mut Notices) -> bool {
     let targets = tab.active_timeline().target_layers_for_frame_op();
     if targets.is_empty() {
         return false;
@@ -2172,33 +2176,12 @@ fn apply_set_symbol_playback(
     })
 }
 
-/// フレーム移動（`prev_frame` -> `next_frame`）時に、同じキーフレームのスパン内に留まるレイヤー上の選択のみを残し、
-/// 別のキーフレームへ跨いだレイヤー上の選択を解除する
-fn retain_selection_on_same_keyframe(tab: &mut Tab, prev_frame: usize, next_frame: usize) {
-    if prev_frame == next_frame || tab.session.selection().is_empty() {
-        return;
-    }
-    let same_kf_layer_ids: HashSet<u64> = tab
-        .active_timeline()
-        .layers
-        .iter()
-        .filter(|l| {
-            l.is_editable_at(next_frame)
-                && l.keyframe_index_at(prev_frame).is_some()
-                && l.keyframe_index_at(prev_frame) == l.keyframe_index_at(next_frame)
-        })
-        .map(|l| l.id)
-        .collect();
-    tab.session.retain_selection_in_layers(&same_kf_layer_ids);
-}
-
 /// レイヤー `layer_idx`・コマ `frame_idx` に移る（コマを変える入口 `Tab::set_active_frame` が先に持ち上げた絵を貼り戻す）。
 /// `false`：貼り戻しを断られた（移らない）
 fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: usize) -> bool {
     if tab.active_timeline().layers.is_empty() {
         return true;
     }
-    let prev_frame = tab.active_timeline().current_frame;
     if !tab.set_active_frame(frame_idx) {
         return false;
     }
@@ -2208,8 +2191,6 @@ fn apply_switch_to_layer_and_frame(tab: &mut Tab, layer_idx: usize, frame_idx: u
         clamped_layer,
         frame_idx,
     )));
-    let next_frame = tab.active_timeline().current_frame;
-    retain_selection_on_same_keyframe(tab, prev_frame, next_frame);
     reset_session_after_timeline_change(tab)
 }
 
@@ -2220,12 +2201,10 @@ fn apply_scrub_ruler_to_frame(tab: &mut Tab, frame_idx: usize) -> bool {
     if tl.current_frame == clamped_frame && tl.cell_selection.is_none() {
         return true;
     }
-    let prev_frame = tl.current_frame;
     if !tab.set_active_frame(clamped_frame) {
         return false;
     }
     tab.set_active_cell_selection(None);
-    retain_selection_on_same_keyframe(tab, prev_frame, clamped_frame);
     reset_session_after_timeline_change(tab)
 }
 
@@ -2326,7 +2305,7 @@ fn apply_timeline_add_layer(tab: &mut Tab) -> bool {
     if !tab.active_timeline().can_add_layer() {
         return false;
     }
-    mutate_timeline_with_undo(tab, |tl, _| tl.add_layer_above_active())
+    mutate_timeline_with_undo(tab, |tl, parts| tl.add_layer_above_active(parts.alloc_layer_id()))
 }
 
 fn apply_timeline_delete_active_layer(tab: &mut Tab) -> bool {

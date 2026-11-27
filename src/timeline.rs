@@ -7,13 +7,76 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock, PoisonError, Weak,
     },
 };
 
 /// 1タイムラインあたりの最大許容レイヤー数
 pub(crate) const MAX_LAYERS_PER_TIMELINE: usize = 1_000;
+
+/// キーフレームの番号（キーフレームを作るたびにアプリ全体の数え札から配る：図形の番号と同じ配り方。同じキーフレームを
+/// 書き換える・動かす写しは同じ番号、新しく作った・F6 で写した・コマを複製した・読み込んだキーフレームは新しい番号。
+/// ファイルには書かない）。選択が「どのキーフレームの絵を選んだか」を覚えるのに使う（設計審査 b7208d9 の 2.）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct KeyframeId(u64);
+
+static NEXT_KEYFRAME_ID: AtomicU64 = AtomicU64::new(1);
+
+/// コマに見えている絵の見分け：どのキーフレームの絵か（`KeyframeId`）と、トゥイーンの中割りの絵か（中割りのコマは、
+/// キーフレームの絵そのものではない）。選択は、選んだときに見えていた絵を覚え、見える絵が変わったら外れる
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ShownPicture {
+    keyframe: KeyframeId,
+    inbetween: bool,
+}
+
+impl KeyframeId {
+    fn fresh() -> Self {
+        Self(NEXT_KEYFRAME_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// グループの入れ子の深さの上限（セル画の作りの決まり `check_cel_form` の1つ：読み込みでも、セル画を書く入口でも）。
+/// 階層を並べ直す所（`arranged`）は深さの2乗の手間とメモリを使うので、この深さで止める
+pub(crate) const MAX_GROUP_DEPTH: usize = 1_000;
+
+/// セル画の作りに合わない所
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CelFormError {
+    /// グループの入れ子が `MAX_GROUP_DEPTH` より深い
+    TooDeep,
+    /// 同じグループが2つの所にある（すぐ上のグループが2つ）・同じ階層の地図が2つある・同じ番号のインスタンスが2つある
+    Tangled,
+}
+
+/// セル画の作りの決まり（決まりはこれ1つ。読み込み `Keyframe::from_saved` と、セル画を書く入口 `write_cel` が使う：設計審査
+/// b7208d9 の 5.。前は読み込みにだけあり、アプリで作れるのに開けない作品があった）：地図の階層 `map_scopes` とインスタンス
+/// （番号と親の階層）`instances` について、階層の深さは `MAX_GROUP_DEPTH` まで、グループの番号ごとにすぐ上のグループは1つ
+/// （すぐ上が1つなら、上の並び全体も1つに決まる）、同じ階層の地図は1つ、同じ番号のインスタンスは1つ
+pub(crate) fn check_cel_form<'a>(
+    map_scopes: impl Iterator<Item = &'a [u64]> + Clone,
+    instances: impl Iterator<Item = (u64, &'a [u64])> + Clone,
+) -> Result<(), CelFormError> {
+    let mut parent_of: HashMap<u64, Option<u64>> = HashMap::new();
+    for path in map_scopes.clone().chain(instances.clone().map(|(_, p)| p)) {
+        if path.len() > MAX_GROUP_DEPTH {
+            return Err(CelFormError::TooDeep);
+        }
+        for (k, &id) in path.iter().enumerate() {
+            let parent = k.checked_sub(1).map(|j| path[j]);
+            if *parent_of.entry(id).or_insert(parent) != parent {
+                return Err(CelFormError::Tangled);
+            }
+        }
+    }
+    let mut paths = HashSet::new();
+    let mut gids = HashSet::new();
+    if !map_scopes.into_iter().all(|p| paths.insert(p)) || !instances.into_iter().all(|(g, _)| gids.insert(g)) {
+        return Err(CelFormError::Tangled);
+    }
+    Ok(())
+}
 
 /// クラシックトゥイーンの回転方向（Adobe Animate のトゥイーン回転設定相当）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -735,6 +798,14 @@ impl Cel {
     /// シンボルインスタンス（読むだけ。書くのは `instances_mut` などの `Cel` の関数）
     pub(crate) fn instances(&self) -> &Arc<Vec<SymbolInstance>> {
         &self.instances
+    }
+
+    /// セル画の作りの決まりに合うか（`check_cel_form`）
+    pub(crate) fn check_form(&self) -> Result<(), CelFormError> {
+        check_cel_form(
+            self.maps.iter().map(|m| m.group_path.as_slice()),
+            self.instances.iter().map(|i| (i.binding.instance_gid, i.parent_scope.as_slice())),
+        )
     }
 
     /// セル画の版（中身を書く `Cel` の関数が上げる）
@@ -1572,6 +1643,8 @@ impl Cel {
 /// `ChunkedList::key`）
 #[derive(Clone, Debug)]
 pub(crate) struct Keyframe {
+    /// キーフレームの番号（作るときに配る。同じキーフレームを書き換える・動かす写しは同じ番号）
+    id: KeyframeId,
     rel_start: i64,
     pub(crate) cel: Cel,
     pub(crate) tween: bool,
@@ -1642,15 +1715,22 @@ impl Keyframe {
         Self::with_cel(Cel::default(), false, TweenRotate::Auto)
     }
 
-    /// セル画 `cel` とトゥイーンの設定のキーフレーム（始まりのコマは、列に入れるときに決める）
+    /// セル画 `cel` とトゥイーンの設定のキーフレーム（始まりのコマは、列に入れるときに決める。番号は新しく配る）
     pub(crate) fn with_cel(cel: Cel, tween: bool, tween_rotate: TweenRotate) -> Self {
         Self {
+            id: KeyframeId::fresh(),
             rel_start: 0,
             cel,
             tween,
             tween_rotate,
             sound: None,
         }
+    }
+
+    /// 同じ中身の、新しいキーフレーム（コマの複製：番号を新しく配る）
+    fn renewed(mut self) -> Self {
+        self.id = KeyframeId::fresh();
+        self
     }
 
     /// 音の区間を `sound` にしたもの
@@ -1811,7 +1891,7 @@ impl Layer {
         };
         let same_keyframe = |a: &Keyframe, b: &Keyframe| {
             // 始まりのコマは、列の比べ（`same_keyed`）が比べる
-            let Keyframe { rel_start: _, cel, tween, tween_rotate, sound } = a;
+            let Keyframe { id: _, rel_start: _, cel, tween, tween_rotate, sound } = a;
             *tween == b.tween && *tween_rotate == b.tween_rotate && *sound == b.sound && same_cel(cel, &b.cel)
         };
         let Layer { id, name, visible, locked, frame_count, keyframes } = self;
@@ -1832,6 +1912,14 @@ impl Layer {
     pub(crate) fn keyframe_index_starting_at(&self, frame: usize) -> Option<usize> {
         let i = self.keyframes_before(frame);
         (i < self.keyframes.len() && self.start_of(i) == frame).then_some(i)
+    }
+
+    /// コマ `frame` に見えている絵：どのキーフレームの、キーフレームの絵か中割りの絵か（コマの外なら `None`）
+    pub(crate) fn shown_picture(&self, frame: usize) -> Option<ShownPicture> {
+        self.keyframe_index_at(frame).map(|i| ShownPicture {
+            keyframe: self.keyframes[i].id,
+            inbetween: self.interpolated_tween_binding_at(frame).is_some(),
+        })
     }
 
     /// 指定フレーム番号 `frame` において有効な（保持されている）キーフレームのインデックスを返す
@@ -2309,7 +2397,6 @@ pub(crate) struct Timeline {
     pub(crate) active_layer: usize,
     pub(crate) total_frames: usize,
     pub(crate) next_layer_number: usize,
-    pub(crate) next_layer_id: u64,
     pub(crate) cell_selection: Option<TimelineCellSelection>,
 }
 
@@ -2321,7 +2408,6 @@ impl Default for Timeline {
             active_layer: 0,
             total_frames: 1,
             next_layer_number: 2,
-            next_layer_id: 2,
             cell_selection: Some(TimelineCellSelection::single(0, 0)),
         }
     }
@@ -2341,12 +2427,10 @@ impl Timeline {
             active_layer: _,
             total_frames,
             next_layer_number,
-            next_layer_id,
             cell_selection: _,
         } = self;
         *total_frames == other.total_frames
             && *next_layer_number == other.next_layer_number
-            && *next_layer_id == other.next_layer_id
             && layers.len() == other.layers.len()
             && layers.iter().zip(&other.layers).all(|(a, b)| a.same_content(b))
     }
@@ -2766,6 +2850,10 @@ impl Timeline {
                 if actual_dl != 0 {
                     remap_keyframes_group_and_instance_ids(&mut kfs, &mut alloc_group_id);
                 }
+                // 複製は新しいキーフレーム（番号を新しく配る。動かすのは同じキーフレーム）
+                if copy_mode {
+                    kfs = kfs.into_iter().map(|(rel, kf)| (rel, kf.renewed())).collect();
+                }
                 Some((src_l, dst_l, src_max_frame, dst_max_frame, kfs))
             })
             .collect();
@@ -2797,17 +2885,13 @@ impl Timeline {
     }
 
     /// 新しいレイヤーを現在のアクティブレイヤーの1つ上（前面）に追加して選択する（足せない（`can_add_layer`）なら追加しない）
-    pub(crate) fn add_layer_above_active(&mut self) {
+    /// 番号 `lid` の新しいレイヤーを、今のレイヤーの1つ上に足す（番号は作品の数え札から取る：`DocParts::alloc_layer_id`）
+    pub(crate) fn add_layer_above_active(&mut self, lid: u64) {
         if !self.can_add_layer() {
             return;
         }
         let name = format!("Layer {}", self.next_layer_number);
         self.next_layer_number = self.next_layer_number.saturating_add(1);
-        let mut lid = self.next_layer_id.max(1);
-        while self.layers.iter().any(|l| l.id == lid) {
-            lid = if lid < u64::MAX { lid + 1 } else { 1 };
-        }
-        self.next_layer_id = lid.saturating_add(1);
         let insert_idx = (self.active_layer + 1).min(self.layers.len());
         let fc = self.total_frames.max(1);
         self.layers

@@ -684,6 +684,9 @@ pub(crate) struct Document {
     pub(crate) next_group_id: u64,
     /// 次に読み込む音の番号
     pub(crate) next_sound_id: u64,
+    /// 次に足すレイヤーの番号（ルートとシンボルのどのタイムラインのレイヤーの番号よりも後。取り消しで戻さない：設計審査
+    /// b7208d9 の 7.。前はタイムラインの数え札で、取り消すと戻り、同じ番号をまた使った）
+    pub(crate) next_layer_id: u64,
     /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
     /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
@@ -697,6 +700,7 @@ pub(crate) struct DocParts<'a> {
     sounds: &'a mut crate::sound::SoundLibrary,
     next_sound_id: &'a mut u64,
     next_group_id: &'a mut u64,
+    next_layer_id: &'a mut u64,
     pub(crate) fps: u32,
 }
 
@@ -712,6 +716,13 @@ impl DocParts<'_> {
         *self.next_sound_id += 1;
         sound.id = id;
         self.sounds.push_new(Arc::new(sound));
+        id
+    }
+
+    /// 新しいレイヤーの番号（作品の数え札から：どのタイムラインのレイヤーの番号とも重ならない）
+    pub(crate) fn alloc_layer_id(&mut self) -> u64 {
+        let id = (*self.next_layer_id).max(1);
+        *self.next_layer_id = id.saturating_add(1);
         id
     }
 
@@ -738,16 +749,27 @@ pub(crate) struct DocContent {
 impl Document {
     /// 読み込んだ中身から文書を作る（番号の数え札を合わせて渡す。版は新しくする）
     #[allow(clippy::too_many_arguments)]
+    /// 作品の番号の数え札（シンボル・グループ・音・レイヤー）。断った操作は、入口 `apply` がこれで操作の前に戻す（戻す決まり
+    /// はこれ1つ：設計審査 b7208d9 の 7.。前はシンボルとグループだけを戻していた）。取り消しでは戻さない
+    pub(crate) fn counters(&self) -> [u64; 4] {
+        [self.next_symbol_id, self.next_group_id, self.next_sound_id, self.next_layer_id]
+    }
+
+    /// 番号の数え札を `counters` にする（`counters` で写したもの）
+    pub(crate) fn set_counters(&mut self, counters: [u64; 4]) {
+        [self.next_symbol_id, self.next_group_id, self.next_sound_id, self.next_layer_id] = counters;
+    }
+
     pub(crate) fn loaded(
         root: Timeline,
         library: Library,
         sounds: crate::sound::SoundLibrary,
         stage_size: Vec2,
         fps: u32,
-        next_symbol_id: u64,
-        next_group_id: u64,
-        next_sound_id: u64,
+        counters: [u64; 4],
     ) -> Self {
+        // 数え札の並びは `counters` と同じ（シンボル・グループ・音・レイヤー）
+        let [next_symbol_id, next_group_id, next_sound_id, next_layer_id] = counters;
         Self {
             root,
             library,
@@ -757,6 +779,7 @@ impl Document {
             next_symbol_id,
             next_group_id,
             next_sound_id,
+            next_layer_id,
             revision: crate::vector_engine::next_mesh_revision(),
             load_notices: Default::default(),
         }
@@ -780,6 +803,7 @@ impl Document {
             next_symbol_id: _,
             next_group_id: _,
             next_sound_id: _,
+            next_layer_id: _,
             load_notices: _,
         } = self;
         DocContent {
@@ -804,6 +828,7 @@ impl Document {
             next_symbol_id: _,
             next_group_id: _,
             next_sound_id: _,
+            next_layer_id: _,
             load_notices: _,
         } = self;
         DocContent {
@@ -834,6 +859,7 @@ impl Document {
             sounds: &mut self.sounds,
             next_sound_id: &mut self.next_sound_id,
             next_group_id: &mut self.next_group_id,
+            next_layer_id: &mut self.next_layer_id,
             fps: self.fps,
         };
         (&mut self.root, parts)
@@ -851,6 +877,7 @@ impl Default for Document {
             next_symbol_id: 1,
             next_group_id: 1,
             next_sound_id: 1,
+            next_layer_id: 2,
             revision: 0,
             load_notices: Default::default(),
         }

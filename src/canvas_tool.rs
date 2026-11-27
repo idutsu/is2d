@@ -37,6 +37,47 @@ pub(crate) struct StatusToast {
     pub(crate) kind: NoticeKind,
     pub(crate) message: String,
     pub(crate) expires_at: Instant,
+    /// 書き直す知らせの見分け（同じ見分けの知らせは、足さずに文を書き直す：読み込みの知らせを「ほか N か所」にまとめる）
+    key: Option<NoticeKey>,
+}
+
+/// 書き直す知らせの見分け
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeKey {
+    /// ファイルから読んだものの知らせ（地図の切り直し・何も無いものとして見せている地図・読めない音・短い音）
+    Load,
+}
+
+/// 画面の左上に出す知らせの並び（足すのは `show_notice` の1つ。同じ文は1つにまとめて出ている時間を延ばし、同じ見分けの
+/// 知らせは文を書き直す。消えるのは出ている時間が過ぎたときだけ：設計審査 b7208d9 の 4.。前は箱が1枠で、あとの知らせが
+/// 前の知らせを上書きした）
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Notices {
+    items: Vec<StatusToast>,
+}
+
+impl Notices {
+    /// 出ている知らせ（出した順）
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &StatusToast> {
+        self.items.iter()
+    }
+
+    /// 見分け `key` の知らせが出ているか
+    pub(crate) fn has(&self, key: NoticeKey) -> bool {
+        self.items.iter().any(|t| t.key == Some(key))
+    }
+
+    /// 出ている時間が `now` までに過ぎた知らせを消す
+    pub(crate) fn drop_expired(&mut self, now: Instant) {
+        self.items.retain(|t| now < t.expires_at);
+    }
+
+    /// 知らせを足す（同じ見分けの知らせがあれば文を書き直し、同じ文があれば1つにまとめる。どちらも出ている時間を延ばす）
+    fn push(&mut self, kind: NoticeKind, message: String, key: Option<NoticeKey>) {
+        let expires_at = Instant::now() + DEFAULT_TOAST_DURATION;
+        self.items.retain(|t| !(key.is_some() && t.key == key) && t.message != message);
+        self.items.push(StatusToast { kind, message, expires_at, key });
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -864,6 +905,9 @@ pub(crate) type InstanceGid = u64;
 pub(crate) struct Selection {
     pub(crate) shapes: HashSet<ShapeId>,
     pub(crate) instances: HashSet<InstanceGid>,
+    /// 選んだときに見えていた絵（項目の入っているレイヤーごと。覚えるのも、見える絵が変わったレイヤーの項目を外すのも
+    /// `Tab::settle_selection` の1つ：設計審査 b7208d9 の 2.）
+    anchors: std::collections::BTreeMap<u64, crate::timeline::ShownPicture>,
 }
 
 impl Selection {
@@ -876,6 +920,7 @@ impl Selection {
     pub(crate) fn clear(&mut self) {
         self.shapes.clear();
         self.instances.clear();
+        self.anchors.clear();
     }
 
     #[inline]
@@ -2574,17 +2619,14 @@ impl Default for ToolSettings {
     }
 }
 
-/// キャンバス左上に一定時間自動で消えるトースト通知メッセージを登録する
-pub(in crate::canvas_tool) fn show_notice(
-    toast: &mut Option<StatusToast>,
-    kind: NoticeKind,
-    message: impl Into<String>,
-) {
-    *toast = Some(StatusToast {
-        kind,
-        message: message.into(),
-        expires_at: Instant::now() + DEFAULT_TOAST_DURATION,
-    });
+/// キャンバス左上に一定時間自動で消える知らせを足す（知らせを足すのはここ1つ：`Notices::push`）
+pub(in crate::canvas_tool) fn show_notice(notices: &mut Notices, kind: NoticeKind, message: impl Into<String>) {
+    notices.push(kind, message.into(), None);
+}
+
+/// 見分け `key` の知らせを、文 `message` に書き直す（無ければ足す）
+pub(crate) fn show_keyed_notice(notices: &mut Notices, key: NoticeKey, kind: NoticeKind, message: String) {
+    notices.push(kind, message, Some(key));
 }
 
 // ============================================================================
@@ -2765,6 +2807,46 @@ impl Tab {
         {
             self.session.invalidate_scene_order();
         }
+    }
+
+    /// 選択が残るかの決まり（決まりはこれ1つ。入口 `apply` が操作の前とあとに呼ぶ）：項目の入っているレイヤーごとに、
+    /// 選んだときに見えていた絵（どのキーフレームの絵か・中割りか：`Layer::shown_picture`）を覚え（まだ覚えていないレイヤーは
+    /// 今見えている絵）、今見えている絵が違うレイヤーの項目を外す。コマを移る・見る場所を変える・タイムラインを書き換える・
+    /// 取り消す、のどれでも同じ決まり（設計審査 b7208d9 の 2.。前は選択を番号だけで持ち、F6 の写しは元と同じ番号なので、道
+    /// ごとに別の決まりで外していて、`Shift+F6` のあと選択がコマ 1 の絵に残った）。見える絵が変わるのは、持ち上げた絵を確定
+    /// したあとだけ（コマ・見る場所・タイムラインを変える入口が先に確定する）なので、持ち上げた絵の選択は外さない。手間は
+    /// 画面の図形の数（選択があるときだけ）
+    pub(in crate::canvas_tool) fn settle_selection(&mut self) {
+        if self.session.selection.is_empty() {
+            self.session.selection.anchors.clear();
+            return;
+        }
+        let tl = self.active_timeline();
+        let frame = tl.current_frame;
+        let shown = |lid: u64| tl.layers.iter().find(|l| l.id == lid).and_then(|l| l.shown_picture(frame));
+        let sel = &self.session.selection;
+        let mut layers: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for s in self.session.scene().iter() {
+            let picked = match s.symbol_instance {
+                Some(b) => sel.instances.contains(&b.instance_gid),
+                None => sel.shapes.contains(&s.shape_id),
+            };
+            if picked {
+                layers.insert(s.layer_id);
+            }
+        }
+        let moved: std::collections::BTreeSet<u64> =
+            layers.iter().copied().filter(|&l| sel.anchors.get(&l).is_some_and(|&a| Some(a) != shown(l))).collect();
+        let anchors: std::collections::BTreeMap<u64, crate::timeline::ShownPicture> = layers
+            .iter()
+            .filter(|l| !moved.contains(l))
+            .filter_map(|&l| sel.anchors.get(&l).copied().or_else(|| shown(l)).map(|a| (l, a)))
+            .collect();
+        if !moved.is_empty() {
+            let kept: HashSet<u64> = layers.difference(&moved).copied().collect();
+            self.session.retain_selection_in_layers(&kept);
+        }
+        self.session.selection.anchors = anchors;
     }
 
     /// 現在編集中のタイムラインへの不変参照を返す

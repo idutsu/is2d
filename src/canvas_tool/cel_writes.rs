@@ -18,6 +18,8 @@ pub(crate) enum Refusal {
     /// 開いたときに壊れていて、何も無い地図として見せている階層に書こうとした（`write_cel` の見張り：`Cel::keeps_blank_maps`。
     /// 書けば、ファイルから読んだ元の地図を黙って置き換える：審査 5616fcc の D-3）
     BlankPicture,
+    /// セル画の作りの決まり（`check_cel_form`）に合わなくなる（グループの入れ子が深すぎる など）
+    CelForm(crate::timeline::CelFormError),
 }
 
 /// 1本の道が断った理由の、知らせ（読み替えはこれ1つ）
@@ -39,6 +41,12 @@ impl Refusal {
             Refusal::Unwritable => "この編集の結果を地図にできないので、何も変えていません".to_owned(),
             Refusal::UnderLifted => "持ち上げている絵の下の絵には書けないので、何も変えていません".to_owned(),
             Refusal::BlankPicture => "壊れていて表示できない絵には書けないので、何も変えていません".to_owned(),
+            Refusal::CelForm(crate::timeline::CelFormError::TooDeep) => {
+                format!("グループの入れ子は {} 段までです", crate::timeline::MAX_GROUP_DEPTH)
+            }
+            Refusal::CelForm(crate::timeline::CelFormError::Tangled) => {
+                "この編集の結果をセル画にできないので、何も変えていません".to_owned()
+            }
         }
     }
 }
@@ -117,6 +125,11 @@ pub(in crate::canvas_tool) fn write_cel(
     }
     if !cel.keeps_blank_maps(&tab.active_timeline().layers[li].keyframes[kf].cel) {
         tab.session.refusal = Some(Refusal::BlankPicture);
+        return false;
+    }
+    // 書いたセル画が、読み込みと同じ作りの決まりに合うか（アプリで作れる作品は、みな開ける：設計審査 b7208d9 の 5.）
+    if let Err(e) = cel.check_form() {
+        tab.session.refusal = Some(Refusal::CelForm(e));
         return false;
     }
     tab.write_active_timeline(|tl, _| tl.layers[li].keyframe_mut(kf).cel = cel);

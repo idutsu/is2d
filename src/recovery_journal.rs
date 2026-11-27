@@ -74,6 +74,7 @@ struct Manifest {
     next_symbol_id: u64,
     next_group_id: u64,
     next_sound_id: u64,
+    next_layer_id: u64,
     recovery_source: Option<PathBuf>,
     timeline: JournalTimeline,
     /// ライブラリの塊の番号の並びと、見せる順の塊の番号の並び
@@ -233,6 +234,7 @@ impl Journal {
             next_symbol_id: doc.next_symbol_id,
             next_group_id: doc.next_group_id,
             next_sound_id: doc.next_sound_id,
+            next_layer_id: doc.next_layer_id,
             recovery_source: source.map(Path::to_path_buf),
             timeline,
             library,
@@ -383,66 +385,165 @@ pub(crate) fn is_saved(path: &Path) -> bool {
         .is_ok_and(|()| got == tail)
 }
 
+/// 大きな記録（塊の表・キーフレームの塊・音のデータ）の場所：中身の始まり・長さ・CRC32・記録の並びの番号・番号（塊の表は 0）
+struct BigRecord {
+    at: u64,
+    len: u64,
+    crc: u32,
+    kind: u8,
+    id: u64,
+}
+
+/// 記録の並びの番号（postcard は列挙の何番目かを先頭に書く。`Record` の並びと同じ）
+const TILES: u8 = 0;
+const CHUNK: u8 = 3;
+const SOUND_BYTES: u8 = 9;
+
+/// 読み手 `r` から、postcard の数（可変長）を1つ読む
+fn read_varint(r: &mut impl Read) -> std::io::Result<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b)?;
+        value |= u64::from(b[0] & 0x7f) << shift;
+        if b[0] & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(std::io::Error::other("数が長すぎます"))
+}
+
 /// 書き足すファイル `path` を読み、最後の完全な目録の作品の保存の形にする。欠けた記録（書いている途中で止まった）から
-/// 後は読まない。目録が1つも無い・目録が無い塊を指すなら `Err`
+/// 後は読まない。目録が1つも無い・目録が無い塊を指すなら `Err`。ファイル全体をメモリに持たない：1回目は記録を順に流して
+/// CRC32 を確かめ、小さな記録は読み、大きな記録（塊の表・キーフレームの塊・音のデータ）は場所だけ覚える。2回目に、塊の
+/// 表と、最後の目録の作品が指すキーフレームの塊・音のデータだけを、作品ファイルと同じ読み手（`read_streamed`）で読む
+/// （置き換わった古い記録は持たない：設計審査 b7208d9 の 6.。前はファイル全体を読み、古い記録まで全部持った）
 pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
+    use std::io::{Seek, SeekFrom};
     let broken = || "復旧ファイルが壊れています".to_owned();
-    let bytes = std::fs::read(path).map_err(|e| format!("復旧ファイルを読めませんでした: {e}"))?;
-    if read_identity(&bytes)? != SaveKind::Journal {
+    let failed = |e: std::io::Error| format!("復旧ファイルを読めませんでした: {e}");
+    let file = std::fs::File::open(path).map_err(failed)?;
+    let size = file.metadata().map_err(failed)?.len();
+    let mut file = std::io::BufReader::with_capacity(crate::project_io::READ_CHUNK_LEN, file);
+    let id_len = SaveKind::Journal.identity_len();
+    let mut head = Vec::with_capacity(id_len);
+    (&mut file).take(id_len as u64).read_to_end(&mut head).map_err(failed)?;
+    if read_identity(&head)? != SaveKind::Journal {
         return Err(broken());
     }
-    let rest = &bytes[SaveKind::Journal.identity_len()..];
-    let mut tiles = ReadTiles::default();
-    let mut sound_bytes: HashMap<u64, Arc<[u8]>> = HashMap::new();
     let mut sounds: HashMap<u64, SoundEntry> = HashMap::new();
     let mut sound_lists: HashMap<u64, Vec<u64>> = HashMap::new();
-    let mut chunks: HashMap<u64, (Vec<i64>, Vec<SavedKeyframe>)> = HashMap::new();
     let mut keyframe_lists: HashMap<u64, Vec<(u64, i64)>> = HashMap::new();
     let mut symbol_chunks: HashMap<u64, Vec<JournalSymbol>> = HashMap::new();
     let mut order_chunks: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut big: Vec<BigRecord> = Vec::new();
     let mut manifest = None;
-    let mut at = rest;
-    while at.len() >= 8 {
-        let len = u32::from_le_bytes(at[..4].try_into().expect("4 バイト")) as usize;
-        let crc = u32::from_le_bytes(at[4..8].try_into().expect("4 バイト"));
-        let Some(body) = at.get(8..8 + len) else {
-            break;
-        };
-        if crc32fast::hash(body) != crc {
+    // 1回目：記録を順に流す（記録の長さは、ファイルの残りより長ければ欠けた記録として止まる：書いてある長さで取らない）
+    let mut at = id_len as u64;
+    while size.saturating_sub(at) >= 8 {
+        let mut frame = [0u8; 8];
+        if file.read_exact(&mut frame).is_err() {
             break;
         }
-        let Ok(rec) = postcard::from_bytes::<Record>(body) else {
+        let len = u64::from(u32::from_le_bytes(frame[..4].try_into().expect("4 バイト")));
+        let crc = u32::from_le_bytes(frame[4..8].try_into().expect("4 バイト"));
+        if len == 0 || len > size - at - 8 {
+            break;
+        }
+        let mut body = crate::project_io::BodyReader::new((&mut file).take(len));
+        let mut kind = [0u8; 1];
+        let mut small = Vec::new();
+        let read = body.read_exact(&mut kind).and_then(|()| match kind[0] {
+            TILES => std::io::copy(&mut body, &mut std::io::sink()).map(|_| 0),
+            CHUNK | SOUND_BYTES => {
+                read_varint(&mut body).and_then(|id| std::io::copy(&mut body, &mut std::io::sink()).map(|_| id))
+            }
+            _ => body.read_to_end(&mut small).map(|_| 0),
+        });
+        let (Ok(id), Ok((got, sum))) = (read, body.finish()) else {
             break;
         };
+        if got != len || sum != crc {
+            break;
+        }
+        match kind[0] {
+            TILES | CHUNK | SOUND_BYTES => big.push(BigRecord { at: at + 8, len, crc, kind: kind[0], id }),
+            _ => {
+                let Ok(rec) = postcard::from_bytes::<Record>(&[&kind[..], &small].concat()) else {
+                    break;
+                };
+                match rec {
+                    Record::Sound(s) => {
+                        sounds.insert(s.id, s);
+                    }
+                    Record::Sounds { id, sounds: list } => {
+                        sound_lists.insert(id, list);
+                    }
+                    Record::Keyframes { id, chunks: list } => {
+                        keyframe_lists.insert(id, list);
+                    }
+                    Record::Symbols { id, symbols } => {
+                        symbol_chunks.insert(id, symbols);
+                    }
+                    Record::Order { id, ids } => {
+                        order_chunks.insert(id, ids);
+                    }
+                    Record::Manifest(m) => manifest = Some((m, at)),
+                    Record::Saved | Record::Tiles { .. } | Record::Chunk { .. } | Record::SoundBytes { .. } => {}
+                }
+            }
+        }
+        at += 8 + len;
+    }
+    let (m, manifest_at) = manifest.ok_or_else(broken)?;
+    // 最後の目録の作品が指すキーフレームの塊と音のデータ
+    let timelines = std::iter::once(&m.timeline).chain(
+        m.library.iter().filter_map(|id| symbol_chunks.get(id)).flatten().map(|s| &s.timeline),
+    );
+    let wanted_chunks: std::collections::HashSet<u64> = timelines
+        .flat_map(|t| t.layers.iter())
+        .filter_map(|l| keyframe_lists.get(&l.keyframes))
+        .flatten()
+        .map(|&(id, _)| id)
+        .collect();
+    let wanted_bytes: std::collections::HashSet<u64> = sound_lists
+        .get(&m.sounds)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| sounds.get(id))
+        .map(|s| s.bytes)
+        .collect();
+    // 2回目：塊の表（番号が続くので、目録までのものを全部）と、指されている大きな記録だけを読む
+    let mut tiles = ReadTiles::default();
+    let mut chunks: HashMap<u64, (Vec<i64>, Vec<SavedKeyframe>)> = HashMap::new();
+    let mut sound_bytes: HashMap<u64, Arc<[u8]>> = HashMap::new();
+    for r in big.iter().filter(|r| r.at < manifest_at) {
+        let wanted = match r.kind {
+            TILES => true,
+            CHUNK => wanted_chunks.contains(&r.id),
+            _ => wanted_bytes.contains(&r.id),
+        };
+        if !wanted {
+            continue;
+        }
+        file.seek(SeekFrom::Start(r.at)).map_err(failed)?;
+        let streamed = crate::project_io::read_streamed::<Record>((&mut file).take(r.len))?;
+        // 1回目に確かめた中身と同じか（2回のあいだにファイルが変わっていても、違う中身を読まない）
+        if streamed.len != r.len || streamed.crc != r.crc || streamed.left != 0 {
+            return Err(broken());
+        }
+        let rec = streamed.value.map_err(|_| broken())?;
         match rec {
             Record::Tiles { colors, tiles: t, strokes } => tiles.add(colors, t, &strokes),
-            Record::Sound(s) => {
-                sounds.insert(s.id, s);
-            }
-            Record::Sounds { id, sounds: list } => {
-                sound_lists.insert(id, list);
-            }
             Record::Chunk { id, rels, keyframes } => {
                 chunks.insert(id, (rels, keyframes));
-            }
-            Record::Keyframes { id, chunks: list } => {
-                keyframe_lists.insert(id, list);
-            }
-            Record::Symbols { id, symbols } => {
-                symbol_chunks.insert(id, symbols);
-            }
-            Record::Order { id, ids } => {
-                order_chunks.insert(id, ids);
             }
             Record::SoundBytes { id, bytes } => {
                 sound_bytes.insert(id, bytes);
             }
-            Record::Manifest(m) => manifest = Some(m),
-            Record::Saved => {}
+            _ => return Err(broken()),
         }
-        at = &at[8 + len..];
     }
-    let m = manifest.ok_or_else(broken)?;
     let timeline = |jt: &JournalTimeline| -> Option<SavedTimeline> {
         let mut layers = Vec::with_capacity(jt.layers.len());
         for l in &jt.layers {
@@ -495,5 +596,6 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
         map_tiles: tiles,
         sounds,
         next_sound_id: m.next_sound_id,
+        next_layer_id: m.next_layer_id,
     })
 }

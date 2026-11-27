@@ -26,8 +26,9 @@ use crate::timeline::{
 /// 位置は階層の地図の並びで書く（`order`）。面の図形は文書に持たず、使うときに地図から作る。それより前の版は開かない。
 /// 設計：claude/保存の形をバイナリにする設計_版6_7b5f6c4.md、claude/ゼロベースレビューf01d518の直し_まとまり3の説明.md。
 /// 版 9 は、辺に線（色の表の番号と太さ）を足した（設計：claude/線の設計_68a596e.md）。版 10 は、線に番号を足した（線の番号を
-/// 辺にしまう。設計：claude/線の番号を辺にしまう設計_81b715e.md）
-pub(crate) const PROJECT_FORMAT_VERSION: u32 = 10;
+/// 辺にしまう。設計：claude/線の番号を辺にしまう設計_81b715e.md）。版 11 は、レイヤーの番号の数え札を作品に1つにした（タイムラインごとの
+/// 数え札を外す。設計：claude/審査b7208d9の直しの設計.md の 7.）
+pub(crate) const PROJECT_FORMAT_VERSION: u32 = 11;
 
 /// `.is2d` ファイルの先頭の印
 const PROJECT_FILE_MAGIC: [u8; 4] = *b"IS2D";
@@ -37,8 +38,9 @@ const JOURNAL_FILE_MAGIC: [u8; 4] = *b"IS2J";
 
 /// 復旧ファイルの記録の版（`recovery_journal::Record` の形を変えたら上げる）。復旧ファイルは作品ファイルと同じ保存の型を
 /// 入れるので、頭には保存の形の版 `PROJECT_FORMAT_VERSION` も一緒に書く（どちらかが違えば読まない）。版 1 は頭の印が
-/// `IS2DJRN1` で版を持たなかった。版 2 は、音のデータと音（名前）を別の記録にした（設計：claude/審査6fb4faaの直しの設計.md）
-pub(crate) const JOURNAL_RECORD_VERSION: u32 = 2;
+/// `IS2DJRN1` で版を持たなかった。版 2 は、音のデータと音（名前）を別の記録にした（設計：claude/審査6fb4faaの直しの設計.md）。版 3 は、目録にレイヤーの番号の
+/// 数え札を足した（保存の形の版 11 と同じ時）
+pub(crate) const JOURNAL_RECORD_VERSION: u32 = 3;
 
 /// 保存するファイルの種類（頭の初めの種類の印と版で見分ける：作るのは `file_identity`、確かめるのは `read_identity` だけ）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -176,6 +178,11 @@ pub(crate) enum PendingCloseConfirm {
         orig_active: usize,
         discarded_doc_ids: HashSet<u64>,
     },
+}
+
+/// 読み込みで一部を除いた作品 `name` の知らせ（作品を開くときと復元するときの1つ）
+pub(crate) fn trimmed_notice_text(name: &str) -> String {
+    format!("「{name}」の一部を読み込めなかったため除きました（保存すると元のファイルからも消えます）")
 }
 
 /// `open_project_in_tab` の実行結果区分
@@ -570,10 +577,6 @@ impl From<SavedSymbolInstance> for SymbolInstance {
     }
 }
 
-/// グループの入れ子の深さの上限（読み込むときに、これより深い階層は壊れたファイルとして断る。手で作る入れ子はこれに
-/// 届かない。階層を並べ直す所（`arranged`）は深さの2乗の手間とメモリを使うので、細工したファイルで使い果たさないため）
-pub(crate) const MAX_GROUP_DEPTH: usize = 1_000;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SavedKeyframe {
     pub(crate) start_frame: usize,
@@ -648,30 +651,8 @@ impl Keyframe {
     /// 書いてある始まりのコマと組にして返す
     fn from_saved(s: SavedKeyframe, trimmed: &mut bool) -> Result<(usize, Self), String> {
         let broken = || "プロジェクトファイルの地図が壊れています".to_owned();
-        // 階層（地図の階層とインスタンスの親の階層）の深さは `MAX_GROUP_DEPTH` まで。グループの番号ごとに、すぐ上の
-        // グループは1つ（同じグループが2つの所に無い。すぐ上が1つなら、上の並び全体も1つに決まる）
-        let mut parent_of: HashMap<u64, Option<u64>> = HashMap::new();
-        let scopes = s
-            .maps
-            .iter()
-            .map(|m| &m.group_path)
-            .chain(s.instances.iter().map(|i| &i.parent_scope));
-        for path in scopes {
-            if path.len() > MAX_GROUP_DEPTH {
-                return Err(broken());
-            }
-            for (k, &id) in path.iter().enumerate() {
-                let parent = k.checked_sub(1).map(|j| path[j]);
-                if *parent_of.entry(id).or_insert(parent) != parent {
-                    return Err(broken());
-                }
-            }
-        }
-        let mut paths = HashSet::with_capacity(s.maps.len());
-        for m in &s.maps {
-            if !paths.insert(&m.group_path) || m.stored.is_none() {
-                return Err(broken());
-            }
+        if s.maps.iter().any(|m| m.stored.is_none()) {
+            return Err(broken());
         }
         let mut seen_gids = HashSet::with_capacity(s.instances.len());
         let saved_instances = s.instances.len();
@@ -684,6 +665,12 @@ impl Keyframe {
             .filter(|inst| seen_gids.insert(inst.binding.instance_gid))
             .collect();
         *trimmed |= instances.len() < saved_instances;
+        // セル画の作りの決まり（書く入口と同じ1つ：`check_cel_form`）。同じ番号のインスタンスは上で外してある
+        crate::timeline::check_cel_form(
+            s.maps.iter().map(|m| m.group_path.as_slice()),
+            instances.iter().map(|i| (i.binding.instance_gid, i.parent_scope.as_slice())),
+        )
+        .map_err(|_| broken())?;
         let cel = Cel::from_saved(s.maps, instances);
         // 音の付いたキーフレームは音だけ（セル画が空でなければ壊れたファイル）。音の区間が正しいかは、音のライブラリを
         // 読んでから確かめる（`into_document_noting`）
@@ -787,8 +774,6 @@ pub(crate) struct SavedTimeline {
     pub(crate) active_layer: usize,
     #[serde(default)]
     pub(crate) next_layer_number: usize,
-    #[serde(default)]
-    pub(crate) next_layer_id: u64,
     pub(crate) layers: Vec<SavedLayer>,
 }
 
@@ -811,7 +796,6 @@ impl SavedTimeline {
             current_frame: tl.current_frame,
             active_layer: tl.active_layer,
             next_layer_number: tl.next_layer_number,
-            next_layer_id: tl.next_layer_id,
             layers: Vec::new(),
         }
     }
@@ -862,7 +846,6 @@ impl Timeline {
             active_layer,
             total_frames,
             next_layer_number: s.next_layer_number.max(2),
-            next_layer_id: layer_ids.next_to_save(s.next_layer_id),
             cell_selection: Some(TimelineCellSelection::single(active_layer, current_frame)),
         };
         tl.sync_total_frames();
@@ -922,6 +905,9 @@ pub(crate) struct ProjectDocument<T = WriteTiles> {
     pub(crate) sounds: Vec<SavedSound>,
     #[serde(default)]
     pub(crate) next_sound_id: u64,
+    /// 次に足すレイヤーの番号（版 11 から：作品の数え札。前はタイムラインごとに持った）
+    #[serde(default)]
+    pub(crate) next_layer_id: u64,
 }
 
 /// 番号 `id`（レイヤー・シンボル・グループ・インスタンス）が、ファイルから読んでそのまま使える番号か（0 でなく、安全な
@@ -992,6 +978,7 @@ impl ProjectDocument {
             map_tiles: WriteTiles::default(),
             sounds: doc.sounds.iter().map(|s| SavedSound::from(&**s)).collect(),
             next_sound_id: doc.next_sound_id,
+            next_layer_id: doc.next_layer_id,
         };
         out.write_map_tiles();
         out
@@ -1070,7 +1057,9 @@ impl ProjectDocument<ReadTiles> {
                 .all(timeline_ok)
     }
 
-    /// 読んだ中身から文書を作る（中身の一部を除いたかは要らないとき：`into_document_noting`）
+    /// テスト用：読んだ中身から文書を作る（中身の一部を除いたかを見ないテストのため。アプリは除いたものをいつも知らせる
+    /// ので `into_document_noting` を使う）
+    #[cfg(test)]
     pub(crate) fn into_document(self) -> Result<Document, String> {
         self.into_document_noting(&mut false)
     }
@@ -1210,15 +1199,22 @@ impl ProjectDocument<ReadTiles> {
         short_sounds.sort_unstable();
         short_sounds.dedup();
         let fresh_sound_ids = FreshIds::after(sounds.iter().map(|s| s.id));
+        // レイヤーの番号は、どのタイムラインのレイヤーの番号よりも後から配る
+        let fresh_layer_ids = FreshIds::after(
+            std::iter::once(&timeline).chain(library.iter().map(|s| &s.timeline)).flat_map(|tl| tl.layers.iter().map(|l| l.id)),
+        );
         let doc = Document::loaded(
             timeline,
             library.into_iter().map(Arc::new).collect(),
             sounds,
             stage_size,
             fps,
-            sym_ids.next_to_save(self.next_symbol_id),
-            gids.next_to_save(self.next_group_id),
-            fresh_sound_ids.next_to_save(self.next_sound_id),
+            [
+                sym_ids.next_to_save(self.next_symbol_id),
+                gids.next_to_save(self.next_group_id),
+                fresh_sound_ids.next_to_save(self.next_sound_id),
+                fresh_layer_ids.next_to_save(self.next_layer_id),
+            ],
         );
         doc.watch_broken_maps();
         for s in doc.sounds.iter().filter(|s| !s.readable()) {
@@ -1343,11 +1339,26 @@ pub(crate) fn project_file_bytes<T: Serialize>(
 /// 読んだバイトの長さと CRC32 を数えながら `inner` から読む読み手（中身を手元に持たずに、頭の数と照らす：
 /// `read_project`）。postcard は読み手の失敗を自分の失敗（中身が途中で終わった）に置き換えるので、読み手の失敗は返さずに
 /// ここに取っておき（失敗した後は終わりとして何も読まない）、読み終えてから見る
-struct BodyReader<R> {
+pub(crate) struct BodyReader<R> {
     inner: R,
     len: u64,
     crc: crc32fast::Hasher,
     failed: Option<std::io::Error>,
+}
+
+impl<R> BodyReader<R> {
+    /// `inner` から読んだ長さと CRC32 を数えながら読む読み手
+    pub(crate) fn new(inner: R) -> Self {
+        Self { inner, len: 0, crc: crc32fast::Hasher::new(), failed: None }
+    }
+
+    /// 読んだ長さと CRC32（読めなかったら、そのわけ）
+    pub(crate) fn finish(self) -> std::io::Result<(u64, u32)> {
+        match self.failed {
+            Some(e) => Err(e),
+            None => Ok((self.len, self.crc.finalize())),
+        }
+    }
 }
 
 impl<R: std::io::Read> std::io::Read for BodyReader<R> {
@@ -1433,10 +1444,34 @@ impl<'de, R: std::io::Read + 'de> postcard::de_flavors::Flavor<'de> for BodyFlav
     }
 }
 
+/// 流して読んだもの：読んだ値（postcard の答え）・読んだ長さ・その CRC32・読み残した長さ
+pub(crate) struct Streamed<T> {
+    pub(crate) value: postcard::Result<T>,
+    pub(crate) len: u64,
+    pub(crate) crc: u32,
+    pub(crate) left: u64,
+}
+
+/// 読み手 `input` の中身を、型 `T` として postcard で流しながら読む（中身を1つの並びに持たず、取るのは読めたバイトの分
+/// だけ：`BodyFlavor`）。読んだ長さと CRC32（読み残しも含めて読み切った分）も返す。作品ファイルの中身と、復旧ファイルの
+/// 大きな記録を読む、1つの読み手（設計審査 b7208d9 の 6.。前は復旧ファイルだけファイル全体をメモリへ読んだ）
+pub(crate) fn read_streamed<T: DeserializeOwned>(input: impl std::io::Read) -> Result<Streamed<T>, String> {
+    let mut de = postcard::Deserializer::from_flavor(BodyFlavor {
+        input: std::io::BufReader::with_capacity(READ_CHUNK_LEN, BodyReader::new(input)),
+        lent: 0,
+        scratch: Vec::new(),
+    });
+    let value = T::deserialize(&mut de);
+    let mut rest = de.finalize().expect("流す所の終わりは失敗しない");
+    let left = std::io::copy(&mut rest, &mut std::io::sink()).map_err(read_failed)?;
+    let (len, crc) = rest.into_inner().finish().map_err(read_failed)?;
+    Ok(Streamed { value, len, crc, left })
+}
+
 /// 作品のファイルを1回に読む大きさ（`read_project`）。読む1回ごとにシステムコールの手間がかかるので、小さいと開くのが
 /// 遅くなる（`BufReader` の標準の 8KB では、作品 A（277MB）を読む回数が約 3 万 4 千回になり、読み込みが 465ms。256KB で
 /// 368ms）。1MB・4MB でも 365〜370ms で変わらないので、速さが頭打ちになるいちばん小さい大きさにする（計測：Apple M5）
-const READ_CHUNK_LEN: usize = 256 * 1024;
+pub(crate) const READ_CHUNK_LEN: usize = 256 * 1024;
 
 /// ファイルを読めなかったときの知らせ
 fn read_failed(e: std::io::Error) -> String {
@@ -1464,28 +1499,11 @@ pub(crate) fn read_project<T: DeserializeOwned + Default>(
     }
     let u32_at = |i: usize| u32::from_le_bytes(head[i..i + 4].try_into().expect("4 バイト"));
     let body_len = u64::from_le_bytes(head[8..16].try_into().expect("8 バイト"));
-    let body = BodyReader {
-        inner: input,
-        len: 0,
-        crc: crc32fast::Hasher::new(),
-        failed: None,
-    };
-    let mut de = postcard::Deserializer::from_flavor(BodyFlavor {
-        input: std::io::BufReader::with_capacity(READ_CHUNK_LEN, body),
-        lent: 0,
-        scratch: Vec::new(),
-    });
-    let read = ProjectDocument::<T>::deserialize(&mut de);
-    let mut rest = de.finalize().expect("流す所の終わりは失敗しない");
-    let left = std::io::copy(&mut rest, &mut std::io::sink()).map_err(read_failed)?;
-    let body = rest.into_inner();
-    if let Some(e) = body.failed {
-        return Err(read_failed(e));
-    }
-    if body.len != body_len {
+    let Streamed { value: read, len, crc, left } = read_streamed::<ProjectDocument<T>>(input)?;
+    if len != body_len {
         return Err("ファイルが壊れています（長さが合いません）".to_owned());
     }
-    if body.crc.finalize() != u32_at(16) {
+    if crc != u32_at(16) {
         return Err("ファイルが壊れています（中身が変わっています）".to_owned());
     }
     match read {
@@ -1707,9 +1725,7 @@ pub(crate) fn open_project_dialog(ws: &mut impl ProjectWorkspace, ctx: &egui::Co
             ws.notify_info(format!("「{name}」を開きました"));
         }
         Ok(OpenProjectOutcome::LoadedWithTrimmedData) => {
-            ws.notify_warning(format!(
-                "「{name}」の一部を読み込めなかったため除きました（保存すると元のファイルからも消えます）"
-            ));
+            ws.notify_warning(trimmed_notice_text(name));
         }
         Ok(OpenProjectOutcome::SwitchedToExistingTab) => {
             ws.notify_info(format!("既に開いている「{name}」のタブへ切り替えました"));
