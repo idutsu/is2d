@@ -142,8 +142,109 @@ impl Sound {
     }
 }
 
-/// 文書の音のライブラリ（番号の順。Undo の控えと共有する：書く所だけ `Arc::make_mut` で写す）
-pub(crate) type SoundLibrary = Arc<Vec<Arc<Sound>>>;
+/// 文書の音のライブラリ（Undo の控えと塊ごとに共有する：書くのは触った塊だけ）。音はいつも番号の順：作るときに並べ
+/// （`from`）、足すのは今までより大きい番号だけ（`push_new`）なので、番号で引くのは2分探索（`get`）。音のバイトから番号を
+/// 引く目次（`by_bytes`：バイトの番地の順）も一緒に持ち、別の文書から音を持ち込むときに同じバイトの音を2分探索で探す
+/// （`with_bytes`。前は頭から探し、書くたびに並びを全部写した：全体の点検 2026-11-27）
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SoundLibrary {
+    sounds: crate::chunked_list::ChunkedList<Sound>,
+    by_bytes: crate::chunked_list::ChunkedList<BytesEntry>,
+}
+
+/// 音のバイトの目次の1つ（バイトの番地・音の番号の順。番地は、音がライブラリにある間、ほかのバイトに使い回されない）
+#[derive(Clone, Copy, Debug)]
+struct BytesEntry {
+    bytes: usize,
+    id: u64,
+}
+
+fn bytes_address(s: &Sound) -> usize {
+    Arc::as_ptr(&s.encoded) as *const u8 as usize
+}
+
+fn bytes_key(e: &BytesEntry) -> (usize, u64) {
+    (e.bytes, e.id)
+}
+
+/// 音を番号の順に並べて作る（同じ番号は最初の1つ）
+impl From<Vec<Arc<Sound>>> for SoundLibrary {
+    fn from(mut sounds: Vec<Arc<Sound>>) -> Self {
+        sounds.sort_by_key(|s| s.id);
+        sounds.dedup_by_key(|s| s.id);
+        let mut by_bytes: Vec<Arc<BytesEntry>> =
+            sounds.iter().map(|s| Arc::new(BytesEntry { bytes: bytes_address(s), id: s.id })).collect();
+        by_bytes.sort_by_key(|e| bytes_key(e));
+        Self { sounds: sounds.into_iter().collect(), by_bytes: by_bytes.into_iter().collect() }
+    }
+}
+
+impl SoundLibrary {
+    pub(crate) fn len(&self) -> usize {
+        self.sounds.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sounds.is_empty()
+    }
+
+    /// 音を番号の順に
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Sound>> + '_ {
+        self.sounds.iter()
+    }
+
+    /// 番号の順の `i` 番目の音（ライブラリのタブの行）
+    pub(crate) fn at(&self, i: usize) -> Option<&Arc<Sound>> {
+        self.sounds.get(i)
+    }
+
+    /// 番号 `id` の音（2分探索）
+    pub(crate) fn get(&self, id: u64) -> Option<&Arc<Sound>> {
+        self.sounds.find_sorted(id, |s| s.id)
+    }
+
+    /// バイトを `sound` と共有する音（2分探索）
+    pub(crate) fn with_bytes(&self, sound: &Sound) -> Option<&Arc<Sound>> {
+        let bytes = bytes_address(sound);
+        let e = self.by_bytes.sorted_from(&(bytes, 0), bytes_key).next().filter(|e| e.bytes == bytes)?;
+        self.get(e.id)
+    }
+
+    /// 写しどうしで同じ並びを共有しているかを見分ける番地（復旧の書き足すファイル・取り消しの1手にするかの比べ）
+    pub(crate) fn address(&self) -> usize {
+        self.sounds.list_address()
+    }
+
+    /// 音 `sound` を終わりに足す。番号は、今ある音のどれよりも大きいこと
+    pub(crate) fn push_new(&mut self, sound: Arc<Sound>) {
+        assert!(self.sounds.last().is_none_or(|l| l.id < sound.id), "音の番号 {} が並びの順にならない", sound.id);
+        let e = BytesEntry { bytes: bytes_address(&sound), id: sound.id };
+        self.sounds.push(sound);
+        self.by_bytes.replace_sorted(&[], vec![Arc::new(e)], bytes_key);
+    }
+
+    /// 番号 `id` の音を消す。無い番号なら `false`
+    pub(crate) fn remove(&mut self, id: u64) -> bool {
+        let Some(i) = self.sounds.position_sorted(id, |s| s.id) else {
+            return false;
+        };
+        let gone = self.sounds.remove(i);
+        self.by_bytes.replace_sorted(&[(bytes_address(&gone), id)], Vec::new(), bytes_key);
+        true
+    }
+
+    /// 番号 `id` の音の名前を `name` にする。無い番号・同じ名前なら `false`
+    pub(crate) fn rename(&mut self, id: u64, name: String) -> bool {
+        let Some(i) = self.sounds.position_sorted(id, |s| s.id) else {
+            return false;
+        };
+        if self.sounds[i].name == name {
+            return false;
+        }
+        Arc::make_mut(&mut self.sounds[i]).name = name;
+        true
+    }
+}
 
 /// キーフレームに付けた音の区間：音のライブラリの番号 `sound` の音の、`start` から `end` の前まで（`SOUND_RATE` の単位。
 /// `start < end ≤ 音の長さ`）を、キーフレームの始まりから鳴らす
@@ -211,10 +312,9 @@ impl SoundClip {
 
     /// 音のライブラリ `sounds` に照らして、正しい区間か（番号の音があり、`start < end ≤ 音の長さ`。読めない音は長さが
     /// 分からないので、長さは見ない）。区間を受け入れる判定はこれ1つ（読み込み・付ける所）
-    pub(crate) fn fits(&self, sounds: &[Arc<Sound>]) -> bool {
+    pub(crate) fn fits(&self, sounds: &SoundLibrary) -> bool {
         sounds
-            .iter()
-            .find(|s| s.id == self.sound)
+            .get(self.sound)
             .is_some_and(|s| self.start < self.end && (!s.readable || self.end <= s.len()))
     }
 }
@@ -339,7 +439,7 @@ fn collect_voices(
         path.push(layer.id);
         if let Some(c) = kf.sound {
             let pos = c.pos_at(frame - kf_start, doc.fps);
-            let sound = doc.sounds.iter().find(|s| s.id == c.sound);
+            let sound = doc.sounds.get(c.sound);
             if let (Some(pos), Some(sound)) = (pos, sound) {
                 out.push(Voice {
                     key: path.clone(),
@@ -357,7 +457,7 @@ fn collect_voices(
                     None => kf.cel.instances().iter().map(|i| i.binding).collect(),
                 };
             for b in bindings {
-                let Some(sym) = doc.library().iter().find(|s| s.id == b.symbol_id) else {
+                let Some(sym) = doc.library().get(b.symbol_id) else {
                     continue;
                 };
                 if let Some(inner) = sym.playing_internal_frame(b, kf_start, frame) {

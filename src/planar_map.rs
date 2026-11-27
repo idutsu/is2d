@@ -195,9 +195,11 @@ struct Seg {
 }
 
 impl PlanarMap {
-    /// 面の番号が `keep` にある面だけを残した地図（ほかの面の側は何も無いにし、両側とも何も無い辺と、辺の無い頂点を外す）。
+    /// テスト用（お手本：アプリは塊から作る `LayerBase::only_faces_map`・`restricted_local` を使う）：面の番号が `keep` に
+    /// ある面だけを残した地図（ほかの面の側は何も無いにし、両側とも何も無い辺と、辺の無い頂点を外す）。
     /// 正しい地図の面の一部はそのまま正しい地図で、残した面の輪郭も変わらない（頂点で次の辺を選ぶとき、残した面の
     /// 角の中に辺が増えることは無い）
+    #[cfg(test)]
     pub(crate) fn restricted(&self, keep: &HashSet<ShapeId>) -> PlanarMap {
         self.restricted_by(|id| keep.contains(&id))
     }
@@ -243,7 +245,9 @@ impl PlanarMap {
             )
     }
 
-    /// 面の番号と線の番号が `keep` に合う面と線だけを残した地図（`restricted`。辺の決まりは `restricted_sides`）
+    /// テスト用（お手本）：面の番号と線の番号が `keep` に合う面と線だけを残した地図（`restricted`。辺の決まりは
+    /// `restricted_sides`）
+    #[cfg(test)]
     pub(crate) fn restricted_by(&self, keep: impl Fn(ShapeId) -> bool) -> PlanarMap {
         let mut index: Vec<usize> = vec![usize::MAX; self.nodes.len()];
         let mut nodes: Vec<Point> = Vec::new();

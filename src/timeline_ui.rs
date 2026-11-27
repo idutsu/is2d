@@ -1909,7 +1909,7 @@ fn draw_sound_wave(
     let Some(clip) = layer.keyframes[kf_idx].sound else {
         return;
     };
-    let Some(sound) = doc.sounds.iter().find(|s| s.id == clip.sound) else {
+    let Some(sound) = doc.sounds.get(clip.sound) else {
         return;
     };
     let scroll_x = host.timeline_ui().scroll_x;

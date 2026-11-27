@@ -306,10 +306,8 @@ impl FloatLayer {
         stage: Stage<'_>,
         ids: &HashSet<ShapeId>,
     ) -> Option<CheckedMap> {
-        let start = self
-            .content(&stage.cel(self.layer_id)?)
-            .map()
-            .restricted(ids);
+        // 選んだ面だけで作る（手間は選んだ面の大きさ。前はセル画の地図全体を作ってから選んだ面を残した：全体の点検 2026-11-27）
+        let start = self.content(&stage.cel(self.layer_id)?).only_faces_map(ids, stage.scope);
         let groups = restricted_groups(&self.groups, ids, stage.scope);
         stacked(start, groups.iter().map(PieceGroup::placed_map))?.checked()
     }

@@ -852,7 +852,7 @@ impl ProjectDocument {
             timeline: saved_timeline,
             library: doc
                 .library()
-                .iter()
+                .iter_in_order()
                 .map(|s| SavedSymbolDef::from(&**s))
                 .collect(),
             next_symbol_id: doc.next_symbol_id,
@@ -1065,6 +1065,7 @@ impl ProjectDocument<ReadTiles> {
         let stage_size = crate::symbol::stage_size_of(Vec2::from(self.stage_size))
             .expect("読み込みの初めに有限か確かめてある");
         // キーフレームの音の区間は、どれも音のライブラリの音を指し、その音の長さに収まること（`SoundClip::fits`）
+        let sounds = crate::sound::SoundLibrary::from(sounds);
         let clips_fit = std::iter::once(&timeline)
             .chain(library.iter().map(|s| &s.timeline))
             .flat_map(|tl| tl.sound_clips())
@@ -1076,7 +1077,7 @@ impl ProjectDocument<ReadTiles> {
         let doc = Document::loaded(
             timeline,
             library.into_iter().map(Arc::new).collect(),
-            Arc::new(sounds),
+            sounds,
             stage_size,
             fps,
             sym_ids.next_to_save(self.next_symbol_id),

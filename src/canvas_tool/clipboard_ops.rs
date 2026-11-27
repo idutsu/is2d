@@ -266,11 +266,11 @@ fn collect_symbol_and_descendants(
         return;
     }
     visited.push(sym_id);
-    let Some(sym) = library.iter().find(|s| s.id == sym_id) else {
+    let Some(sym) = library.get(sym_id) else {
         return;
     };
-    for inst in sym.timeline.instances() {
-        collect_symbol_and_descendants(inst.binding.symbol_id, library, visited, out);
+    for &child in sym.children() {
+        collect_symbol_and_descendants(child, library, visited, out);
     }
     out.push(Arc::clone(sym));
 }
@@ -324,147 +324,136 @@ pub(in crate::canvas_tool) fn capture_clipboard_symbols(tab: &Tab, clipboard: &m
     for id in ids {
         collect_symbol_and_descendants(id, tab.doc.library(), &mut visited, &mut clipboard.symbols);
     }
-    clipboard.sounds = sounds_used_by(&tab.doc.sounds, &clipboard.symbols)
-        .cloned()
-        .collect();
+    clipboard.sounds = crate::sound::SoundLibrary::from(
+        sounds_used_by(&tab.doc.sounds, &clipboard.symbols).cloned().collect::<Vec<_>>(),
+    );
 }
 
 /// 音 `sounds` のうち、シンボル `symbols` のタイムラインの音の区間が指すもの
 fn sounds_used_by<'a>(
-    sounds: &'a [Arc<Sound>],
+    sounds: &'a crate::sound::SoundLibrary,
     symbols: &'a [Arc<SymbolDef>],
 ) -> impl Iterator<Item = &'a Arc<Sound>> {
-    sounds.iter().filter(|s| {
-        symbols
-            .iter()
-            .any(|sym| sym.timeline.sound_clips().any(|c| c.sound == s.id))
-    })
+    // シンボルが持つ音の番号を集めて、番号で引く（手間はコピーしたシンボルとその音の分）
+    let mut used: Vec<u64> = symbols.iter().flat_map(|sym| sym.sounds().iter().copied()).collect();
+    used.sort_unstable();
+    used.dedup();
+    used.into_iter().filter_map(move |id| sounds.get(id))
 }
 
-/// クリップボードのシンボル `src_sym_id` の代わりに使える、貼り先のタブのシンボルの番号を返す。
-/// 同じタブなら同じ番号のシンボルを使う。別のタブから前に移植した写しは、中身（`revision`）が同じで、
-/// 子もすべてそのまま使えるものを指しているときだけ使う
-fn existing_reusable_target_symbol_id(
-    tab: &Tab,
-    clipboard: &Clipboard,
-    src_sym_id: u64,
-) -> Option<u64> {
-    let target_doc_id = tab.id;
-    let source_doc_id = clipboard.source_doc_id;
-    if target_doc_id == source_doc_id {
-        if let Some(sym_def) = tab.doc.find_symbol(src_sym_id) {
-            return sym_def
-                .timeline
-                .instances()
-                .all(|inst| tab.doc.find_symbol(inst.binding.symbol_id).is_some())
-                .then_some(src_sym_id);
+/// 1回の貼り付けの中で使う、クリップボードのシンボルを番号で引く表と、「貼り先のどのシンボルを使い回せるか」の答えのメモ
+/// （同じシンボルを何度も調べ直さない。前はメモが無く、入れ子で同じ子を共有するシンボルを、たどる道の数だけ調べ直した：
+/// 全体の点検 2026-11-27。8段・各段5つのシンボルで 71ms かかった）。手間は貼るシンボルの数の分
+struct PasteLookup<'a> {
+    tab: &'a Tab,
+    clipboard: &'a Clipboard,
+    symbols: HashMap<u64, &'a Arc<SymbolDef>>,
+    reusable: std::cell::RefCell<HashMap<u64, Option<u64>>>,
+}
+
+impl<'a> PasteLookup<'a> {
+    fn new(tab: &'a Tab, clipboard: &'a Clipboard) -> Self {
+        Self {
+            tab,
+            clipboard,
+            symbols: clipboard.symbols.iter().map(|s| (s.id, s)).collect(),
+            reusable: Default::default(),
         }
     }
-    let src = clipboard.symbols.iter().find(|s| s.id == src_sym_id)?;
-    let candidate = *clipboard
-        .imported_map
-        .get(&(source_doc_id, src_sym_id, target_doc_id))?;
-    let target = tab
-        .doc
-        .find_symbol(candidate)
-        .filter(|t| t.revision == src.revision)?;
-    let target_children: HashSet<u64> = target
-        .timeline
-        .instances()
-        .map(|inst| inst.binding.symbol_id)
-        .collect();
-    let src_children: HashSet<u64> = src
-        .timeline
-        .instances()
-        .map(|inst| inst.binding.symbol_id)
-        .collect();
-    src_children
-        .into_iter()
-        .all(|child| {
-            existing_reusable_target_symbol_id(tab, clipboard, child)
-                .is_some_and(|id| target_children.contains(&id))
-        })
-        .then_some(candidate)
-}
 
-/// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキストに対して循環参照を起こさずに配置可能かを判定する：
-/// 中身を（貼り先のシンボルを使えるものは、そのシンボルの中身を）たどって、編集中のシンボルに行き着かないか
-/// （`symbol::reaches`。同じタブのクリップボードのシンボルは、同じ番号の文書のシンボルそのもの）
-pub(in crate::canvas_tool) fn can_paste_clipboard_symbol(
-    tab: &Tab,
-    clipboard: &Clipboard,
-    src_sym_id: u64,
-) -> bool {
-    /// たどる相手：クリップボードのシンボルか、貼り先の文書のシンボル
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    enum Node {
-        Clip(u64),
-        Doc(u64),
+    /// クリップボードの番号 `id` のシンボル
+    fn symbol(&self, id: u64) -> Option<&'a Arc<SymbolDef>> {
+        self.symbols.get(&id).copied()
     }
-    let levels = &tab.session.edit_path().levels;
-    if levels.is_empty() {
-        return true;
+
+    /// クリップボードのシンボル `src_sym_id` の代わりに使える、貼り先のタブのシンボルの番号。同じタブなら同じ番号の
+    /// シンボルを使う。別のタブから前に移植した写しは、中身（深い版）が同じで、子もすべてそのまま使えるものを指して
+    /// いるときだけ使う（答えはメモする）
+    fn reusable(&self, src_sym_id: u64) -> Option<u64> {
+        if let Some(&known) = self.reusable.borrow().get(&src_sym_id) {
+            return known;
+        }
+        let answer = self.find_reusable(src_sym_id);
+        self.reusable.borrow_mut().insert(src_sym_id, answer);
+        answer
     }
-    let same_doc = tab.id == clipboard.source_doc_id;
-    let node = |id: u64| {
-        existing_reusable_target_symbol_id(tab, clipboard, id).map_or(Node::Clip(id), Node::Doc)
-    };
-    let editing = |id: u64| levels.iter().any(|lvl| lvl.symbol_id == id);
-    !crate::symbol::reaches(
-        node(src_sym_id),
-        |n| match n {
-            Node::Doc(id) => editing(id),
-            Node::Clip(id) => same_doc && editing(id),
-        },
-        |n| match n {
-            Node::Doc(id) => tab
-                .doc
-                .child_symbol_ids(id)
-                .into_iter()
-                .map(Node::Doc)
-                .collect(),
-            Node::Clip(id) => {
-                clipboard
-                    .symbols
+
+    fn find_reusable(&self, src_sym_id: u64) -> Option<u64> {
+        let (tab, clipboard) = (self.tab, self.clipboard);
+        let target_doc_id = tab.id;
+        let source_doc_id = clipboard.source_doc_id;
+        if target_doc_id == source_doc_id {
+            if let Some(sym_def) = tab.doc.find_symbol(src_sym_id) {
+                return sym_def
+                    .children()
                     .iter()
-                    .find(|s| s.id == id)
-                    .map_or_else(Vec::new, |s| {
-                        s.timeline
-                            .instances()
-                            .map(|inst| node(inst.binding.symbol_id))
-                            .collect()
-                    })
+                    .all(|&child| tab.doc.find_symbol(child).is_some())
+                    .then_some(src_sym_id);
             }
-        },
-    )
-}
+        }
+        let src = self.symbol(src_sym_id)?;
+        let candidate = *clipboard.imported_map.get(&(source_doc_id, src_sym_id, target_doc_id))?;
+        let target = tab.doc.find_symbol(candidate).filter(|t| t.revision() == src.revision())?;
+        src.children()
+            .iter()
+            .all(|&child| self.reusable(child).is_some_and(|id| target.children().binary_search(&id).is_ok()))
+            .then_some(candidate)
+    }
 
-fn collect_needed_clipboard_imports(
-    tab: &Tab,
-    clipboard: &Clipboard,
-    src_sym_id: u64,
-    local_sym_map: &mut HashMap<u64, u64>,
-    needed_imports: &mut HashSet<u64>,
-    visited: &mut HashSet<u64>,
-) {
-    if !visited.insert(src_sym_id) {
-        return;
+    /// クリップボード内のシンボル `src_sym_id` が現在の編集コンテキストに対して循環参照を起こさずに配置可能か：中身を
+    /// （貼り先のシンボルを使えるものは、そのシンボルの中身を）たどって、編集中のシンボルに行き着かないか（`symbol::reaches`。
+    /// 同じタブのクリップボードのシンボルは、同じ番号の文書のシンボルそのもの）
+    fn can_paste(&self, src_sym_id: u64) -> bool {
+        /// たどる相手：クリップボードのシンボルか、貼り先の文書のシンボル
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        enum Node {
+            Clip(u64),
+            Doc(u64),
+        }
+        let tab = self.tab;
+        let levels = &tab.session.edit_path().levels;
+        if levels.is_empty() {
+            return true;
+        }
+        let same_doc = tab.id == self.clipboard.source_doc_id;
+        let node = |id: u64| self.reusable(id).map_or(Node::Clip(id), Node::Doc);
+        let editing = |id: u64| levels.iter().any(|lvl| lvl.symbol_id == id);
+        !crate::symbol::reaches(
+            node(src_sym_id),
+            |n| match n {
+                Node::Doc(id) => editing(id),
+                Node::Clip(id) => same_doc && editing(id),
+            },
+            |n| match n {
+                Node::Doc(id) => tab
+                    .doc
+                    .find_symbol(id)
+                    .map_or_else(Vec::new, |s| s.children().iter().map(|&c| Node::Doc(c)).collect()),
+                Node::Clip(id) => self.symbol(id).map_or_else(Vec::new, |s| s.children().iter().map(|&c| node(c)).collect()),
+            },
+        )
     }
-    if let Some(valid_id) = existing_reusable_target_symbol_id(tab, clipboard, src_sym_id) {
-        local_sym_map.insert(src_sym_id, valid_id);
-        return;
-    }
-    needed_imports.insert(src_sym_id);
-    if let Some(src_sym) = clipboard.symbols.iter().find(|s| s.id == src_sym_id) {
-        for inst in src_sym.timeline.instances() {
-            collect_needed_clipboard_imports(
-                tab,
-                clipboard,
-                inst.binding.symbol_id,
-                local_sym_map,
-                needed_imports,
-                visited,
-            );
+
+    /// 貼るのに移植が要るシンボルを集める（使い回せるものは `local_sym_map` に、要るものは `needed_imports` に）
+    fn collect_needed(
+        &self,
+        src_sym_id: u64,
+        local_sym_map: &mut HashMap<u64, u64>,
+        needed_imports: &mut HashSet<u64>,
+        visited: &mut HashSet<u64>,
+    ) {
+        if !visited.insert(src_sym_id) {
+            return;
+        }
+        if let Some(valid_id) = self.reusable(src_sym_id) {
+            local_sym_map.insert(src_sym_id, valid_id);
+            return;
+        }
+        needed_imports.insert(src_sym_id);
+        if let Some(src_sym) = self.symbol(src_sym_id) {
+            for &child in src_sym.children() {
+                self.collect_needed(child, local_sym_map, needed_imports, visited);
+            }
         }
     }
 }
@@ -477,17 +466,13 @@ pub(in crate::canvas_tool) fn pasteable_content(tab: &Tab, clipboard: &Clipboard
     };
     let mut had_cycle = false;
     let mut content = content.clone();
+    let lookup = PasteLookup::new(tab, clipboard);
     for (_, cel) in &mut content.layers {
-        if cel
-            .instances()
-            .iter()
-            .all(|i| can_paste_clipboard_symbol(tab, clipboard, i.binding.symbol_id))
-        {
+        if cel.instances().iter().all(|i| lookup.can_paste(i.binding.symbol_id)) {
             continue;
         }
         had_cycle = true;
-        cel.instances_mut()
-            .retain(|i| can_paste_clipboard_symbol(tab, clipboard, i.binding.symbol_id));
+        cel.instances_mut().retain(|i| lookup.can_paste(i.binding.symbol_id));
     }
     content.layers.retain(|(_, c)| !c.is_empty());
     ((!content.layers.is_empty()).then_some(content), had_cycle)
@@ -507,16 +492,12 @@ pub(in crate::canvas_tool) fn import_clipboard_symbols(
     let target_doc_id = tab.id;
     let source_doc_id = clipboard.source_doc_id;
     let mut needed_imports: HashSet<u64> = HashSet::new();
-    let mut visited: HashSet<u64> = HashSet::new();
-    for id in content.symbol_ids() {
-        collect_needed_clipboard_imports(
-            tab,
-            clipboard,
-            id,
-            &mut local_sym_map,
-            &mut needed_imports,
-            &mut visited,
-        );
+    {
+        let lookup = PasteLookup::new(tab, clipboard);
+        let mut visited: HashSet<u64> = HashSet::new();
+        for id in content.symbol_ids() {
+            lookup.collect_needed(id, &mut local_sym_map, &mut needed_imports, &mut visited);
+        }
     }
 
     // 移植するシンボルの音の区間が指す音を、貼り先の音のライブラリに入れる（同じ音があればそれを使う）
@@ -555,9 +536,7 @@ pub(in crate::canvas_tool) fn import_clipboard_symbols(
 
         imported.id = new_id;
         let base = std::mem::take(&mut imported.name);
-        imported.name = tab.doc.unused_symbol_name(
-            std::iter::once(base.clone()).chain((2u64..).map(|n| format!("{base} ({n})"))),
-        );
+        imported.name = tab.doc.numbered_name(Some(&base), crate::symbol::NumberForm::Paren, &base, 2);
         remap_timeline_ids(
             &mut imported.timeline,
             &mut tab.doc,

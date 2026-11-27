@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::chunked_list::{ChunkedList, Keyed};
+use crate::chunked_list::{Chunk, ChunkedList, Keyed};
 use crate::project_io::{ProjectDocument, SavedKeyframe, SavedLayer, SavedSound, SavedSymbolDef, SavedTimeline};
 use crate::sound::{Sound, SoundLibrary};
 use crate::stored_map::{ReadTiles, SavedStroke, SavedTile, WriteTiles};
-use crate::symbol::{Document, SymbolDef};
+use crate::symbol::{Document, Slot, SymbolDef};
 use crate::timeline::{Keyframe, Timeline};
 
 /// 書き足すファイルの頭の印（`.is2d` の頭とは違う）
@@ -46,8 +46,10 @@ enum Record {
     },
     /// レイヤーのキーフレームの並び（番号 `id`）：キーフレームの塊の番号と、その塊の基準
     Keyframes { id: u64, chunks: Vec<(u64, i64)> },
-    /// ライブラリの塊（番号 `id`）：シンボル
+    /// ライブラリの塊（番号 `id`）：シンボル（番号の順）
     Symbols { id: u64, symbols: Vec<JournalSymbol> },
+    /// ライブラリの見せる順の塊（番号 `id`）：シンボルの番号
+    Order { id: u64, ids: Vec<u64> },
     /// 目録（作品の一番上）。最後の目録が今の作品
     Manifest(Manifest),
     /// 保存した（最後の記録がこれなら、復元するものは無い：`is_saved`）
@@ -63,8 +65,9 @@ struct Manifest {
     next_sound_id: u64,
     recovery_source: Option<PathBuf>,
     timeline: JournalTimeline,
-    /// ライブラリの塊の番号の並び
+    /// ライブラリの塊の番号の並びと、見せる順の塊の番号の並び
     library: Vec<u64>,
+    order: Vec<u64>,
     /// 音のライブラリの番号
     sounds: u64,
 }
@@ -110,9 +113,10 @@ pub(crate) struct Journal {
     /// 書いた音・音のライブラリ・キーフレームの塊・キーフレームの並び・ライブラリの塊
     sounds: Written<Arc<Sound>>,
     sound_lists: Written<SoundLibrary>,
-    chunks: Written<Arc<Vec<Arc<Keyframe>>>>,
+    chunks: Written<Chunk<Keyframe>>,
     keyframe_lists: Written<ChunkedList<Keyframe>>,
-    symbol_chunks: Written<Arc<Vec<Arc<SymbolDef>>>>,
+    symbol_chunks: Written<Chunk<SymbolDef>>,
+    order_chunks: Written<Chunk<Slot>>,
     /// 次に振る番号
     next_id: u64,
     /// 全体を書いた量と、そのあと書き足した量（バイト）
@@ -135,6 +139,7 @@ impl Journal {
             chunks: Written::default(),
             keyframe_lists: Written::default(),
             symbol_chunks: Written::default(),
+            order_chunks: Written::default(),
             next_id: 1,
             snapshot: 0,
             appended: 0,
@@ -200,8 +205,12 @@ impl Journal {
         let sounds = self.sound_list(out, &doc.sounds, &mut written)?;
         let timeline = self.timeline(out, &doc.root, &mut written)?;
         let mut library = Vec::new();
-        for (c, _) in doc.library().chunks_with_bases() {
+        for c in doc.library().def_chunks() {
             library.push(self.symbol_chunk(out, c, &mut written)?);
+        }
+        let mut order = Vec::new();
+        for c in doc.library().order_chunks() {
+            order.push(self.order_chunk(out, c, &mut written)?);
         }
         let manifest = Manifest {
             stage_size: [doc.stage_size.x, doc.stage_size.y],
@@ -212,6 +221,7 @@ impl Journal {
             recovery_source: source.map(Path::to_path_buf),
             timeline,
             library,
+            order,
             sounds,
         };
         written += write_record(out, &Record::Manifest(manifest))?;
@@ -220,7 +230,7 @@ impl Journal {
 
     /// 音のライブラリ `lib` の番号（まだ書いていなければ、新しい音と並びを書く）
     fn sound_list(&mut self, out: &mut impl Write, lib: &SoundLibrary, written: &mut u64) -> std::io::Result<u64> {
-        let key = Arc::as_ptr(lib) as *const () as usize;
+        let key = lib.address();
         if let Some((id, _)) = self.sound_lists.ids.get(&key) {
             return Ok(*id);
         }
@@ -238,7 +248,7 @@ impl Journal {
     }
 
     /// ライブラリの塊 `c` の番号（まだ書いていなければ、シンボルのタイムラインの変わった所と、塊を書く）
-    fn symbol_chunk(&mut self, out: &mut impl Write, c: &Arc<Vec<Arc<SymbolDef>>>, written: &mut u64) -> std::io::Result<u64> {
+    fn symbol_chunk(&mut self, out: &mut impl Write, c: &Chunk<SymbolDef>, written: &mut u64) -> std::io::Result<u64> {
         let key = Arc::as_ptr(c) as usize;
         if let Some((id, _)) = self.symbol_chunks.ids.get(&key) {
             return Ok(*id);
@@ -251,6 +261,18 @@ impl Journal {
         let id = self.new_id();
         *written += write_record(out, &Record::Symbols { id, symbols })?;
         self.symbol_chunks.ids.insert(key, (id, c.clone()));
+        Ok(id)
+    }
+
+    /// ライブラリの見せる順の塊 `c` の番号（まだ書いていなければ書く）
+    fn order_chunk(&mut self, out: &mut impl Write, c: &Chunk<Slot>, written: &mut u64) -> std::io::Result<u64> {
+        let key = Arc::as_ptr(c) as usize;
+        if let Some((id, _)) = self.order_chunks.ids.get(&key) {
+            return Ok(*id);
+        }
+        let id = self.new_id();
+        *written += write_record(out, &Record::Order { id, ids: c.iter().map(|s| s.0).collect() })?;
+        self.order_chunks.ids.insert(key, (id, c.clone()));
         Ok(id)
     }
 
@@ -282,7 +304,7 @@ impl Journal {
 
     /// キーフレームの塊 `c` の番号（まだ書いていなければ、その塊と、塊が使う新しい地図の塊を書く。地図の塊は塊ごとに
     /// 書くので、全体を書くときも、一時に持つのは1つの塊が使う分だけ）
-    fn chunk(&mut self, out: &mut impl Write, c: &Arc<Vec<Arc<Keyframe>>>, written: &mut u64) -> std::io::Result<u64> {
+    fn chunk(&mut self, out: &mut impl Write, c: &Chunk<Keyframe>, written: &mut u64) -> std::io::Result<u64> {
         let key = Arc::as_ptr(c) as usize;
         if let Some((id, _)) = self.chunks.ids.get(&key) {
             return Ok(*id);
@@ -356,6 +378,7 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
     let mut chunks: HashMap<u64, (Vec<i64>, Vec<SavedKeyframe>)> = HashMap::new();
     let mut keyframe_lists: HashMap<u64, Vec<(u64, i64)>> = HashMap::new();
     let mut symbol_chunks: HashMap<u64, Vec<JournalSymbol>> = HashMap::new();
+    let mut order_chunks: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut manifest = None;
     let mut at = rest;
     while at.len() >= 8 {
@@ -387,6 +410,9 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
             Record::Symbols { id, symbols } => {
                 symbol_chunks.insert(id, symbols);
             }
+            Record::Order { id, ids } => {
+                order_chunks.insert(id, ids);
+            }
             Record::Manifest(m) => manifest = Some(m),
             Record::Saved => {}
         }
@@ -410,9 +436,17 @@ pub(crate) fn read(path: &Path) -> Result<ProjectDocument<ReadTiles>, String> {
         Some(SavedTimeline { layers, ..jt.header.clone() })
     };
     let root = SavedTimeline { fps: m.fps, ..timeline(&m.timeline).ok_or_else(broken)? };
-    let mut library = Vec::new();
+    // シンボルを番号で引けるようにしてから、見せる順に並べる
+    let mut by_id: HashMap<u64, &JournalSymbol> = HashMap::new();
     for id in &m.library {
         for s in symbol_chunks.get(id).ok_or_else(broken)? {
+            by_id.insert(s.id, s);
+        }
+    }
+    let mut library = Vec::with_capacity(by_id.len());
+    for id in &m.order {
+        for sym_id in order_chunks.get(id).ok_or_else(broken)? {
+            let s = by_id.get(sym_id).ok_or_else(broken)?;
             let timeline = timeline(&s.timeline).ok_or_else(broken)?;
             library.push(SavedSymbolDef { id: s.id, name: s.name.clone(), timeline });
         }

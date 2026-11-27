@@ -2696,8 +2696,8 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
     let sym_id =
         doc_actions::convert_selection_to_symbol(&mut app).expect("シンボル変換が成功すること");
     assert_eq!(app.doc.library().len(), 1);
-    assert_eq!(app.doc.library()[0].id, sym_id);
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
+    assert_eq!(app.doc.library().at(0).unwrap().id, sym_id);
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
     assert!(symbol_ops::selected_single_symbol_info(&app).is_some());
 
     assert!(doc_actions::place_symbol_instance_from_library(
@@ -2739,7 +2739,7 @@ fn test_symbol_conversion_library_placement_and_inplace_sync() {
 
     assert!(select_ops::exit_current_group(&mut app));
     assert!(app.session.edit_path().is_empty());
-    assert_eq!(app.doc.library()[0].timeline.total_frames, 2);
+    assert_eq!(app.doc.library().at(0).unwrap().timeline.total_frames, 2);
 
     assert!(doc_actions::timeline_extend_frame(&mut app));
     assert!(doc_actions::timeline_extend_frame(&mut app));
@@ -3487,11 +3487,11 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     assert_eq!(scene_summary(&sym_app).len, 1);
     assert!(scene_summary(&sym_app).shapes[0].contains_point(Point::new(230.0, 200.0)));
 
-    let _ = sym_app.doc.library()[0].timeline.layers[0].keyframes[0]
+    let _ = sym_app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes()[0]
         .fill_mesh();
-    assert!(sym_app.doc.library()[0].timeline.layers[0].keyframes[0]
+    assert!(sym_app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes()[0]
         .has_cached_fill_mesh());
@@ -3504,8 +3504,8 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
     );
     let last_undo = sym_app.history.undo_stack.back().unwrap();
     assert!(std::sync::Arc::ptr_eq(
-        &last_undo.library[0].timeline.layers[0].keyframes[0],
-        &sym_app.doc.library()[0].timeline.layers[0].keyframes[0]
+        &last_undo.library.at(0).unwrap().timeline.layers[0].keyframes[0],
+        &sym_app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0]
     ));
     sym_app.undo();
     assert_eq!(sym_app.doc.stage_size, orig_stage);
@@ -3528,7 +3528,7 @@ fn test_normalized_cel_instances_empty_symbol_revival_and_undo_cache_stripping()
         app.view
             .symbol_previews
             .with(
-                &app.doc.library()[0],
+                app.doc.library().at(0).unwrap(),
                 &app.doc,
                 |b, m| (b, m.clone()),
             )
@@ -3652,14 +3652,14 @@ fn library_preview_holds_only_the_symbol_being_drawn() {
         ),
     );
     run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     run(&mut app, &[Action::DuplicateSymbol { sym_id }]);
     assert_eq!(app.doc.library().len(), 2);
     let preview = |app: &Is2dApp, i: usize| {
         app.view
             .symbol_previews
             .with(
-                &app.doc.library()[i],
+                app.doc.library().at(i).unwrap(),
                 &app.doc,
                 |b, _| b,
             )
@@ -4613,9 +4613,11 @@ fn test_keyframe_list_matches_plain_vec() {
                 *f = (*f as i64 + delta) as usize;
             }
         } else {
-            let m = 2 + (r.f() * 5.0) as usize;
-            list.retain_keyed(|f, _| f % m != 0);
-            plain.retain(|f| f % m != 0);
+            // 番号の範囲を消す（`remove_range`）
+            let a = (r.f() * plain.len() as f64) as usize % plain.len();
+            let b = a + (r.f() * (plain.len() - a + 1) as f64) as usize % (plain.len() - a + 1);
+            list.remove_range(a..b);
+            plain.drain(a..b);
         }
         assert_eq!(list.len(), plain.len(), "step {step}");
         if step % 97 == 0 {
@@ -6160,7 +6162,7 @@ fn renaming_a_symbol_keeps_its_content_version() {
     put_cel_shapes(&mut app, 0, 0, make_stroke(Point::new(100.0, 100.0), Point::new(240.0, 100.0), 16.0, Color32::BLUE));
     app.session.set_selected_indices(vec![0]);
     let sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
-    let versions = |app: &Is2dApp| (app.doc.find_symbol(sym_id).unwrap().revision, app.doc.revision);
+    let versions = |app: &Is2dApp| (app.doc.find_symbol(sym_id).unwrap().revision(), app.doc.revision);
     let before = versions(&app);
     assert!(doc_actions::rename_symbol_in_library(&mut app, sym_id, "Hero"));
     assert_eq!(app.doc.find_symbol(sym_id).unwrap().name, "Hero");
@@ -6249,9 +6251,10 @@ fn test_nested_static_child_symbol_is_not_treated_as_dynamic_blank_frame() {
         std::sync::Arc::new(sym_parent),
         std::sync::Arc::new(sym_child),
     ]
-    .into();
+    .into_iter()
+    .collect();
     assert!(
-        !lib[0].has_dynamic_animation(&lib),
+        !lib.at(0).unwrap().has_dynamic_animation(),
         "Frame 0 に shapes が無くても単一フレームの子シンボルインスタンスが存在する場合は空白フレームと誤判定されないこと"
     );
 }
@@ -8641,9 +8644,9 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     assert_ne!(app.doc.root.layers[0].id, app.doc.root.layers[1].id);
     assert!(app.doc.root.layers[0].id <= project_io::MAX_SAFE_ENTITY_ID);
     assert!(app.doc.root.layers[1].id <= project_io::MAX_SAFE_ENTITY_ID);
-    assert_ne!(app.doc.library()[0].id, app.doc.library()[1].id);
-    assert!(app.doc.library()[0].id <= project_io::MAX_SAFE_ENTITY_ID);
-    assert!(app.doc.library()[1].id <= project_io::MAX_SAFE_ENTITY_ID);
+    assert_ne!(app.doc.library().at(0).unwrap().id, app.doc.library().at(1).unwrap().id);
+    assert!(app.doc.library().at(0).unwrap().id <= project_io::MAX_SAFE_ENTITY_ID);
+    assert!(app.doc.library().at(1).unwrap().id <= project_io::MAX_SAFE_ENTITY_ID);
 
     // 読み込み後に新規レイヤー・新規シンボル・新規グループIDを追加しても既存IDと一切衝突しないこと (#13)
     doc_actions::timeline_add_layer(&mut app);
@@ -8658,8 +8661,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
     let new_sym_id = app.doc.register_new_symbol(Vec::new());
     assert!(
         app.doc
-            .library()
-            .iter()
+            .library().iter_in_order()
             .filter(|s| s.id == new_sym_id)
             .count()
             == 1,
@@ -9890,7 +9892,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
             "case {case_idx}: current_frame が total_frames 未満に収まること"
         );
         let mut has_cycle = false;
-        for sym in app.doc.library().iter() {
+        for sym in app.doc.library().iter_in_order() {
             assert!(
                 sym.id >= 1,
                 "case {case_idx}: シンボルIDが 1 以上に正規化されること"
@@ -11674,7 +11676,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
             Action::ConvertToSymbol,
         ],
     );
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     let orig_local_shape = app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes()[0]
@@ -11860,7 +11862,7 @@ fn test_stage6b_timeline_ops_f6_f7_add_layer_inside_symbol_modify_library_symbol
             Action::ConvertToSymbol,
         ],
     );
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
 
     run(
@@ -11922,7 +11924,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
             },
         ],
     );
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
 
     // 2. シンボルに入って内部でストローク描画＋F6 キーフレーム挿入
@@ -13158,7 +13160,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
 
     // 1. シンボルの中で set_active_frame / set_active_layer / set_active_cell_selection を呼んでも doc.revision が変わらないこと
     let doc_rev_before = app.doc.revision;
-    let sym_rev_before = app.doc.library()[0].revision;
+    let sym_rev_before = app.doc.library().at(0).unwrap().revision();
     assert!(app.tabs[app.active].set_active_frame(0));
     assert!(app.tabs[app.active].set_active_frame(1));
     assert!(app.tabs[app.active].set_active_frame(2));
@@ -13169,7 +13171,7 @@ fn test_stage7_set_active_frame_and_per_layer_backdrop_cache() {
         "シンボル内で set_active_frame 等を呼んでも doc.revision が変わらないこと"
     );
     assert_eq!(
-        app.doc.library()[0].revision, sym_rev_before,
+        app.doc.library().at(0).unwrap().revision(), sym_rev_before,
         "シンボル内で set_active_frame 等を呼んでもシンボルの revision が変わらないこと"
     );
 
@@ -13297,13 +13299,13 @@ fn test_collapsed_symbol_instance_blocks_enter_and_timeline_mut_bumps_revision_o
         normal_binding.instance_gid
     ));
     assert_eq!(app.session.edit_path().levels.len(), 1);
-    let sym_rev_before = app.doc.library()[0].revision;
+    let sym_rev_before = app.doc.library().at(0).unwrap().revision();
     let doc_rev_before = app.doc.revision;
     app.tabs[app.active].with_active_timeline_mut(|_tl, _| {});
-    assert_eq!(app.doc.library()[0].revision, sym_rev_before, "何も変えないのにシンボルの版が上がった");
+    assert_eq!(app.doc.library().at(0).unwrap().revision(), sym_rev_before, "何も変えないのにシンボルの版が上がった");
     assert_eq!(app.doc.revision, doc_rev_before, "何も変えないのに文書の版が上がった");
     app.tabs[app.active].with_active_timeline_mut(|tl, _| tl.layers[0].name.push('x'));
-    assert_ne!(app.doc.library()[0].revision, sym_rev_before, "中身を変えたらシンボルの版が上がること");
+    assert_ne!(app.doc.library().at(0).unwrap().revision(), sym_rev_before, "中身を変えたらシンボルの版が上がること");
     assert_ne!(app.doc.revision, doc_rev_before, "中身を変えたら文書の版も上がること");
 }
 
@@ -13326,7 +13328,7 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     app.session.replace_selection(crate::canvas_tool::Selection::default());
     { let mut sel = app.session.selection().clone(); sel.insert_shape(&first); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
-    let outer_id = app.doc.library()[0].id;
+    let outer_id = app.doc.library().at(0).unwrap().id;
     let local_box = |app: &Is2dApp, sym_id: u64| {
         let def = app.doc.find_symbol(sym_id).unwrap();
         let cel = def.timeline.layers[0].cel_at(0).unwrap();
@@ -13358,7 +13360,7 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     app.session.replace_selection(crate::canvas_tool::Selection::default());
     { let mut sel = app.session.selection().clone(); sel.insert_shape(&inner); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
-    let new_id = app.doc.library().last().unwrap().id;
+    let new_id = app.doc.library().iter_in_order().last().unwrap().id;
     assert_ne!(new_id, outer_id);
 
     // 中身の大きさは、外のシンボルの中での大きさのまま（ステージ上の 1.5 倍・回転した大きさではない）
@@ -13521,7 +13523,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             apply(&mut app, Action::ConvertToSymbol),
             "8段目までのシンボル化は成功すること"
         );
-        let id = app.doc.library().last().unwrap().id;
+        let id = app.doc.library().iter_in_order().last().unwrap().id;
         chain_sym_ids.push(id);
     }
     assert_eq!(app.doc.library().len(), 8);
@@ -13581,7 +13583,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         apply(&mut app, Action::ConvertToSymbol),
         "単段シンボルの作成は成功すること"
     );
-    let host_sym_id = app.doc.library().last().unwrap().id;
+    let host_sym_id = app.doc.library().iter_in_order().last().unwrap().id;
     assert_eq!(app.doc.library().len(), 9);
     let _ = apply(
         &mut app,
@@ -14607,7 +14609,7 @@ fn test_g3_5_document_single_fps_inside_symbol_undo_redo_and_save() {
     );
     let _ = apply(&mut app, Action::SelectAll);
     let _ = apply(&mut app, Action::ConvertToSymbol);
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
 
     // シンボルの中に入る
     assert!(symbol_ops::enter_symbol_from_library(&mut app, sym_id));
@@ -14651,29 +14653,29 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     );
     let _ = apply(&mut app, Action::SelectAll);
     let _ = apply(&mut app, Action::ConvertToSymbol);
-    let sym_id = app.doc.library()[0].id;
-    let rev_before = app.doc.library()[0].revision;
+    let sym_id = app.doc.library().at(0).unwrap().id;
+    let rev_before = app.doc.library().at(0).unwrap().revision();
     let doc_rev_before = app.doc.revision;
-    let total_before = app.doc.library()[0].timeline.total_frames;
-    let next_num_before = app.doc.library()[0].timeline.next_layer_number;
-    let next_id_before = app.doc.library()[0].timeline.next_layer_id;
+    let total_before = app.doc.library().at(0).unwrap().timeline.total_frames;
+    let next_num_before = app.doc.library().at(0).unwrap().timeline.next_layer_number;
+    let next_id_before = app.doc.library().at(0).unwrap().timeline.next_layer_id;
     assert_eq!(total_before, 1);
     assert_eq!(next_num_before, 2);
     assert_eq!(next_id_before, 2);
 
     // シンボルへの出入りで SymbolDef の内容やリビジョンが変わらないこと
     assert!(symbol_ops::enter_symbol_from_library(&mut app, sym_id));
-    assert_eq!(app.doc.library()[0].revision, rev_before);
+    assert_eq!(app.doc.library().at(0).unwrap().revision(), rev_before);
     assert_eq!(app.doc.revision, doc_rev_before);
     assert!(symbol_ops::exit_symbol_timeline(&mut app));
-    assert_eq!(app.doc.library()[0].revision, rev_before);
+    assert_eq!(app.doc.library().at(0).unwrap().revision(), rev_before);
     assert_eq!(app.doc.revision, doc_rev_before);
-    assert_eq!(app.doc.library()[0].timeline.total_frames, total_before);
+    assert_eq!(app.doc.library().at(0).unwrap().timeline.total_frames, total_before);
     assert_eq!(
-        app.doc.library()[0].timeline.next_layer_number,
+        app.doc.library().at(0).unwrap().timeline.next_layer_number,
         next_num_before
     );
-    assert_eq!(app.doc.library()[0].timeline.next_layer_id, next_id_before);
+    assert_eq!(app.doc.library().at(0).unwrap().timeline.next_layer_id, next_id_before);
 
     // 不正な total_frames=0, next_layer_number=0, next_layer_id=0 を持つファイルを読み込んだ時点で正規化されていること
     let mut pd = project_io::ProjectDocument::from_app(&app).unwrap();
@@ -14682,9 +14684,9 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     pd.library[0].timeline.next_layer_id = 0;
     pd.library[0].timeline.layers[0].frame_count = 0;
     let loaded_doc = pd.into_document().unwrap();
-    assert!(loaded_doc.library()[0].timeline.total_frames >= 1);
-    assert!(loaded_doc.library()[0].timeline.next_layer_number >= 2);
-    assert!(loaded_doc.library()[0].timeline.next_layer_id >= 2);
+    assert!(loaded_doc.library().at(0).unwrap().timeline.total_frames >= 1);
+    assert!(loaded_doc.library().at(0).unwrap().timeline.next_layer_number >= 2);
+    assert!(loaded_doc.library().at(0).unwrap().timeline.next_layer_id >= 2);
 }
 
 #[test]
@@ -14826,7 +14828,7 @@ fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries()
     assert_eq!(app.history.undo_stack.len(), base + 2);
 
     let _ = apply(&mut app, Action::ConvertToSymbol);
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     let _ = apply(&mut app, Action::EnterSymbolFromLibrary { sym_id });
     let _ = apply(&mut app, Action::ExtendFrame);
     let _ = apply(&mut app, Action::ExtendFrame);
@@ -15428,7 +15430,7 @@ fn test_g6_2_writeback_copies_only_geometry_caches_and_no_screen_caches() {
     }
     let _ = apply(&mut app, Action::ConvertToSymbol);
     assert_eq!(app.doc.library().len(), 1);
-    for s in app.doc.library()[0].timeline.layers[0].keyframes[0]
+    for s in app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0]
         .cel
         .shapes()
         .iter()
@@ -15563,7 +15565,7 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     );
     let _ = apply(&mut app2, Action::SelectAll);
     let _ = apply(&mut app2, Action::ConvertToSymbol);
-    let sym_b_id = app2.doc.library()[0].id;
+    let sym_b_id = app2.doc.library().at(0).unwrap().id;
 
     let _ = apply(
         &mut app2,
@@ -15576,7 +15578,7 @@ fn test_m2_1_ungroup_multi_shape_and_nested_symbol_detaches_all_shapes() {
     let _ = apply(&mut app2, Action::SelectAll);
     let _ = apply(&mut app2, Action::ConvertToSymbol);
     assert_eq!(app2.doc.library().len(), 2);
-    let sym_a_id = app2.doc.library()[1].id;
+    let sym_a_id = app2.doc.library().at(1).unwrap().id;
     assert_ne!(sym_a_id, sym_b_id);
     assert_eq!(app2.doc.root.layers[0].keyframes[0].cel.instances().len(), 1);
     assert_eq!(
@@ -15613,7 +15615,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
     let _ = apply(&mut app, Action::SelectAll);
     let _ = apply(&mut app, Action::Copy);
     let _ = apply(&mut app, Action::ConvertToSymbol);
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
 
     // シンボル内を 8 コマのループアニメにする
     let _ = apply(&mut app, Action::EnterSymbolFromLibrary { sym_id });
@@ -15621,7 +15623,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
         let _ = apply(&mut app, Action::ExtendFrame);
     }
     let _ = apply(&mut app, Action::ExitSymbolTimeline);
-    assert_eq!(app.doc.library()[0].timeline.total_frames, 8);
+    assert_eq!(app.doc.library().at(0).unwrap().timeline.total_frames, 8);
 
     // ルートタイムラインで Frame 0..=4 の完成したクラシックトゥイーンを作成（開始 first_frame = 1）
     app.doc.root.layers[0].keyframe_mut(0).cel.instances_mut()[0]
@@ -16284,7 +16286,7 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
                     .any(|kf| kf.cel.shapes().iter().any(|s| s.has_cached_hit_bez_path()))
             })
         };
-        tl_has_hit(&doc.root) || doc.library().iter().any(|sym| tl_has_hit(&sym.timeline))
+        tl_has_hit(&doc.root) || doc.library().iter_in_order().any(|sym| tl_has_hit(&sym.timeline))
     };
     let _ = apply(&mut app, Action::ScrubRulerToFrame { frame: 2 });
     for s in app.scene().iter() {
@@ -16849,7 +16851,7 @@ fn test_m3_3_tween_kept_on_and_incomplete_on_draw_paste_save_delete_and_toggle_o
     let _ = apply(&mut app, Action::SelectAll);
     let _ = apply(&mut app, Action::Copy);
     let _ = apply(&mut app, Action::ConvertToSymbol);
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     let _ = apply(&mut app, Action::ToggleTween);
     for _ in 0..4 {
         let _ = apply(&mut app, Action::ExtendFrame);
@@ -17778,7 +17780,7 @@ fn test_arrange_groups_and_symbols_z_order() {
             },
         );
         apply(&mut app, Action::ConvertToSymbol);
-        let sym_id = app.tab().doc.library()[0].id;
+        let sym_id = app.tab().doc.library().at(0).unwrap().id;
         assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
         apply(&mut app, Action::ClearActiveFrame);
         setup_four_items(&mut app);
@@ -18346,8 +18348,8 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
         Some((s.clone(), q, rng.f64_range(0.1, 0.9)))
     };
     let contour_pt = |rng: &mut OpRng| on_contour(rng).map_or_else(|| pt(rng), |(_, q, t)| q.eval(t));
-    let sym_id = |rng: &mut OpRng| tab.doc.library().get(rng.range(tab.doc.library().len())).map_or(999, |s| s.id);
-    let sound_id = |rng: &mut OpRng| tab.doc.sounds.get(rng.range(tab.doc.sounds.len())).map_or(999, |s| s.id);
+    let sym_id = |rng: &mut OpRng| tab.doc.library().at(rng.range(tab.doc.library().len())).map_or(999, |s| s.id);
+    let sound_id = |rng: &mut OpRng| tab.doc.sounds.at(rng.range(tab.doc.sounds.len())).map_or(999, |s| s.id);
     let layer = |rng: &mut OpRng| rng.range(tl.layers.len() + 1);
     let frame = |rng: &mut OpRng| rng.range(tl.total_frames + 2);
     let selected = tab.session.selected_indices();
@@ -18549,7 +18551,7 @@ fn picture_summary_of(doc: &symbol::Document, with_lines: bool) -> Vec<String> {
         }
     };
     timeline("root".into(), &doc.root);
-    for sym in doc.library().iter() {
+    for sym in doc.library().iter_in_order() {
         timeline(format!("sym{} {}", sym.id, sym.name), &sym.timeline);
     }
     out
@@ -18624,6 +18626,10 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             let picture_before = app.tab().committed_document_copy().map(|d| picture_summary_of(&d, !commits_part));
             let res = apply(&mut app, action);
             assert!(app.tab().history.before.is_none(), "{ctx}: 操作の前の写しが残った");
+            // ライブラリの表（見せる順・名前・使われ方・子・音・高さ・動くか）は、全部から作り直したもの（お手本）と同じ
+            if let Err(e) = app.tab().doc().library().check_tables() {
+                panic!("{ctx}: ライブラリの表がお手本と違う：{e}");
+            }
             let after = content(&saved(&app, &ctx));
             let after_undo = app.tab().history.undo_stack.len();
             let after_redo = app.tab().history.redo_stack.len();
@@ -18713,7 +18719,7 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
                 }
             }
         }
-        for sym in doc.library().iter() {
+        for sym in doc.library().iter_in_order() {
             for layer in &sym.timeline.layers {
                 for kf in &layer.keyframes {
                     for sh in kf.cel.shapes().iter() {
@@ -19448,7 +19454,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         );
         app.session.set_selected_indices(vec![0]);
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_b_id = app.doc.library()[0].id;
+        let sym_b_id = app.doc.library().at(0).unwrap().id;
 
         // B のタイムラインを 4 コマ（c0, c1, c2, c3）にする
         assert!(apply(
@@ -19482,7 +19488,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         ));
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_a_id = app.doc.library()[1].id;
+        let sym_a_id = app.doc.library().at(1).unwrap().id;
 
         if a_total_frames > 1 {
             write_symbol(&mut app.doc, sym_a_id, |tl| {
@@ -19501,8 +19507,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
         let orig_b_in_a = app
             .doc
-            .library()
-            .iter()
+            .library().iter_in_order()
             .find(|s| s.id == sym_a_id)
             .unwrap()
             .timeline
@@ -19551,7 +19556,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 4. 分解した直後の表示コマが合う: (a) A が1コマで F=5、(b) A が4コマループで F=10
     for (a_frames, target_f) in [(1usize, 5usize), (4usize, 10usize)] {
         let (mut app, _, sym_b_id) = build_nested_app(a_frames);
-        app.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app.doc.library().at(1).unwrap().id;
+        app.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.first_frame = 1
         });
         app.refresh_scene_base();
@@ -19661,10 +19667,12 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 6 & 7. 1回再生の B（合わせられる場合と負になって 0 になる場合）および任意のフレームの B
     {
         let (mut app, _, _) = build_nested_app(4);
-        app.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app.doc.library().at(1).unwrap().id;
+        app.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.loop_mode = SymbolLoopMode::PlayOnce;
         });
-        app.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app.doc.library().at(1).unwrap().id;
+        app.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.first_frame = 2;
         });
         app.refresh_scene_base();
@@ -19686,10 +19694,12 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // B の進み(1) - (F - S)(5) < 0 のとき 1回再生は first_frame が 0 になる
         let (mut app_neg, _, _) = build_nested_app(4);
-        app_neg.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app_neg.doc.library().at(1).unwrap().id;
+        app_neg.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.loop_mode = SymbolLoopMode::PlayOnce;
         });
-        app_neg.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app_neg.doc.library().at(1).unwrap().id;
+        app_neg.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.first_frame = 0;
         });
         app_neg.refresh_scene_base();
@@ -19711,10 +19721,12 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
 
         // 7. 任意のフレームの B は first_frame が変わらない
         let (mut app_sf, _, _) = build_nested_app(4);
-        app_sf.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app_sf.doc.library().at(1).unwrap().id;
+        app_sf.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.loop_mode = SymbolLoopMode::SingleFrame;
         });
-        app_sf.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app_sf.doc.library().at(1).unwrap().id;
+        app_sf.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.first_frame = 2;
         });
         app_sf.refresh_scene_base();
@@ -19776,7 +19788,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 9. 色効果のリセット: A にアルファ 50%・明度 +30%、B にアルファ 30% をかけて分解
     {
         let (mut app, _, sym_b_id) = build_nested_app(1);
-        app.doc.write_symbol_timeline(1, |tl, _| {
+        let at_1 = app.doc.library().at(1).unwrap().id;
+        app.doc.write_symbol_timeline(at_1, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel.instances_mut()[0].binding.color_effect = ColorEffect::new(0.3, 0.0);
         });
         app.doc.revision = crate::vector_engine::next_mesh_revision();
@@ -19833,7 +19846,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         app.session.replace_selection(crate::canvas_tool::Selection::default());
         app.session.add_to_selection([c_stroke_id], std::iter::empty());
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_c_id = app.doc.library().last().unwrap().id;
+        let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
         assert_ne!(sym_c_id, sym_a_id);
         assert_ne!(sym_c_id, sym_b_id);
 
@@ -19844,7 +19857,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         let a_gid = instances_before[0].binding.instance_gid;
 
         // 0 コマ目の B を空っぽにしてから A だけを分解する
-        app.doc.write_symbol_timeline(0, |tl, _| {
+        let at_0 = app.doc.library().at(0).unwrap().id;
+        app.doc.write_symbol_timeline(at_0, |tl, _| {
             tl.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
         });
         app.doc.revision = crate::vector_engine::next_mesh_revision();
@@ -19902,7 +19916,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         ));
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_c_id = app.doc.library().last().unwrap().id;
+        let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
         assert_ne!(sym_c_id, sym_b_id);
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
@@ -19913,8 +19927,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         ));
         let b_gid_in_a = app
             .doc
-            .library()
-            .iter()
+            .library().iter_in_order()
             .find(|s| s.id == sym_a_id)
             .unwrap()
             .timeline
@@ -19932,7 +19945,8 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
         if b_empty_on_ungroup_frame {
-            app.doc.write_symbol_timeline(0, |tl, _| {
+            let at_0 = app.doc.library().at(0).unwrap().id;
+            app.doc.write_symbol_timeline(at_0, |tl, _| {
                 tl.layers[0].keyframe_mut(0).cel = timeline::Cel::default();
             });
             app.doc.revision = crate::vector_engine::next_mesh_revision();
@@ -20005,7 +20019,7 @@ fn test_failed_paste_due_to_nest_limit_rolls_back_clipboard_imported_map() {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let host_sym_id = app.doc.library()[0].id;
+    let host_sym_id = app.doc.library().at(0).unwrap().id;
     assert!(apply(
         &mut app,
         Action::EnterSymbolFromLibrary {
@@ -20527,15 +20541,15 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
     assert_eq!(app.doc.library().len(), 1);
-    assert_eq!(app.doc.library()[0].id, 1);
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
+    assert_eq!(app.doc.library().at(0).unwrap().id, 1);
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
     assert!(apply(&mut app, Action::Copy));
 
     // タブ B（idx 1）を作って 1 回目の貼り付け
     crate::project_io::new_project(&mut app, &ctx);
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 1);
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
 
     // タブ B で別の生の図形を描いてそれだけを選んでコピーする
     assert!(apply(
@@ -20567,7 +20581,7 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
         1,
         "2回目の貼り付けの後もタブ B のライブラリが「Symbol 1」の1つだけであること"
     );
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.instances().len(), 2);
 
     // 2. 別のタブ C（idx 2）にも同じ番号（1番）の緑のシンボルがあるとき、タブ B に貼ると別々のシンボルとして2つ取り込まれる
@@ -20582,7 +20596,7 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    assert_eq!(app.doc.library()[0].id, 1);
+    assert_eq!(app.doc.library().at(0).unwrap().id, 1);
     assert!(apply(&mut app, Action::Copy));
 
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
@@ -20592,8 +20606,8 @@ fn test_cross_tab_symbol_paste_preserves_imported_map_across_intermediate_copies
         2,
         "タブ A の 1 番とタブ C の 1 番が取り違えられず、別々のシンボルとして 2 つ取り込まれること"
     );
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
-    assert_eq!(app.doc.library()[1].name, "Symbol 1 (2)");
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
+    assert_eq!(app.doc.library().at(1).unwrap().name, "Symbol 1 (2)");
     assert!(app.scene().iter().any(|s| s.color() == red));
     assert!(app.scene().iter().any(|s| s.color() == green));
 }
@@ -20948,7 +20962,7 @@ fn test_cross_tab_symbol_roundtrip_paste_reuses_original_symbol() {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let orig_sym_id = app.doc.library()[0].id;
+    let orig_sym_id = app.doc.library().at(0).unwrap().id;
     assert!(apply(&mut app, Action::Copy));
 
     // タブ2（index 1）へペースト → タブ2でそのインスタンスをコピー
@@ -23717,7 +23731,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     }
 
     // 4. 文書の図形はメッシュを持たず、書き出し用の展開はメッシュを持たず、画面用の展開はメッシュを持つ
-    for sym in doc.library().iter() {
+    for sym in doc.library().iter_in_order() {
         for layer in &sym.timeline.layers {
             for kf in &layer.keyframes {
                 for s in kf.cel.shapes().iter() {
@@ -23938,7 +23952,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     let green = Color32::from_rgb(40, 180, 90);
     let yellow = Color32::from_rgb(230, 200, 40);
     let lib_names =
-        |app: &Is2dApp| -> Vec<String> { app.doc.library().iter().map(|s| s.name.clone()).collect() };
+        |app: &Is2dApp| -> Vec<String> { app.doc.library().iter_in_order().map(|s| s.name.clone()).collect() };
 
     // 1. タブ A で赤の線をシンボル S にしてコピーし、新しいタブ B に貼る。B のライブラリは ["Symbol 1"]
     let mut app = Is2dApp::default();
@@ -23952,7 +23966,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_s_id = app.doc.library()[0].id;
+    let sym_s_id = app.doc.library().at(0).unwrap().id;
     assert!(apply(&mut app, Action::Copy));
 
     crate::project_io::new_project(&mut app, &ctx);
@@ -24004,10 +24018,10 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_c_id = app.doc.library().last().unwrap().id;
+    let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_p_id = app.doc.library().last().unwrap().id;
+    let sym_p_id = app.doc.library().iter_in_order().last().unwrap().id;
     assert!(apply(&mut app, Action::Copy));
 
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
@@ -24062,7 +24076,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 7);
-    let new_c_in_b = app.doc.library().last().unwrap().id;
+    let new_c_in_b = app.doc.library().iter_in_order().last().unwrap().id;
 
     crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
     let p_gid = app.doc.root.layers[0].keyframes[0]
@@ -24079,7 +24093,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 8);
-    let new_p_in_b = app.doc.library().last().unwrap();
+    let new_p_in_b = app.doc.library().iter_in_order().last().unwrap();
     assert!(
         new_p_in_b
             .timeline
@@ -24089,8 +24103,8 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     );
 
     // 6. B で関係のないシンボル（最初の Symbol 1）を削除する（7つ）。もう一度貼っても7つのまま
-    let first_sym_id_in_b = app.doc.library()[0].id;
-    assert_eq!(app.doc.library()[0].name, "Symbol 1");
+    let first_sym_id_in_b = app.doc.library().at(0).unwrap().id;
+    assert_eq!(app.doc.library().at(0).unwrap().name, "Symbol 1");
     assert!(apply(
         &mut app,
         Action::DeleteSymbol {
@@ -30438,12 +30452,12 @@ mod map_overlay {
             &mut app,
             binding.instance_gid
         ));
-        let before = app.doc.library()[0].timeline.layers[0].keyframes[0]
+        let before = app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0]
             .cel
             .clone();
         let undo = app.history.undo_stack.len();
         assert!(!doc_actions::paste_clipboard(&mut app, true));
-        let after = &app.doc.library()[0].timeline.layers[0].keyframes[0].cel;
+        let after = &app.doc.library().at(0).unwrap().timeline.layers[0].keyframes[0].cel;
         assert!(std::sync::Arc::ptr_eq(before.maps(), after.maps()));
         assert_eq!(after.revision(), before.revision());
         assert_eq!(app.history.undo_stack.len(), undo);
@@ -31625,7 +31639,7 @@ mod map_overlay {
                 t_max[kind] = t_max[kind].max(el);
             }
             let broken = std::iter::once(&app.doc.root)
-                .chain(app.doc.library().iter().map(|s| &s.timeline))
+                .chain(app.doc.library().iter_in_order().map(|s| &s.timeline))
                 .flat_map(|tl| tl.layers.iter().flat_map(|l| l.keyframes.iter()))
                 .filter(|k| k.cel.maps_problem().is_some())
                 .count();
@@ -32650,7 +32664,7 @@ fn deleting_a_symbol_whose_level_cannot_be_left_refuses_without_hanging() {
             ),
         );
         run(&mut app, &[Action::SelectAll, Action::ConvertToSymbol]);
-        let sym_id = app.tab().doc.library().first().unwrap().id;
+        let sym_id = app.tab().doc.library().at(0).unwrap().id;
         run(
             &mut app,
             &[Action::EnterSymbolFromLibrary { sym_id }, Action::SelectAll],
@@ -32744,7 +32758,7 @@ fn refused_convert_to_symbol_leaves_no_symbol_in_the_library() {
     assert!(apply(&mut app, Action::ConvertToSymbol));
     let lib = &app.tab().doc.library();
     assert_eq!(lib.len(), 1);
-    let sym_id = lib.first().unwrap().id;
+    let sym_id = lib.at(0).unwrap().id;
     let insts: Vec<u64> = app
         .tab()
         .active_timeline()
@@ -33297,7 +33311,7 @@ fn measure_undo_and_paste_with_a_large_library() {
         );
         doc_actions::convert_selection_to_symbol(&mut app).unwrap();
         assert!(canvas_tool::clear_selection(&mut app));
-        let proto = app.doc.library()[0].clone();
+        let proto = app.doc.library().at(0).unwrap().clone();
         for k in 0..n {
             let mut s = (*proto).clone();
             s.id = app.doc.next_symbol_id;
@@ -35278,7 +35292,7 @@ fn drawing_inside_a_symbol_copies_only_that_symbol() {
     assert!(apply(&mut app, Action::SelectAll));
     let sym_id = doc_actions::convert_selection_to_symbol(&mut app).unwrap();
     assert!(canvas_tool::clear_selection(&mut app));
-    let proto: crate::symbol::SymbolDef = (*app.doc.library()[0]).clone();
+    let proto: crate::symbol::SymbolDef = (**app.doc.library().at(0).unwrap()).clone();
     for k in 0..200 {
         let mut s = proto.clone();
         s.id = app.doc.next_symbol_id;
@@ -35300,7 +35314,7 @@ fn drawing_inside_a_symbol_copies_only_that_symbol() {
     let shared = (0..n)
         .filter(|&i| {
             let (a, b): (&crate::symbol::SymbolDef, &crate::symbol::SymbolDef) =
-                (&entry.library[i], &app.doc.library()[i]);
+                (entry.library.at(i).unwrap(), app.doc.library().at(i).unwrap());
             std::ptr::eq(a, b)
         })
         .count();
@@ -35728,7 +35742,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
             Action::Deselect,
         ],
     );
-    let sym_a = app.doc.library()[0].id;
+    let sym_a = app.doc.library().at(0).unwrap().id;
     // 同じシンボルを、上のレイヤーにもう2つ置く。シーンには生の青い線もある
     run(
         &mut app,
@@ -35816,7 +35830,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
             },
         ],
     );
-    let sym_b = app.doc.library().iter().map(|s| s.id).max().unwrap();
+    let sym_b = app.doc.library().iter_in_order().map(|s| s.id).max().unwrap();
     assert_ne!(sym_b, sym_a);
     let path = app.session.edit_path();
     assert_eq!(path.len(), 2, "子のシンボルの中");
@@ -37267,6 +37281,248 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// 塊の並びの比べ（`same_items`）は、要素を1つずつ比べた答え（お手本）と同じ：途中に足す・消す・消して同じ所に戻す
+/// （中身は同じで塊の切れ目だけがずれる）をでたらめにくり返した写しと比べる（全体の点検 2026-11-27）
+#[test]
+fn chunked_list_comparison_matches_item_by_item() {
+    use crate::chunked_list::ChunkedList;
+    let mut rng = OpRng(0x0c4a_0001);
+    for round in 0..200 {
+        let n = 1 + rng.range(400);
+        let base: ChunkedList<u32> = (0..n as u32).map(std::sync::Arc::new).collect();
+        let mut copy = base.clone();
+        for _ in 0..rng.range(6) {
+            let i = rng.range(copy.len().max(1));
+            match rng.range(3) {
+                0 => copy.insert(i.min(copy.len()), std::sync::Arc::new(9999)),
+                1 if !copy.is_empty() => {
+                    copy.remove(i);
+                }
+                _ if !copy.is_empty() => {
+                    let x = copy.remove(i);
+                    copy.insert(i, std::sync::Arc::new(*x));
+                }
+                _ => {}
+            }
+        }
+        let naive = base.len() == copy.len() && base.iter().zip(copy.iter()).all(|(a, b)| a == b);
+        assert_eq!(base.same_items(&copy, |a, b| a == b), naive, "round={round}");
+    }
+}
+
+/// 選んだ面だけで作る地図（`LayerBase::only_faces_map`）は、地図全体を作ってから選んだ面と線を残した地図
+/// （`PlanarMap::restricted`。お手本）と、頂点と辺まで同じ：でたらめに描いたセル画で、でたらめに選んだ図形の番号で比べる
+/// （持ち上げた絵のコピー・Alt 複製・F8 が、こちらで作るようになった：全体の点検 2026-11-27）
+#[test]
+fn only_faces_map_matches_restricting_the_whole_map() {
+    let names = ["PaintStroke", "PencilStroke", "BucketFill", "InkBottle"];
+    let mut compared = 0;
+    for seed in [0x0f00_0001u64, 0x0f00_0002, 0x0f00_0003] {
+        let mut rng = OpRng(seed);
+        let mut app = Is2dApp::default();
+        for step in 0..120 {
+            let action = random_action(names[rng.range(names.len())], &mut rng, &app);
+            apply(&mut app, action);
+            if step % 6 != 5 {
+                continue;
+            }
+            let tl = app.tab().active_timeline();
+            let Some(cel) = tl.layers[0].cel_at(tl.current_frame) else {
+                continue;
+            };
+            for m in cel.maps().iter() {
+                let base = m.base();
+                let ids: Vec<crate::vector_engine::ShapeId> = base.drawn_shapes(&m.group_path).iter().map(|s| s.shape_id).collect();
+                if ids.is_empty() {
+                    continue;
+                }
+                for _ in 0..3 {
+                    let pick: std::collections::HashSet<crate::vector_engine::ShapeId> = ids.iter().copied().filter(|_| rng.coin()).collect();
+                    let fast = base.only_faces_map(&pick, &m.group_path);
+                    let whole = base.map().restricted(&pick);
+                    assert_eq!((&fast.nodes, &fast.edges), (&whole.nodes, &whole.edges), "seed={seed:#x} step={step}");
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 20, "比べた数が少ない：{compared}");
+}
+
+/// 塊の並びの範囲の消去（`remove_range`）は、ふつうの並びから同じ範囲を消した答え（お手本）と同じで、範囲にかからない
+/// 塊は写さずに共有したまま（全体の点検 2026-11-27）
+#[test]
+fn chunked_list_remove_range_matches_a_plain_vec() {
+    use crate::chunked_list::ChunkedList;
+    let mut rng = OpRng(0x0c4a_0002);
+    for round in 0..300 {
+        let n = 1 + rng.range(500);
+        let base: ChunkedList<u32> = (0..n as u32).map(std::sync::Arc::new).collect();
+        let mut list = base.clone();
+        let mut plain: Vec<u32> = (0..n as u32).collect();
+        for _ in 0..1 + rng.range(4) {
+            if plain.is_empty() {
+                break;
+            }
+            let a = rng.range(plain.len());
+            let b = a + rng.range(plain.len() - a + 1);
+            list.remove_range(a..b);
+            plain.drain(a..b);
+        }
+        assert_eq!(list.iter().map(|x| **x).collect::<Vec<_>>(), plain, "round={round}");
+        assert_eq!(list.len(), plain.len());
+    }
+}
+
+/// 音のライブラリ（`sound::SoundLibrary`）の番号で引く・バイトで引く・並びは、ふつうの並びを頭から探した答え（お手本）と
+/// 同じ：でたらめに足す・消す・名前を変える（足す音には、前に足した音とバイトを共有するものも混ぜる。全体の点検 2026-11-27）
+#[test]
+fn sound_library_lookups_match_a_plain_scan() {
+    use crate::sound::{Sound, SoundLibrary};
+    use std::sync::Arc;
+    let mut rng = OpRng(0x50ad_0001);
+    let base = Sound::new(1, "s".to_owned(), short_wav().into()).unwrap();
+    let mut lib = SoundLibrary::default();
+    let mut plain: Vec<Arc<Sound>> = Vec::new();
+    let mut next = 1u64;
+    for step in 0..400 {
+        match rng.range(4) {
+            0 | 1 => {
+                // バイトは、新しいものか、今ある音と共有するもの
+                let mut s = match plain.get(rng.range(plain.len().max(1))).filter(|_| rng.coin()) {
+                    Some(p) => Sound::clone(p),
+                    None => Sound::new(next, format!("s{next}"), short_wav().into()).unwrap_or_else(|_| base.clone()),
+                };
+                s.id = next;
+                next += 1;
+                let s = Arc::new(s);
+                lib.push_new(s.clone());
+                plain.push(s);
+            }
+            2 if !plain.is_empty() => {
+                let id = plain[rng.range(plain.len())].id;
+                assert!(lib.remove(id));
+                plain.retain(|s| s.id != id);
+            }
+            _ if !plain.is_empty() => {
+                let i = rng.range(plain.len());
+                let name = format!("n{}", rng.range(5));
+                let changed = plain[i].name != name;
+                assert_eq!(lib.rename(plain[i].id, name.clone()), changed);
+                Arc::make_mut(&mut plain[i]).name = name;
+            }
+            _ => {}
+        }
+        assert_eq!(lib.iter().map(|s| (s.id, s.name.clone())).collect::<Vec<_>>(), plain.iter().map(|s| (s.id, s.name.clone())).collect::<Vec<_>>(), "step={step}");
+        for p in &plain {
+            assert_eq!(lib.get(p.id).map(|s| s.id), Some(p.id));
+            let expected = plain.iter().find(|q| Arc::ptr_eq(&q.encoded, &p.encoded)).map(|q| q.id);
+            assert_eq!(lib.with_bytes(p).map(|s| s.id), expected, "step={step}");
+        }
+        assert!(lib.get(next).is_none());
+    }
+}
+
+/// シンボルに付ける名前（`Document::numbered_name`）は、候補の名前を1つずつ試して最初の空いた名前を選ぶ答え（お手本）と
+/// 同じ：番号の付いた名前・付いていない名前・先頭に 0 のある番号・同じ名前の重なり（名前を変えて重ねる）をでたらめに
+/// 混ぜたライブラリで、付け方・元・始める番号をでたらめに選んで比べる。名前の表はお手本とも比べる（全体の点検 2026-11-27）
+#[test]
+fn numbered_names_match_trying_each_candidate() {
+    use crate::symbol::NumberForm;
+    let mut rng = OpRng(0x0a3e_0001);
+    let stems = ["Symbol", "A", "Aのコピー", "B C"];
+    for round in 0..60 {
+        let mut doc = symbol::Document::default();
+        for _ in 0..rng.range(40) {
+            let stem = stems[rng.range(stems.len())];
+            let name = match rng.range(5) {
+                0 => stem.to_owned(),
+                1 => format!("{stem} {}", rng.range(8)),
+                2 => format!("{stem} ({})", rng.range(8)),
+                3 => format!("{stem} 0{}", rng.range(8)),
+                _ => format!("{stem} {}", 1 + rng.range(3)),
+            };
+            let id = doc.alloc_symbol_id();
+            doc.add_symbol(None, symbol::SymbolDef::with_timeline(id, name, timeline::Timeline::default()));
+        }
+        // 名前を変えて重ねる
+        if let Some(s) = doc.library().at(0).map(|s| s.id) {
+            let other = doc.library().at(doc.library().len() - 1).unwrap().name.clone();
+            doc.rename_symbol(s, other);
+        }
+        assert!(doc.library().check_tables().is_ok(), "round={round}");
+        for _ in 0..20 {
+            let stem = stems[rng.range(stems.len())];
+            let form = if rng.coin() { NumberForm::Space } else { NumberForm::Paren };
+            let from = rng.range(6) as u64;
+            let plain = rng.coin().then_some(stem);
+            let taken = |n: &str| doc.library().iter_by_id().any(|s| s.name == n);
+            let expected = plain
+                .filter(|p| !taken(p))
+                .map(str::to_owned)
+                .unwrap_or_else(|| (from..).map(|n| form.name(stem, n)).find(|n| !taken(n)).unwrap());
+            assert_eq!(doc.numbered_name(plain, form, stem, from), expected, "round={round} stem={stem} from={from}");
+        }
+    }
+}
+
+/// ライブラリの深い版と使われ方の表（設計 claude/シンボルの目次と参照の表の設計.md）：入れ子のシンボル（親の中に子）で、
+/// 子の中に描くと、子と親の版が変わり、関係の無いシンボルの版は変わらない。親の高さは子の高さ＋1、子が2コマになると
+/// 親も「動く」になる。子を消すと、親の中のインスタンスも消え、使われ方の表から外れる
+#[test]
+fn library_deep_revision_and_users_follow_the_nesting() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    let stroke = |app: &mut Is2dApp, x: f64| {
+        assert!(apply(
+            app,
+            Action::PaintStroke { points: vec![Point::new(x, 300.0), Point::new(x + 80.0, 320.0)], radius: 6.0, color: Color32::RED },
+        ));
+    };
+    // 子：1本の線をシンボルにする。関係の無いシンボル：別の線をシンボルにする
+    stroke(&mut app, 100.0);
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let child = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    assert!(canvas_tool::clear_selection(&mut app));
+    // 親：子のインスタンスを選んでシンボルにする
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let parent = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    assert!(canvas_tool::clear_selection(&mut app));
+    stroke(&mut app, 600.0);
+    assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(580.0, 280.0), p1: Point::new(700.0, 340.0), additive: false }));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let other = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    let lib = |app: &Is2dApp| app.tab().doc().library().clone();
+    let l = lib(&app);
+    assert_eq!(l.users_of(child).collect::<Vec<_>>(), vec![parent], "子を使っている親");
+    assert_eq!(l.get(parent).unwrap().children(), &[child]);
+    let rev = |l: &crate::symbol::Library, id: u64| l.get(id).unwrap().revision();
+    let (rc, rp, ro) = (rev(&l, child), rev(&l, parent), rev(&l, other));
+    // 子の中に描く：子と親の版が変わり、関係の無いシンボルは変わらない
+    assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id: child }));
+    stroke(&mut app, 300.0);
+    let l = lib(&app);
+    assert_ne!(rev(&l, child), rc, "描いた子の版が変わらない");
+    assert_ne!(rev(&l, parent), rp, "子を使う親の版が変わらない");
+    assert_eq!(rev(&l, other), ro, "関係の無いシンボルの版が変わった");
+    assert!(!l.get(parent).unwrap().has_dynamic_animation());
+    // 子を2コマにする：子も親も動く
+    assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: true }));
+    let l = lib(&app);
+    assert!(l.get(child).unwrap().has_dynamic_animation() && l.get(parent).unwrap().has_dynamic_animation(), "子が2コマなのに親が動かない");
+    assert!(l.check_tables().is_ok());
+    // 子を消す：親の中のインスタンスも消え、使われ方の表から外れる
+    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::DeleteSymbol { sym_id: child }));
+    let l = lib(&app);
+    assert!(l.get(child).is_none());
+    assert!(l.get(parent).unwrap().children().is_empty(), "消した子のインスタンスが親に残った");
+    assert_eq!(l.users_of(child).count(), 0);
+    assert!(l.check_tables().is_ok());
+}
+
 /// 復旧の書き足すファイル（`recovery_journal`）：でたらめな操作のたびに書き足し、読み戻した作品は、そのときの作品を丸ごと
 /// 保存したものと同じ（全体から作った答えと比べる：変わった所だけで作る仕組みにはお手本を付ける決まり）。書き足した量が
 /// 全体の量を超えて全体を書き直したあとも同じ。書いている途中で止まった（最後の記録が欠けた）ファイルは、最後の完全な
@@ -37335,6 +37591,130 @@ fn recovery_journal_reads_back_the_same_work_after_every_edit() {
         let _ = std::fs::remove_file(&path);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// シンボルの多い作品で、シンボルの中の操作と画面の1コマを測る（`cargo test --release measure_symbol_heavy -- --ignored
+/// --nocapture`。全体の点検 2026-11-27：ライブラリの大きさで重くなる所を、直す前と後で比べる）。作品は、600 コマの
+/// シンボルを1つ作り、それを複製してシンボルを `IS2D_SYMBOLS`（既定 300）個にし、ルートに置く
+#[test]
+#[ignore]
+fn measure_symbol_heavy() {
+    use crate::doc_actions::{apply, Action};
+    use std::time::Instant;
+    let count: usize = std::env::var("IS2D_SYMBOLS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let mut app = Is2dApp::default();
+    let stroke = |app: &mut Is2dApp, i: usize| {
+        let y = 300.0 + (i % 30) as f64 * 8.0;
+        assert!(apply(
+            app,
+            Action::PaintStroke { points: vec![Point::new(800.0, y), Point::new(1100.0, y + 30.0)], radius: 5.0, color: Color32::RED },
+        ));
+    };
+    stroke(&mut app, 0);
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::ConvertToSymbol));
+    let long = app.tab().doc().library().iter_in_order().next().unwrap().id;
+    assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id: long }));
+    for i in 1..600 {
+        assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
+        stroke(&mut app, i);
+    }
+    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    for _ in 1..count {
+        assert!(apply(&mut app, Action::DuplicateSymbol { sym_id: long }));
+    }
+    eprintln!("シンボル {} 個（1つは 600 コマ）", app.tab().doc().library().len());
+    let ctx = egui::Context::default();
+    let frame = |app: &mut Is2dApp| {
+        let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let t = Instant::now();
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+        ms(t)
+    };
+    // シンボルの中に入り、ライブラリのタブを出して、画面の1コマ
+    assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id: long }));
+    app.right_panel_tab = crate::panels::RightPanelTab::Library;
+    for _ in 0..5 {
+        frame(&mut app);
+    }
+    let frames: Vec<f64> = (0..30).map(|_| frame(&mut app)).collect();
+    eprintln!("シンボルの中・ライブラリのタブ：画面の1コマ 中央 {:.2} ms", median(frames));
+    // シンボルの中で1本描く（取り消して戻す）
+    let mut draws = Vec::new();
+    for i in 0..9 {
+        let t = Instant::now();
+        stroke(&mut app, 100 + i);
+        draws.push(ms(t));
+        assert!(apply(&mut app, Action::Undo));
+    }
+    eprintln!("シンボルの中で1本描く：中央 {:.2} ms", median(draws));
+    // シンボルの中で取り消す
+    let mut undos = Vec::new();
+    for i in 0..9 {
+        stroke(&mut app, 200 + i);
+        let t = Instant::now();
+        assert!(apply(&mut app, Action::Undo));
+        undos.push(ms(t));
+    }
+    eprintln!("シンボルの中で取り消す：中央 {:.2} ms", median(undos));
+    // シンボルを複製する
+    let mut dups = Vec::new();
+    for _ in 0..9 {
+        let t = Instant::now();
+        assert!(apply(&mut app, Action::DuplicateSymbol { sym_id: long }));
+        dups.push(ms(t));
+    }
+    eprintln!("シンボルを複製する：中央 {:.2} ms", median(dups));
+}
+
+/// 入れ子の深いシンボル（8段・各段 `IS2D_WIDTH`（既定 3）個のシンボルが、次の段のシンボルを全部使う）を別のタブへ2回
+/// 貼る時間を測る（`cargo test --release measure_deep_nested_paste -- --ignored --nocapture`。2回目は、前に移したシンボルを
+/// 使い回せるかを確かめる：全体の点検 2026-11-27）
+#[test]
+#[ignore]
+fn measure_deep_nested_paste() {
+    use crate::doc_actions::{apply, Action};
+    use crate::symbol::{SymbolDef, SymbolInstance, SymbolInstanceBinding};
+    use std::time::Instant;
+    let width: u64 = std::env::var("IS2D_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let levels = 7u64;
+    let mut app = Is2dApp::default();
+    let id = |level: u64, k: u64| 1 + level * width + k;
+    let mut gid = 1000u64;
+    let mut inst = |sym: u64| {
+        gid += 1;
+        SymbolInstance { binding: SymbolInstanceBinding::new(gid, sym, kurbo::Affine::IDENTITY), layer_id: 1, parent_scope: Vec::new(), order: 0 }
+    };
+    for level in (0..levels).rev() {
+        for k in 0..width {
+            // 絵は持たない（貼り付けの判断の手間だけを測る。絵があると、入れ子の数だけ並ぶ絵を作る手間が乗る）
+            let mut def = SymbolDef::new(id(level, k), format!("L{level}-{k}"), Vec::new()).unwrap();
+            if level + 1 < levels {
+                let children: Vec<SymbolInstance> = (0..width).map(|c| inst(id(level + 1, c))).collect();
+                def.timeline.layers[0].keyframe_mut(0).cel = crate::timeline::Cel::new_with_instances(Vec::new(), children);
+            }
+            app.doc.add_symbol(None, def);
+        }
+    }
+    app.doc.next_symbol_id = id(levels, 0) + 1;
+    let top = inst(id(0, 0));
+    app.doc.next_group_id = gid + 1;
+    app.doc.root.layers[0].keyframe_mut(0).cel = crate::timeline::Cel::new_with_instances(Vec::new(), vec![top]);
+    app.refresh_scene_base();
+    assert!(apply(&mut app, Action::SelectAll));
+    assert!(apply(&mut app, Action::Copy));
+    let ctx = egui::Context::default();
+    crate::project_io::new_project(&mut app, &ctx);
+    for round in 1..=3 {
+        let t = Instant::now();
+        assert!(apply(&mut app, Action::Paste { in_place: true }));
+        eprintln!("貼り付け {round} 回目：{:.2} ms（シンボル {} 個）", t.elapsed().as_secs_f64() * 1e3, app.tab().doc().library().len());
+    }
 }
 
 /// 復旧の書き足すファイルを、レビューの作品で測る（`IS2D_WORK=<作品> cargo test --release measure_recovery_journal --
@@ -37551,7 +37931,7 @@ fn sample_work_maps_are_all_valid_with_the_current_code() {
         .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
         .expect("見本の作品を開ける");
     let maps = std::iter::once(&doc.root)
-        .chain(doc.library().iter().map(|s| &s.timeline))
+        .chain(doc.library().iter_in_order().map(|s| &s.timeline))
         .flat_map(|tl| &tl.layers)
         .flat_map(|l| l.keyframes.iter())
         .map(|k| k.cel.maps().len())
@@ -37672,8 +38052,8 @@ fn unreadable_sound_opens_silently_and_keeps_its_bytes() {
     saved.sounds[0].bytes = b"broken"[..].into();
     let clip = saved.timeline.layers[0].keyframes[0].sound;
     let doc = saved.clone().into_document().expect("読めない音があっても開く");
-    assert!(!doc.sounds[0].readable());
-    assert_eq!(&*doc.sounds[0].encoded, b"broken");
+    assert!(!doc.sounds.at(0).unwrap().readable());
+    assert_eq!(&*doc.sounds.at(0).unwrap().encoded, b"broken");
     assert_eq!(
         doc.load_notices.take(),
         vec![timeline::LoadNotice::UnreadableSound(saved.sounds[0].name.clone())]
@@ -37842,7 +38222,7 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
             Action::Deselect,
         ],
     );
-    let sym_a = app.doc.library()[0].id;
+    let sym_a = app.doc.library().at(0).unwrap().id;
     // A の中に、子のシンボル B（緑）を作る
     run(
         &mut app,
@@ -37861,9 +38241,9 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
             Action::ExitSymbolTimeline,
         ],
     );
-    let sym_b = app.doc.library()[1].id;
-    let name_a = app.doc.library()[0].name.clone();
-    let ids = |app: &Is2dApp| app.doc.library().iter().map(|s| s.id).collect::<Vec<_>>();
+    let sym_b = app.doc.library().at(1).unwrap().id;
+    let name_a = app.doc.library().at(0).unwrap().name.clone();
+    let ids = |app: &Is2dApp| app.doc.library().iter_in_order().map(|s| s.id).collect::<Vec<_>>();
     assert_eq!(ids(&app), vec![sym_a, sym_b]);
     // シンボルの一つ目のコマの形（色と輪郭）と、中のインスタンス（シンボル・番号）
     let cel_of = |app: &Is2dApp, id: u64| {
@@ -37897,10 +38277,10 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
 
     // 1. 複製する
     run(&mut app, &[Action::DuplicateSymbol { sym_id: sym_a }]);
-    let copy1 = app.doc.library()[1].id;
+    let copy1 = app.doc.library().at(1).unwrap().id;
     assert_eq!(ids(&app), vec![sym_a, copy1, sym_b], "元のすぐ下に入る");
     assert!(copy1 != sym_a && copy1 != sym_b);
-    assert_eq!(app.doc.library()[1].name, format!("{name_a}のコピー"));
+    assert_eq!(app.doc.library().at(1).unwrap().name, format!("{name_a}のコピー"));
     assert_eq!(app.library_symbol(), Some(copy1), "複製を選ぶ");
     let (shapes_a, insts_a) = cel_of(&app, sym_a);
     let (shapes_c, insts_c) = cel_of(&app, copy1);
@@ -37917,9 +38297,9 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
 
     // 2. もう一度複製すると「のコピー 2」
     run(&mut app, &[Action::DuplicateSymbol { sym_id: sym_a }]);
-    let copy2 = app.doc.library()[1].id;
+    let copy2 = app.doc.library().at(1).unwrap().id;
     assert_eq!(ids(&app), vec![sym_a, copy2, copy1, sym_b]);
-    assert_eq!(app.doc.library()[1].name, format!("{name_a}のコピー 2"));
+    assert_eq!(app.doc.library().at(1).unwrap().name, format!("{name_a}のコピー 2"));
 
     // 3. 複製の中を編集しても、元は変わらない
     run(
@@ -37971,7 +38351,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
                 Action::Deselect,
             ],
         );
-        app.doc.library().last().unwrap().id
+        app.doc.library().iter_in_order().last().unwrap().id
     };
     let sym_a = make_symbol(&mut app, 300.0, red);
     let sym_b = make_symbol(&mut app, 450.0, green);
@@ -40179,8 +40559,8 @@ fn insert_keyframe_at(tl: &mut timeline::Timeline, layer: usize, frame: usize, c
 /// テスト用：ライブラリの番号 `id` のシンボルのタイムラインを、中身を書く入口（`Document::write_symbol_timeline`：版を
 /// 上げる）で書く
 fn write_symbol(doc: &mut symbol::Document, id: u64, f: impl FnOnce(&mut timeline::Timeline)) {
-    let i = doc.library().iter().position(|s| s.id == id).expect("シンボル");
-    doc.write_symbol_timeline(i, |tl, _| f(tl));
+    assert!(doc.library().get(id).is_some(), "シンボル");
+    doc.write_symbol_timeline(id, |tl, _| f(tl));
 }
 
 /// テスト用：0.1 秒の 1 つの音の WAV（44.1kHz）
@@ -40225,7 +40605,7 @@ fn importing_a_sound_attaches_it_to_the_blank_keyframe_with_undo() {
     let sounds = app.doc.sounds.clone();
     assert_eq!(sounds.len(), 1);
     let kf_sound = app.doc.root.layers[0].keyframes[0].sound;
-    assert_eq!(kf_sound, crate::sound::SoundClip::whole(&sounds[0]));
+    assert_eq!(kf_sound, crate::sound::SoundClip::whole(sounds.at(0).unwrap()));
     assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
     assert!(app.doc.sounds.is_empty());
     assert_eq!(app.doc.root.layers[0].keyframes[0].sound, None);
@@ -40295,15 +40675,15 @@ fn sounds_survive_save_and_open() {
         .into_document()
         .unwrap();
     assert_eq!(doc.sounds.len(), 1);
-    assert_eq!(doc.sounds[0].id, app.doc.sounds[0].id);
-    assert_eq!(doc.sounds[0].name, "テスト.wav");
-    assert_eq!(doc.sounds[0].encoded, app.doc.sounds[0].encoded);
-    assert_eq!(doc.sounds[0].pcm, app.doc.sounds[0].pcm);
+    assert_eq!(doc.sounds.at(0).unwrap().id, app.doc.sounds.at(0).unwrap().id);
+    assert_eq!(doc.sounds.at(0).unwrap().name, "テスト.wav");
+    assert_eq!(doc.sounds.at(0).unwrap().encoded, app.doc.sounds.at(0).unwrap().encoded);
+    assert_eq!(doc.sounds.at(0).unwrap().pcm, app.doc.sounds.at(0).unwrap().pcm);
     assert_eq!(
         doc.root.layers[0].keyframes[0].sound,
         app.doc.root.layers[0].keyframes[0].sound
     );
-    assert!(doc.next_sound_id > doc.sounds[0].id);
+    assert!(doc.next_sound_id > doc.sounds.at(0).unwrap().id);
 }
 
 /// 壊れた音のデータ（無い音を指す区間・音の長さを越える区間・絵のあるキーフレームの音・重なる番号）は、開くときに壊れた
@@ -40357,7 +40737,7 @@ fn doc_with_flat_sound() -> symbol::Document {
     doc.fps = 24;
     let bytes = wav_bytes(48_000, 1, &vec![16384i16; 48_000]);
     let s = crate::sound::Sound::new(1, "flat".to_owned(), bytes.into()).unwrap();
-    std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
+    doc.sounds.push_new(std::sync::Arc::new(s));
     doc.next_sound_id = 2;
     doc
 }
@@ -40564,15 +40944,15 @@ fn choosing_a_keyframe_sound_attaches_replaces_and_removes_with_undo() {
     let long: Vec<i16> = vec![1000; 9600];
     assert!(import_sound(&mut app, wav_bytes(48_000, 1, &long)));
     let sounds = app.doc.sounds.clone();
-    let whole = |i: usize| crate::sound::SoundClip::whole(&sounds[i]);
+    let whole = |i: usize| crate::sound::SoundClip::whole(sounds.at(i).unwrap());
     let kf_sound = |app: &Is2dApp| app.doc.root.layers[0].keyframes[0].sound;
     assert_eq!(kf_sound(&app), whole(1));
 
     // 区間を切ってから付け替えると、新しい音の頭から終わりに戻る
     app.doc.root.layers[0].keyframe_mut(0).sound.as_mut().unwrap().end = 100;
-    assert!(set_keyframe_sound(&mut app, Some(sounds[0].id)));
+    assert!(set_keyframe_sound(&mut app, Some(sounds.at(0).unwrap().id)));
     assert_eq!(kf_sound(&app), whole(0));
-    assert!(!set_keyframe_sound(&mut app, Some(sounds[0].id)), "変わらない");
+    assert!(!set_keyframe_sound(&mut app, Some(sounds.at(0).unwrap().id)), "変わらない");
     assert!(!set_keyframe_sound(&mut app, Some(99)), "無い番号");
 
     assert!(set_keyframe_sound(&mut app, None));
@@ -40591,12 +40971,12 @@ fn choosing_a_keyframe_sound_attaches_replaces_and_removes_with_undo() {
             color: Color32::RED,
         }
     ));
-    assert!(!set_keyframe_sound(&mut app, Some(sounds[0].id)));
+    assert!(!set_keyframe_sound(&mut app, Some(sounds.at(0).unwrap().id)));
     assert_eq!(kf_sound(&app), None);
     // ロックしたレイヤーにも付けられない
     let mut app = Is2dApp::default();
     assert!(import_sound(&mut app, short_wav()));
-    let id = app.doc.sounds[0].id;
+    let id = app.doc.sounds.at(0).unwrap().id;
     assert!(set_keyframe_sound(&mut app, None));
     app.doc.root.layers[0].locked = true;
     assert!(!set_keyframe_sound(&mut app, Some(id)));
@@ -40610,13 +40990,13 @@ fn deleting_and_renaming_library_sounds_with_undo() {
     let mut app = Is2dApp::default();
     assert!(import_sound(&mut app, short_wav()));
     let (a, b) = {
-        let id = app.doc.sounds[0].id;
+        let id = app.doc.sounds.at(0).unwrap().id;
         assert!(set_keyframe_sound(&mut app, None));
         assert!(import_sound(&mut app, short_wav()));
-        (id, app.doc.sounds[1].id)
+        (id, app.doc.sounds.at(1).unwrap().id)
     };
     // ルートのレイヤー 0 は音 b、シンボルの中は音 a。ルートに2枚目のレイヤーを足して音 a を付ける
-    let clip_a = crate::sound::SoundClip::whole(&app.doc.sounds[0]).unwrap();
+    let clip_a = crate::sound::SoundClip::whole(app.doc.sounds.at(0).unwrap()).unwrap();
     let sym_id = app.doc.register_new_symbol(Vec::new());
     write_symbol(&mut app.doc, sym_id, |tl| put_clip(tl, 1, clip_a));
     assert!(doc_actions::apply(&mut app, doc_actions::Action::AddLayer));
@@ -40664,10 +41044,10 @@ fn deleting_and_renaming_library_sounds_with_undo() {
             new_name: "xyz".to_owned(),
         }
     ));
-    assert_eq!(app.doc.sounds[0].name, "xyz");
+    assert_eq!(app.doc.sounds.at(0).unwrap().name, "xyz");
     assert_eq!(app.history.undo_stack.len(), undo_len + 1);
     assert!(doc_actions::apply(&mut app, doc_actions::Action::Undo));
-    assert_eq!(app.doc.sounds[0].name, "テスト.wav");
+    assert_eq!(app.doc.sounds.at(0).unwrap().name, "テスト.wav");
 }
 
 /// テスト用：線を描いてシンボルにし、その中に足したレイヤーに音を読み込んでから、ルートで全選択してコピーしたアプリと、
@@ -40685,7 +41065,7 @@ fn copied_symbol_with_sound() -> (Is2dApp, u64) {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_id = app.doc.library()[0].id;
+    let sym_id = app.doc.library().at(0).unwrap().id;
     assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
     assert!(apply(&mut app, Action::AddLayer));
     assert!(import_sound(&mut app, short_wav()));
@@ -40722,21 +41102,21 @@ fn pasting_a_symbol_with_sound_into_another_tab_brings_the_sound() {
     use doc_actions::{apply, Action};
     let ctx = egui::Context::default();
     let (mut app, _) = copied_symbol_with_sound();
-    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    let src_bytes = app.doc.sounds.at(0).unwrap().encoded.to_vec();
     project_io::new_project(&mut app, &ctx);
     let other = wav_bytes(48_000, 1, &vec![1000i16; 4800]);
     assert!(import_sound(&mut app, other.clone()));
-    assert_eq!(app.doc.sounds[0].id, 1, "コピー元の音と同じ番号");
+    assert_eq!(app.doc.sounds.at(0).unwrap().id, 1, "コピー元の音と同じ番号");
     assert!(apply(&mut app, Action::AddLayer));
 
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.sounds.len(), 2);
-    let pasted = app.doc.library()[0].id;
+    let pasted = app.doc.library().at(0).unwrap().id;
     assert_eq!(
         symbol_sound_bytes(&app.doc, pasted),
         vec![src_bytes.clone()]
     );
-    assert_eq!(*app.doc.sounds[0].encoded, *other, "貼り先の音はそのまま");
+    assert_eq!(*app.doc.sounds.at(0).unwrap().encoded, *other, "貼り先の音はそのまま");
     let doc = reopened(&app.doc).expect("保存したファイルを開ける");
     assert_eq!(symbol_sound_bytes(&doc, pasted), vec![src_bytes]);
 
@@ -40752,17 +41132,17 @@ fn pasting_again_after_deleting_the_pasted_symbols_sound_brings_the_copied_conte
     use doc_actions::{apply, Action};
     let ctx = egui::Context::default();
     let (mut app, _) = copied_symbol_with_sound();
-    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    let src_bytes = app.doc.sounds.at(0).unwrap().encoded.to_vec();
     project_io::new_project(&mut app, &ctx);
     assert!(apply(&mut app, Action::Paste { in_place: true }));
-    let first = app.doc.library()[0].id;
-    let sound_id = app.doc.sounds[0].id;
+    let first = app.doc.library().at(0).unwrap().id;
+    let sound_id = app.doc.sounds.at(0).unwrap().id;
     assert!(apply(&mut app, Action::DeleteSound { sound_id }));
     assert!(symbol_sound_bytes(&app.doc, first).is_empty());
 
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 2, "新しいシンボルとして取り込む");
-    let second = app.doc.library()[1].id;
+    let second = app.doc.library().at(1).unwrap().id;
     assert_eq!(symbol_sound_bytes(&app.doc, second), vec![src_bytes]);
     assert!(symbol_sound_bytes(&app.doc, first).is_empty());
 }
@@ -40773,18 +41153,18 @@ fn pasting_again_after_deleting_the_pasted_symbols_sound_brings_the_copied_conte
 fn pasting_a_symbol_after_deleting_its_sound_restores_the_sound() {
     use doc_actions::{apply, Action};
     let (mut app, sym_id) = copied_symbol_with_sound();
-    let src_bytes = app.doc.sounds[0].encoded.to_vec();
+    let src_bytes = app.doc.sounds.at(0).unwrap().encoded.to_vec();
     assert!(apply(&mut app, Action::Paste { in_place: false }));
     assert_eq!(app.doc.sounds.len(), 1);
     assert_eq!(app.doc.library().len(), 1);
     assert!(apply(&mut app, Action::Undo));
 
-    let sound_id = app.doc.sounds[0].id;
+    let sound_id = app.doc.sounds.at(0).unwrap().id;
     assert!(apply(&mut app, Action::DeleteSound { sound_id }));
     assert!(apply(&mut app, Action::DeleteSymbol { sym_id }));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.sounds.len(), 1);
-    assert_ne!(app.doc.sounds[0].id, sound_id, "消した音の番号は使わない");
+    assert_ne!(app.doc.sounds.at(0).unwrap().id, sound_id, "消した音の番号は使わない");
     assert_eq!(
         symbol_sound_bytes(&app.doc, sym_id),
         vec![src_bytes.clone()]
@@ -40824,7 +41204,7 @@ fn frames_to_reach_is_the_inverse_of_frames_to_sound() {
 #[test]
 fn sound_peaks_follow_the_samples() {
     let doc = doc_with_flat_sound();
-    let s = &doc.sounds[0];
+    let s = &doc.sounds.at(0).unwrap();
     let unit = crate::timeline_ui::WAVE_UNIT;
     assert_eq!(s.peak(0, 125, unit), Some((0.5, 0.5)));
     assert_eq!(s.peak(47_900, 48_000, unit), Some((0.5, 0.5)));
@@ -41000,7 +41380,7 @@ fn doc_with_saw_sound() -> symbol::Document {
     let samples: Vec<i16> = (0..48_000).map(|i| ((i % 4000) * 8 - 16000) as i16).collect();
     let bytes = wav_bytes(48_000, 1, &samples);
     let s = crate::sound::Sound::new(1, "saw".to_owned(), bytes.into()).unwrap();
-    std::sync::Arc::make_mut(&mut doc.sounds).push(std::sync::Arc::new(s));
+    doc.sounds.push_new(std::sync::Arc::new(s));
     doc.next_sound_id = 2;
     put_clip(&mut doc.root, 10, flat_clip());
     doc
@@ -41300,7 +41680,7 @@ fn video_export_includes_the_mixed_audio_track() {
         assert!(ok, "{} の長さ {t} 秒", String::from_utf8_lossy(kind));
     }
 
-    std::sync::Arc::make_mut(&mut doc.sounds).clear();
+    doc.sounds = crate::sound::SoundLibrary::default();
     let (len, tracks, audio) = inspect(&export(&doc, "without_sound.mp4"));
     assert_eq!(audio, None);
     assert_eq!(tracks.len(), 1);
@@ -42838,7 +43218,3 @@ mod strokes {
         assert!(app.scene().iter().any(|s| s.line.is_some() && s.contains_point(Point::new(200.0, 100.0))));
     }
 }
-
-
-
-

@@ -454,8 +454,8 @@ impl View {
     /// 約束の棚卸し 5616fcc の A の P-19）
     pub(crate) fn library_symbol(&self, library: &Library) -> Option<u64> {
         self.selected_library_symbol
-            .filter(|&id| library.iter().any(|s| s.id == id))
-            .or_else(|| library.first().map(|s| s.id))
+            .filter(|&id| library.get(id).is_some())
+            .or_else(|| library.at(0).map(|s| s.id))
     }
 
     /// ライブラリでシンボル `id` を選ぶ
@@ -772,7 +772,7 @@ pub(crate) struct Clipboard {
     /// クリップボード内のシェイプが参照しているシンボル定義のスナップショット群（依存順）
     pub(crate) symbols: Vec<Arc<SymbolDef>>,
     /// `symbols` のタイムラインの音の区間が指す音（コピー元の音のライブラリの音を共有する。移植で貼り先へ持ち込む）
-    pub(crate) sounds: Vec<Arc<crate::sound::Sound>>,
+    pub(crate) sounds: crate::sound::SoundLibrary,
     /// 各コピー元タブから貼り付け先タブへ既にインポート済みのシンボルID対応表 `(source_doc_id, source_sym_id, target_doc_id) -> target_sym_id`
     pub(crate) imported_map: HashMap<(u64, u64, u64), u64>,
     /// 最後に V を離してから、V を押した合図（`Key`）か貼り付けの合図（`Paste`）が来たか（`swallowed_paste`）
@@ -2657,10 +2657,10 @@ impl Tab {
         self.session.scene()
     }
 
-    /// 編集中のシンボルのライブラリでの位置を返す（ルートを編集中なら `None`）
-    fn active_symbol_index(&self) -> Option<usize> {
-        let last = self.session.edit_path.last()?;
-        self.doc.library().iter().position(|s| s.id == last.symbol_id)
+    /// 編集中のシンボルの番号（ルートを編集中か、シンボルがライブラリに無ければ `None`。2分探索）
+    fn active_symbol_id(&self) -> Option<u64> {
+        let id = self.session.edit_path.last()?.symbol_id;
+        self.doc.library().get(id).map(|_| id)
     }
 
     /// テスト用：画面の土台が最新か（`refresh_scene_base` で作り直すものが無い）
@@ -2676,8 +2676,8 @@ impl Tab {
     /// `Document` の現在フレームおよび `edit_path` から `Scene` のレイヤー別土台キャッシュを再構築する
     pub(crate) fn refresh_scene_base(&mut self) {
         let world_xform = self.session.edit_path.world_xform();
-        let tl = match self.active_symbol_index() {
-            Some(idx) => &self.doc.library()[idx].timeline,
+        let tl = match self.active_symbol_id().and_then(|id| self.doc.library().get(id)) {
+            Some(sym) => &sym.timeline,
             None => &self.doc.root,
         };
         if self
@@ -2692,8 +2692,8 @@ impl Tab {
     /// 現在編集中のタイムラインへの不変参照を返す
     #[inline]
     pub(crate) fn active_timeline(&self) -> &Timeline {
-        match self.active_symbol_index() {
-            Some(idx) => &self.doc.library()[idx].timeline,
+        match self.active_symbol_id().and_then(|id| self.doc.library().get(id)) {
+            Some(sym) => &sym.timeline,
             None => &self.doc.root,
         }
     }
@@ -2702,8 +2702,8 @@ impl Tab {
     /// 可変参照。中身を書くのは `write_active_timeline`
     #[inline]
     fn active_timeline_raw_mut(&mut self) -> &mut Timeline {
-        match self.active_symbol_index() {
-            Some(idx) => self.doc.symbol_view_mut(idx),
+        match self.active_symbol_id() {
+            Some(id) => self.doc.symbol_view_mut(id).expect("編集中のシンボルはライブラリにある"),
             None => &mut self.doc.root,
         }
     }
@@ -2779,8 +2779,8 @@ impl Tab {
         &mut self,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
-        if let Some(idx) = self.active_symbol_index() {
-            return self.doc.write_symbol_timeline(idx, f);
+        if let Some(id) = self.active_symbol_id() {
+            return self.doc.write_symbol_timeline(id, f);
         }
         let mut taken_root = std::mem::take(&mut self.doc.root);
         let res = f(&mut taken_root, &mut self.doc);
@@ -3011,7 +3011,7 @@ impl Tab {
         self.session
             .symbol_memo
             .lock()
-            .start_pass(self.doc.library());
+            .start_pass();
         self.session.onion_cache.lock().start_pass();
         self.session.cel_cache.lock().start_pass();
         self.session.backdrop_cache.lock().start_pass();
@@ -3019,8 +3019,7 @@ impl Tab {
 
     /// 描くたびのシンボルの評価を、セッションのメモ（`Session::symbol_memo`）を使って行う
     pub(crate) fn with_symbol_eval<R>(&self, f: impl FnOnce(SymbolEvalCtx<'_>) -> R) -> R {
-        let mut state = std::mem::take(&mut *self.session.symbol_memo.lock());
-        state.fit_library(self.doc.library());
+        let state = std::mem::take(&mut *self.session.symbol_memo.lock());
         let ctx = SymbolEvalCtx::with_state(self.doc.library(), state);
         let out = f(ctx.clone());
         *self.session.symbol_memo.lock() = ctx.into_state();

@@ -644,7 +644,7 @@ impl ContentMark {
         let doc = &tab.doc;
         doc.root.same_content(&self.root)
             && library_same_content(doc.library(), &self.library)
-            && std::sync::Arc::ptr_eq(&doc.sounds, &self.sounds)
+            && doc.sounds.address() == self.sounds.address()
             && doc.stage_size == self.stage_size
             && doc.fps == self.fps
             && match (&self.floating, tab.session.floating()) {
@@ -655,11 +655,10 @@ impl ContentMark {
     }
 }
 
-/// ライブラリ `a` と `b` の中身が同じか（シンボルごとに、同じ箱か、中身が同じ：`SymbolDef::same_content`）
+/// ライブラリ `a` と `b` の中身が同じか（見せる順と、シンボルごとに同じ箱か中身が同じ：`Library::same_content`。同じ塊は
+/// 中を見ない）
 fn library_same_content(a: &crate::symbol::Library, b: &crate::symbol::Library) -> bool {
-    a.ptr_eq(b)
-        || (a.len() == b.len()
-            && a.iter().zip(b.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(x, y) || x.same_content(y)))
+    a.same_content(b)
 }
 
 // ============================================================================
@@ -736,7 +735,7 @@ fn apply_import_sound(
 fn apply_set_keyframe_sound(tab: &mut Tab, sound: Option<u64>) -> bool {
     let clip = match sound {
         Some(id) => {
-            let Some(s) = tab.doc.sounds.iter().find(|s| s.id == id) else {
+            let Some(s) = tab.doc.sounds.get(id) else {
                 return false;
             };
             let Some(clip) = crate::sound::SoundClip::whole(s) else {
@@ -784,7 +783,7 @@ fn mutate_timeline_with_undo(
     let before_sounds = tab.doc.sounds.clone();
     tab.with_active_timeline_mut(mutate);
     let changed = !tab.active_timeline().same_content(&before_tl)
-        || !std::sync::Arc::ptr_eq(&tab.doc.sounds, &before_sounds);
+        || tab.doc.sounds.address() != before_sounds.address();
     let moved = at(tab.active_timeline()) != at(&before_tl);
     (changed || moved) && reset_session_after_timeline_change(tab)
 }
@@ -2010,18 +2009,16 @@ fn apply_duplicate_symbol(tab: &mut Tab, sym_id: u64) -> bool {
     if tab.doc.find_symbol(sym_id).is_none() {
         return false;
     }
-    let Some(i) = tab.doc.library().iter().position(|s| s.id == sym_id) else {
+    let Some(i) = tab.doc.library().position(sym_id) else {
         return false;
     };
 
-    let mut copy = (**tab.doc.library().get(i).expect("見つけた所")).clone();
+    let mut copy = (**tab.doc.library().get(sym_id).expect("見つけた所")).clone();
     let base = std::mem::take(&mut copy.name);
-    copy.name = tab.doc.unused_symbol_name(
-        std::iter::once(format!("{base}のコピー"))
-            .chain((2u64..).map(|n| format!("{base}のコピー {n}"))),
-    );
+    let stem = format!("{base}のコピー");
+    copy.name = tab.doc.numbered_name(Some(&stem), crate::symbol::NumberForm::Space, &stem, 2);
     copy.id = tab.doc.alloc_symbol_id();
-    copy.revision = crate::vector_engine::next_mesh_revision();
+    copy.renew_revision();
     remap_timeline_ids(
         &mut copy.timeline,
         &mut tab.doc,
@@ -2473,7 +2470,7 @@ pub(in crate::canvas_tool) fn rotate_selected_shapes(host: &mut impl ActionHost,
 
 #[cfg(test)]
 pub(in crate::canvas_tool) fn convert_selection_to_symbol(host: &mut impl ActionHost) -> Option<u64> {
-    apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library().last().map(|s| s.id))?
+    apply(host, Action::ConvertToSymbol).then(|| host.tab().doc.library().iter_by_id().last().map(|s| s.id))?
 }
 
 #[cfg(test)]

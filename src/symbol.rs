@@ -70,7 +70,7 @@ impl SymbolInstanceBinding {
     ) -> Vec<FillShape> {
         let with_mesh = ctx.with_mesh;
         let local_shapes = (ctx.depth < MAX_SYMBOL_NEST_DEPTH)
-            .then(|| ctx.library.iter().find(|s| s.id == self.symbol_id))
+            .then(|| ctx.library.get(self.symbol_id))
             .flatten()
             .map(|sym| {
                 sym.evaluated_local_shapes_for_instance(self, kf_start_frame, frame, ctx.nested())
@@ -165,8 +165,9 @@ impl SymbolPreviews {
     }
 }
 
-/// シンボルのライブラリ。塊ごとに Undo の控えと共有する列（`ChunkedList`。書くのは触った塊と、そのシンボルだけ）
-pub(crate) type Library = crate::chunked_list::ChunkedList<SymbolDef>;
+#[path = "symbol_library.rs"]
+mod library;
+pub(crate) use library::{Library, NumberForm, Slot};
 
 /// ライブラリに登録されたシンボル定義（独自の `Timeline` とローカル基準点 `(0, 0)` を持つ）
 #[derive(Clone, Debug)]
@@ -175,8 +176,15 @@ pub(crate) struct SymbolDef {
     pub(crate) name: String,
     /// シンボル内部の独自タイムライン（各シェイプは基準点 `(0, 0)` 中心のローカル座標系）
     pub(crate) timeline: Timeline,
-    /// シンボル定義の変更世代番号（解決済みセルメッシュキャッシュの署名計算用）
-    pub(crate) revision: u64,
+    /// 深い版：自分か、中の子のどれかの中身が変わったら変わる（ライブラリが作り直す：`Library::put_timeline`。写しの鍵・
+    /// 署名・評価のメモの鍵）
+    revision: u64,
+    /// 中で使うシンボルの番号・音の番号（小さい順。ライブラリが、タイムラインの塊の要約から作る）
+    children: Vec<u64>,
+    sounds: Vec<u64>,
+    /// 高さ（1＋子の高さの最大。入れ子の上限＋1で止める）と、動くか（2コマ以上か、動く子を持つ）。ライブラリが作る
+    height: usize,
+    dynamic: bool,
 }
 
 impl SymbolDef {
@@ -188,6 +196,10 @@ impl SymbolDef {
             name,
             timeline,
             revision: _,
+            children: _,
+            sounds: _,
+            height: _,
+            dynamic: _,
         } = self;
         *id == other.id && *name == other.name && timeline.same_content(&other.timeline)
     }
@@ -195,12 +207,13 @@ impl SymbolDef {
 
 pub(crate) const MAX_SYMBOL_NEST_DEPTH: usize = 8;
 
-type SymbolEvalMemoKey = (u64, usize, usize);
+/// 評価のメモの鍵：シンボルの番号・深い版（中身が変わったシンボルの古いメモは使われない）・コマ・入れ子の深さ
+type SymbolEvalMemoKey = (u64, u64, usize, usize);
 
 /// シンボルの中身を評価した結果（シンボルの座標の図形。画面に出すときはメッシュも持つ）のメモ。
 /// `SymbolEvalCtx::new` のものは1回の評価の間だけ使う。セッションが持つもの（`Session::symbol_memo`）は、
 /// 描くたびの評価（オニオンスキン・再生・ロック中のレイヤー）で使い回し、次の2つの決まりで捨てる
-/// - ライブラリのどれかのシンボルが変わったら（ID と世代番号の並びが変わったら）全部捨てる
+/// - 鍵にシンボルの深い版を入れるので、中身が変わったシンボルの古いメモは使われない
 /// - 直前の1回の描画で使わなかったものは捨てる（持つのは、今の画面が使う分だけ）
 #[derive(Default)]
 pub(crate) struct SymbolEvalState {
@@ -208,36 +221,15 @@ pub(crate) struct SymbolEvalState {
     memo: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
     /// 前の回の描画で使ったもの（この回でも使うと `memo` へ移す）
     prev: HashMap<SymbolEvalMemoKey, Arc<Vec<FillShape>>>,
-    library_sig: Vec<(u64, u64)>,
     /// この回に展開したセル画の地図の、計算に使う写し（写しを持ち続けるのは、受け取った所：画面の土台）
     held: Vec<Arc<LayerBase>>,
 }
 
 impl SymbolEvalState {
-    /// 1回の描画の始めに呼ぶ：直前の回に使ったものを、この回で使えば残すものにする（ライブラリが変わっていれば捨てる：
-    /// `fit_library`）
-    pub(crate) fn start_pass(&mut self, library: &Library) {
+    /// 1回の描画の始めに呼ぶ：直前の回に使ったものを、この回で使えば残すものにする
+    pub(crate) fn start_pass(&mut self) {
         self.held.clear();
-        self.fit_library(library);
         self.prev = std::mem::take(&mut self.memo);
-    }
-
-    /// メモを使う前に呼ぶ（使う入口 `Tab::with_symbol_eval` が毎回呼ぶ）：ライブラリのどれかのシンボルが変わっていたら
-    /// （ID と世代番号の並びが違えば）全部捨てる。前は描画の始めにしか確かめなかったので、同じ1コマのうちにライブラリを
-    /// 変える操作（取り消しなど）のあとでスポイト・バケツがメモを使うと、古い中身で色を拾った（約束の棚卸し 5616fcc の
-    /// B の D1・E1）。手間はシンボルの数の分（ライトなアニメでは数十〜数百）
-    pub(crate) fn fit_library(&mut self, library: &Library) {
-        let same_library = self.library_sig.len() == library.len()
-            && self
-                .library_sig
-                .iter()
-                .zip(library)
-                .all(|(&(id, rev), s)| id == s.id && rev == s.revision);
-        if !same_library {
-            self.memo.clear();
-            self.prev.clear();
-            self.library_sig = library.iter().map(|s| (s.id, s.revision)).collect();
-        }
     }
 
     /// この回に展開したセル画の地図の、計算に使う写し
@@ -349,7 +341,7 @@ pub(crate) fn resolve_cel_with_library(
             crate::timeline::Part::Shape(s) => out.push(CelShape::Map(s)),
             crate::timeline::Part::Instance(inst) => {
                 if ctx.depth < MAX_SYMBOL_NEST_DEPTH
-                    && ctx.library.iter().any(|s| s.id == inst.binding.symbol_id)
+                    && ctx.library.get(inst.binding.symbol_id).is_some()
                 {
                     out.extend(
                         inst.binding
@@ -406,40 +398,36 @@ impl SymbolDef {
             name,
             timeline,
             revision: crate::vector_engine::next_mesh_revision(),
+            children: Vec::new(),
+            sounds: Vec::new(),
+            height: 0,
+            dynamic: false,
         }
     }
 
-    /// このシンボル自身、または内部の入れ子シンボルが複数フレームを持つか（コマで絵が変わるか）を再帰判定する
-    pub(crate) fn has_dynamic_animation(&self, library: &Library) -> bool {
-        let mut known = Vec::new();
-        self.has_dynamic_animation_inner(library, 0, &mut known)
+    /// このシンボル自身、または内部の入れ子シンボルが複数フレームを持つか（コマで絵が変わるか。ライブラリが作って持つ）
+    pub(crate) fn has_dynamic_animation(&self) -> bool {
+        self.dynamic
     }
 
-    /// 1回の判定の中で調べ終えた子のシンボル ID と結果 `known` を覚え、入れ子のインスタンスの数だけ同じ子を調べ直さないようにする
-    fn has_dynamic_animation_inner(
-        &self,
-        library: &Library,
-        depth: usize,
-        known: &mut Vec<(u64, bool)>,
-    ) -> bool {
-        if depth >= MAX_SYMBOL_NEST_DEPTH {
-            return false;
-        }
-        if self.timeline.total_frames > 1 {
-            return true;
-        }
-        self.timeline.instances().any(|inst| {
-            let sid = inst.binding.symbol_id;
-            if let Some(&(_, res)) = known.iter().find(|&&(id, _)| id == sid) {
-                return res;
-            }
-            let res = library
-                .iter()
-                .find(|child| child.id == sid)
-                .is_some_and(|child| child.has_dynamic_animation_inner(library, depth + 1, known));
-            known.push((sid, res));
-            res
-        })
+    /// 深い版（自分か、中の子のどれかの中身が変わったら変わる）
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// 新しい版にする（ライブラリに足す前の、別のシンボルにする写し：複製）
+    pub(crate) fn renew_revision(&mut self) {
+        self.revision = crate::vector_engine::next_mesh_revision();
+    }
+
+    /// 中で使うシンボルの番号（小さい順）
+    pub(crate) fn children(&self) -> &[u64] {
+        &self.children
+    }
+
+    /// 中で使う音の番号（小さい順）
+    pub(crate) fn sounds(&self) -> &[u64] {
+        &self.sounds
     }
 
     /// シンボルの全フレーム（`0..total_frames`）を先頭から走査し、最初に図形が存在するフレームのローカル図形列を返す
@@ -553,7 +541,7 @@ impl SymbolDef {
             if !cel.instances().is_empty() {
                 for inst in cel.instances_mut() {
                     let b = &mut inst.binding;
-                    let Some(child_sym) = library.iter().find(|s| s.id == b.symbol_id) else {
+                    let Some(child_sym) = library.get(b.symbol_id) else {
                         continue;
                     };
                     b.advance(child_elapsed);
@@ -578,7 +566,7 @@ impl SymbolDef {
         ctx: SymbolEvalCtx<'_>,
     ) -> Arc<Vec<FillShape>> {
         let frame_idx = self.resolve_internal_frame(binding, kf_start_frame, current_frame);
-        let memo_key = (self.id, frame_idx, ctx.depth);
+        let memo_key = (self.id, self.revision, frame_idx, ctx.depth);
         if let Some(cached) = ctx.get_memo(&memo_key) {
             return cached;
         }
@@ -797,17 +785,14 @@ impl Document {
 
     /// シンボル `def` をライブラリの `at` 番目（`None` なら最後）に足し、文書の版を上げる（シンボルを足す所はみなここ）
     pub(crate) fn add_symbol(&mut self, at: Option<usize>, def: SymbolDef) {
-        match at {
-            Some(i) => self.library.insert(i, Arc::new(def)),
-            None => self.library.push(Arc::new(def)),
-        }
+        self.library.insert(at, def);
         self.bump_revision();
     }
 
-    /// ライブラリの `i` 番目のシンボルの、見ているコマ・選んでいるレイヤーなど中身でない状態を書くためのタイムライン
-    /// （版は上げない。中身を書くのは `write_symbol_timeline`）
-    pub(crate) fn symbol_view_mut(&mut self, i: usize) -> &mut Timeline {
-        &mut Arc::make_mut(&mut self.library[i]).timeline
+    /// 番号 `id` のシンボルの、見ているコマ・選んでいるレイヤーなど中身でない状態を書くためのタイムライン（版は上げない。
+    /// 中身を書くのは `write_symbol_timeline`）。無い番号なら `None`
+    pub(crate) fn symbol_view_mut(&mut self, id: u64) -> Option<&mut Timeline> {
+        self.library.view_mut(id)
     }
 }
 
@@ -856,7 +841,7 @@ impl Document {
     /// （読み込みのあと）
     pub(crate) fn watch_broken_maps(&self) {
         self.root.watch_broken_maps(&self.load_notices, "");
-        for sym in self.library.iter() {
+        for sym in self.library.iter_by_id() {
             sym.timeline
                 .watch_broken_maps(&self.load_notices, &format!("シンボル「{}」の", sym.name));
         }
@@ -868,7 +853,7 @@ impl Document {
     /// `None`（使うときに確かめる）。スレッドは確かめた地図の数を返す
     pub(crate) fn check_maps_in_background(&self) -> Option<std::thread::JoinHandle<usize>> {
         let maps = crate::timeline::UncheckedMaps::of(
-            std::iter::once(&self.root).chain(self.library.iter().map(|s| &s.timeline)),
+            std::iter::once(&self.root).chain(self.library.iter_by_id().map(|s| &s.timeline)),
         );
         std::thread::Builder::new()
             .name("is2d-map-check".to_owned())
@@ -897,60 +882,50 @@ impl Document {
 
     /// 新しいシンボル定義 `sym_def`（`SymbolDef::from_cel`）をライブラリへ登録する。名前はここで付ける
     pub(crate) fn register_symbol(&mut self, mut sym_def: SymbolDef) {
-        let sym_id = sym_def.id;
-        sym_def.name = self.unused_symbol_name(
-            (sym_id..=u64::MAX)
-                .chain(1..)
-                .map(|n| format!("Symbol {n}")),
-        );
+        // 「Symbol N」の N は、シンボルの番号から上で空いている一番小さい数（無ければ 1 から）
+        sym_def.name = self.numbered_name(None, NumberForm::Space, "Symbol", sym_def.id);
         self.add_symbol(None, sym_def);
     }
 
-    /// 名前の候補 `names` のうち、ライブラリのどのシンボルも使っていない最初の名前。シンボルに名前を付ける所（作る・別の
-    /// タブから移す・複製する）は、みなこれで決める。候補は尽きないこと（ライブラリは有限なので、いつか見つかる）
-    pub(crate) fn unused_symbol_name(&self, mut names: impl Iterator<Item = String>) -> String {
-        names
-            .find(|n| !self.library.iter().any(|s| s.name == *n))
-            .expect("名前の候補は尽きない")
+    /// シンボルに付ける名前で、ライブラリのどのシンボルも使っていないもの：`plain`（番号の無い名前）が空いていればそれ、
+    /// 無ければ、付け方 `form`・元 `stem` で `from` 以上の空いている一番小さい番号（`from` から上が尽きていれば 1 から）を
+    /// 付けた名前。シンボルに名前を付ける所（作る・別のタブから移す・複製する）は、みなこれで決める（空いている番号は2分
+    /// 探索：`Library::first_free_number`）
+    pub(crate) fn numbered_name(&self, plain: Option<&str>, form: NumberForm, stem: &str, from: u64) -> String {
+        if let Some(p) = plain.filter(|p| !self.library.name_taken(p)) {
+            return p.to_owned();
+        }
+        let n = self
+            .library
+            .first_free_number(form, stem, from)
+            .or_else(|| self.library.first_free_number(form, stem, 1))
+            .expect("番号は尽きない（ライブラリは有限）");
+        form.name(stem, n)
     }
 
-    /// ライブラリの `i` 番目のシンボルのタイムラインを `f(タイムライン, 文書)` で書き、中身が変わったら、そのシンボルの版と
-    /// ライブラリの版を上げる。シンボルの中身を書く入口はこれ1つ（版で中身を見分ける所：クリップボードの使い回し・写しの
+    /// 番号 `id` のシンボル（ライブラリにあること）のタイムラインを `f(タイムライン, 文書)` で書き、中身が変わったら、
+    /// そのシンボルと先祖の版・子・音・高さ・動く か（`Library::put_timeline`）と、ライブラリの版を上げる。シンボルの中身を書く入口はこれ1つ（版で中身を見分ける所：クリップボードの使い回し・写しの
     /// 鍵が、書いた後の中身を古い中身と取り違えない）。中身が変わらなければ版はそのまま（前は何も変えない書き込みでも版を
     /// 上げ、写しを作り直させ、別のタブへの使い回しを外した：約束の棚卸し 5616fcc の B）。比べるのは書く前の写し（塊を
     /// 分け合うので、写すのも比べるのもレイヤーと塊の数だけ：`Timeline::same_content`）。書いている間、タイムラインは
     /// 文書から外してある
     pub(crate) fn write_symbol_timeline<R>(
         &mut self,
-        i: usize,
+        id: u64,
         f: impl FnOnce(&mut Timeline, &mut Document) -> R,
     ) -> R {
-        let before = self.library[i].timeline.clone();
-        let mut tl = std::mem::take(&mut Arc::make_mut(&mut self.library[i]).timeline);
+        let mut tl = self.library.take_timeline(id).expect("書くシンボルはライブラリにある");
+        let before = tl.clone();
         let res = f(&mut tl, self);
-        let changed = !tl.same_content(&before);
-        let sym = Arc::make_mut(&mut self.library[i]);
-        sym.timeline = tl;
-        if changed {
-            sym.revision = crate::vector_engine::next_mesh_revision();
+        if self.library.put_timeline(id, tl, &before) {
             self.bump_revision();
         }
         res
     }
 
-    /// 指定した `symbol_id` のシンボル定義を参照する
+    /// 指定した `symbol_id` のシンボル定義を参照する（2分探索）
     pub(crate) fn find_symbol(&self, symbol_id: u64) -> Option<&SymbolDef> {
-        self.library
-            .iter()
-            .find(|s| s.id == symbol_id)
-            .map(|s| &**s)
-    }
-
-    /// 指定した `symbol_id` のシンボル定義を可変参照する（Undo の控えと共有していれば、そのシンボルと、それが入っている
-    /// ライブラリの塊だけを写す）
-    fn find_symbol_mut(&mut self, symbol_id: u64) -> Option<&mut SymbolDef> {
-        let i = self.library.iter().position(|s| s.id == symbol_id)?;
-        Some(Arc::make_mut(&mut self.library[i]))
+        self.library.get(symbol_id).map(|s| &**s)
     }
 
     #[cfg(test)]
@@ -962,43 +937,12 @@ impl Document {
                     .any(|kf| kf.cel.shapes().iter().any(|s| s.has_cached_fill_mesh()))
             })
         };
-        tl_has_mesh(&self.root) || self.library.iter().any(|sym| tl_has_mesh(&sym.timeline))
+        tl_has_mesh(&self.root) || self.library.iter_by_id().any(|sym| tl_has_mesh(&sym.timeline))
     }
 
-    /// 高さが `MAX_SYMBOL_NEST_DEPTH`（8）を超えるシンボルが1つでもあれば `true` を返す
+    /// 高さが `MAX_SYMBOL_NEST_DEPTH`（8）を超えるシンボルが1つでもあれば `true` を返す（ライブラリが数えて持つ）
     pub(crate) fn symbol_nest_exceeded(&self) -> bool {
-        fn height(
-            sym_id: u64,
-            depth: usize,
-            by_id: &HashMap<u64, &SymbolDef>,
-            memo: &mut HashMap<u64, usize>,
-        ) -> usize {
-            if let Some(&h) = memo.get(&sym_id) {
-                return h;
-            }
-            let Some(sym) = by_id.get(&sym_id) else {
-                return 0;
-            };
-            if depth > MAX_SYMBOL_NEST_DEPTH {
-                return MAX_SYMBOL_NEST_DEPTH + 1;
-            }
-            let mut max_child = 0usize;
-            for inst in sym.timeline.instances() {
-                let ch = height(inst.binding.symbol_id, depth + 1, by_id, memo);
-                if ch >= MAX_SYMBOL_NEST_DEPTH {
-                    return MAX_SYMBOL_NEST_DEPTH + 1;
-                }
-                max_child = max_child.max(ch);
-            }
-            let h = 1 + max_child;
-            memo.insert(sym_id, h);
-            h
-        }
-        let by_id: HashMap<u64, &SymbolDef> = self.library.iter().map(|s| (s.id, &**s)).collect();
-        let mut memo = HashMap::with_capacity(self.library.len());
-        self.library
-            .iter()
-            .any(|s| height(s.id, 1, &by_id, &mut memo) > MAX_SYMBOL_NEST_DEPTH)
+        self.library.nest_exceeded()
     }
 
     /// `parent_symbol_id` の内部に `candidate_child_id` を配置した場合に、
@@ -1008,21 +952,8 @@ impl Document {
         parent_symbol_id: u64,
         candidate_child_id: u64,
     ) -> bool {
-        reaches(
-            candidate_child_id,
-            |id| id == parent_symbol_id,
-            |id| self.child_symbol_ids(id),
-        )
-    }
-
-    /// シンボル `symbol_id` の中のインスタンスが参照するシンボルの番号（シンボルが無ければ空）
-    pub(crate) fn child_symbol_ids(&self, symbol_id: u64) -> Vec<u64> {
-        self.find_symbol(symbol_id).map_or_else(Vec::new, |sym| {
-            sym.timeline
-                .instances()
-                .map(|inst| inst.binding.symbol_id)
-                .collect()
-        })
+        // 置く先から、使っているシンボルを上へたどる（手間は置く先の先祖の数）
+        self.library.reaches_up(parent_symbol_id, candidate_child_id)
     }
 
     /// 現在の編集コンテキスト（ルートシーンまたはシンボルインプレース編集経路 `edit_path`）に
@@ -1042,26 +973,12 @@ impl Document {
     /// 指定した `symbol_id` のシンボル名を変更する（変更があった場合のみ `true` を返す）。版は上げない（版は中身の世代で、
     /// 上げるのは中身を書く入口 `write_symbol_timeline` だけ。名前は版の付いた写しからは出さない：レビュー de92ceb の N-4002）
     pub(crate) fn rename_symbol(&mut self, symbol_id: u64, new_name: String) -> bool {
-        let Some(sym) = self.find_symbol_mut(symbol_id) else {
-            return false;
-        };
-        if sym.name == new_name {
-            return false;
-        }
-        sym.name = new_name;
-        true
+        self.library.rename(symbol_id, new_name)
     }
 
     /// 音のライブラリの番号 `sound_id` の音の名前を `new_name` にする。無い番号・同じ名前なら変えない
     pub(crate) fn rename_sound(&mut self, sound_id: u64, new_name: String) -> bool {
-        let Some(i) = self.sounds.iter().position(|s| s.id == sound_id) else {
-            return false;
-        };
-        if self.sounds[i].name == new_name {
-            return false;
-        }
-        Arc::make_mut(&mut Arc::make_mut(&mut self.sounds)[i]).name = new_name;
-        true
+        self.sounds.rename(sound_id, new_name)
     }
 
     /// 音 `sound` を、新しい番号を付けて音のライブラリの終わりに足し、その番号を返す（音を足す所はこれ1つ：読み込み・
@@ -1070,7 +987,7 @@ impl Document {
         let id = self.next_sound_id;
         self.next_sound_id += 1;
         sound.id = id;
-        Arc::make_mut(&mut self.sounds).push(Arc::new(sound));
+        self.sounds.push_new(Arc::new(sound));
         id
     }
 
@@ -1078,11 +995,7 @@ impl Document {
     /// その番号、無ければ新しい番号で足した写し（バイトと波形は共有する）の番号。持ち込む中身の音を入れる所はこれ1つ
     /// （クリップボードのシンボルの移植：`clipboard_ops::import_clipboard_symbols`）
     pub(crate) fn adopt_sound(&mut self, sound: &crate::sound::Sound) -> u64 {
-        match self
-            .sounds
-            .iter()
-            .find(|s| Arc::ptr_eq(&s.encoded, &sound.encoded))
-        {
+        match self.sounds.with_bytes(sound) {
             Some(s) => s.id,
             None => self.add_sound(sound.clone()),
         }
@@ -1091,31 +1004,21 @@ impl Document {
     /// 音のライブラリから番号 `sound_id` の音を消し、ルートと全シンボルのタイムラインで、その音を付けたキーフレームから
     /// 音を外す（空白のキーフレームに戻る。無い音を指す区間を残さない）。無い番号なら変えない
     pub(crate) fn remove_sound(&mut self, sound_id: u64) -> bool {
-        if !self.sounds.iter().any(|s| s.id == sound_id) {
+        if !self.sounds.remove(sound_id) {
             return false;
         }
-        Arc::make_mut(&mut self.sounds).retain(|s| s.id != sound_id);
-        let uses = |kf: &crate::timeline::Keyframe| kf.sound.is_some_and(|c| c.sound == sound_id);
         let remove_from_tl = |tl: &mut Timeline| {
-            for layer in &mut tl.layers {
-                for i in 0..layer.keyframes.len() {
-                    if uses(&layer.keyframes[i]) {
-                        layer.keyframe_mut(i).sound = None;
-                    }
-                }
-            }
+            tl.edit_keyframes_where(
+                |r| r.sounds.binary_search(&sound_id).is_ok(),
+                |kf| kf.sound.is_some_and(|c| c.sound == sound_id),
+                |kf| kf.sound = None,
+            );
         };
         remove_from_tl(&mut self.root);
-        // 音を付けたシンボルだけを書く（ほかのシンボルと塊は、Undo の控えと共有したまま）
-        for i in 0..self.library.len() {
-            if self.library[i]
-                .timeline
-                .layers
-                .iter()
-                .any(|l| l.keyframes.iter().any(|kf| uses(kf)))
-            {
-                self.write_symbol_timeline(i, |tl, _| remove_from_tl(tl));
-            }
+        // 音を付けたシンボルだけを書く（使われ方の表で引く。ほかのシンボルと塊は、Undo の控えと共有したまま）
+        let users: Vec<u64> = self.library.sound_users_of(sound_id).collect();
+        for id in users {
+            self.write_symbol_timeline(id, |tl, _| remove_from_tl(tl));
         }
         true
     }
@@ -1125,38 +1028,23 @@ impl Document {
     /// 部屋の中にしか無いので、部屋の外からは呼べない。部屋の中だけに見せることは、この関数を置いた部屋の都合でできない：
     /// 設計 入口の部屋の設計_27c4085 の 2.4）
     pub(crate) fn remove_symbol_and_instances(&mut self, symbol_id: u64) -> bool {
-        if !self.library.iter().any(|s| s.id == symbol_id) {
+        if self.library.get(symbol_id).is_none() {
             return false;
         }
         let remove_from_tl = |tl: &mut Timeline| {
-            for layer in &mut tl.layers {
-                for i in 0..layer.keyframes.len() {
-                    if layer.keyframes[i]
-                        .cel
-                        .instances()
-                        .iter()
-                        .any(|inst| inst.binding.symbol_id == symbol_id)
-                    {
-                        let kf = layer.keyframe_mut(i);
-                        kf.cel
-                            .instances_mut()
-                            .retain(|inst| inst.binding.symbol_id != symbol_id);
-                    }
-                }
-            }
+            tl.edit_keyframes_where(
+                |r| r.symbols.binary_search(&symbol_id).is_ok(),
+                |kf| kf.cel.instances().iter().any(|inst| inst.binding.symbol_id == symbol_id),
+                |kf| kf.cel.instances_mut().retain(|inst| inst.binding.symbol_id != symbol_id),
+            );
         };
         remove_from_tl(&mut self.root);
-        self.library.retain(|s| s.id != symbol_id);
-        // インスタンスを含むシンボルだけを書く（ほかのシンボルと塊は、Undo の控えと共有したまま）
-        for i in 0..self.library.len() {
-            if self.library[i]
-                .timeline
-                .instances()
-                .any(|inst| inst.binding.symbol_id == symbol_id)
-            {
-                self.write_symbol_timeline(i, |tl, _| remove_from_tl(tl));
-            }
+        // インスタンスを含むシンボルだけを書く（使われ方の表で引く。ほかのシンボルと塊は、Undo の控えと共有したまま）
+        let users: Vec<u64> = self.library.users_of(symbol_id).filter(|&u| u != symbol_id).collect();
+        for id in users {
+            self.write_symbol_timeline(id, |tl, _| remove_from_tl(tl));
         }
+        self.library.remove(symbol_id);
         self.bump_revision();
         true
     }
@@ -1183,10 +1071,7 @@ impl Document {
                     };
                     &sym.timeline
                 };
-                let has_inst = parent_tl.instances().any(|inst| {
-                    inst.binding.instance_gid == lvl.instance_gid
-                        && inst.binding.symbol_id == lvl.symbol_id
-                });
+                let has_inst = parent_tl.has_instance(lvl.instance_gid, lvl.symbol_id);
                 if !has_inst {
                     break;
                 }
@@ -1198,13 +1083,13 @@ impl Document {
             edit_path.levels.truncate(reachable_len);
             *editing_group_path = popped.parent_group_path;
             if let Some(last) = edit_path.last() {
-                if let Some(s) = self.find_symbol_mut(last.symbol_id) {
-                    s.timeline.active_layer = popped
+                if let Some(tl) = self.library.view_mut(last.symbol_id) {
+                    tl.active_layer = popped
                         .parent_active_layer
-                        .min(s.timeline.layers.len().saturating_sub(1));
-                    s.timeline.current_frame = popped
+                        .min(tl.layers.len().saturating_sub(1));
+                    tl.current_frame = popped
                         .parent_frame
-                        .min(s.timeline.total_frames.saturating_sub(1));
+                        .min(tl.total_frames.saturating_sub(1));
                 }
             } else {
                 self.root.active_layer = popped
@@ -1225,13 +1110,9 @@ impl Document {
 impl ResolvedCelSig {
     #[inline]
     fn are_referenced_symbols_current(&self, library: &Library) -> bool {
-        self.referenced_symbols.iter().all(|&(sym_id, rev)| {
-            if rev == u64::MAX {
-                !library.iter().any(|s| s.id == sym_id)
-            } else {
-                library.iter().any(|s| s.id == sym_id && s.revision == rev)
-            }
-        })
+        self.referenced_symbols
+            .iter()
+            .all(|&(sym_id, rev)| library.get(sym_id).map_or(u64::MAX, |s| s.revision) == rev)
     }
 
     /// ヒープアロケーションや再帰走査を一切行わずに、既存の署名 `self` が指定キーフレーム・ライブラリに対して有効かを O(参照シンボル数) で判定する
@@ -1260,31 +1141,11 @@ impl ResolvedCelSig {
     }
 }
 
-/// 指定された `sym_id` およびその内部で入れ子参照されている全子シンボルの `(id, revision)` を再帰的に収集する
-fn collect_referenced_symbol_revisions(
-    sym_id: u64,
-    library: &Library,
-    visited: &mut Vec<u64>,
-    depth: usize,
-    out: &mut Vec<(u64, u64)>,
-) {
-    if depth >= MAX_SYMBOL_NEST_DEPTH || visited.contains(&sym_id) {
-        return;
-    }
-    visited.push(sym_id);
-    if let Some(sym) = library.iter().find(|s| s.id == sym_id) {
-        out.push((sym.id, sym.revision));
-        for inst in sym.timeline.instances() {
-            collect_referenced_symbol_revisions(
-                inst.binding.symbol_id,
-                library,
-                visited,
-                depth + 1,
-                out,
-            );
-        }
-    } else {
-        out.push((sym_id, u64::MAX));
+/// セル画が直に使うシンボル `sym_id` の（番号, 深い版）を `out` に足す（無いシンボルは版を `u64::MAX` に。深い版は中の子が
+/// 変わっても変わるので、入れ子をたどらない）
+fn push_referenced_symbol(sym_id: u64, library: &Library, out: &mut Vec<(u64, u64)>) {
+    if !out.iter().any(|&(id, _)| id == sym_id) {
+        out.push((sym_id, library.get(sym_id).map_or(u64::MAX, |s| s.revision)));
     }
 }
 
@@ -1295,19 +1156,12 @@ pub(crate) fn compute_resolved_cel_signature(
     library: &Library,
 ) -> ResolvedCelSig {
     let kf = &layer.keyframes[kf_idx];
-    let mut visited_syms: Vec<u64> = Vec::new();
     let mut referenced_symbols: Vec<(u64, u64)> = Vec::new();
     for inst in kf.cel.instances().iter() {
         if excluded_instance_gid == Some(inst.binding.instance_gid) {
             continue;
         }
-        collect_referenced_symbol_revisions(
-            inst.binding.symbol_id,
-            library,
-            &mut visited_syms,
-            0,
-            &mut referenced_symbols,
-        );
+        push_referenced_symbol(inst.binding.symbol_id, library, &mut referenced_symbols);
     }
     let mut next_kf = None;
     if kf.tween {
@@ -1319,13 +1173,7 @@ pub(crate) fn compute_resolved_cel_signature(
                     .single_symbol_instance()
                     .is_none_or(|sb| excluded_instance_gid != Some(sb.instance_gid))
                 {
-                    collect_referenced_symbol_revisions(
-                        nb.symbol_id,
-                        library,
-                        &mut visited_syms,
-                        0,
-                        &mut referenced_symbols,
-                    );
+                    push_referenced_symbol(nb.symbol_id, library, &mut referenced_symbols);
                 }
             }
         }

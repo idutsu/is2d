@@ -30,8 +30,65 @@ pub(crate) trait Keyed: Clone {
     fn set_rel(&mut self, rel: i64);
 }
 
-/// 塊
-type Chunk<T> = Arc<Vec<Arc<T>>>;
+/// 塊（取り消しの控えと共有する）
+pub(crate) type Chunk<T> = Arc<ChunkItems<T>>;
+
+/// 塊の中身：要素の並びと、要素の型が決める要約（`Summarize`。初めて要るときに作って持つ）。中身を書く道はみな
+/// `DerefMut` を通るので、そこで要約を捨てる（書いた塊だけが要約を作り直す。書いていない塊は、控えと要約ごと共有する）
+pub(crate) struct ChunkItems<T> {
+    items: Vec<Arc<T>>,
+    summary: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// 塊の要約を持つ要素：塊の要素の並びから要約を作る（要約の形は要素の型ごとに1つ）
+pub(crate) trait Summarize: Sized {
+    type Summary: Send + Sync + 'static;
+    fn summarize(items: &[Arc<Self>]) -> Self::Summary;
+}
+
+impl<T> ChunkItems<T> {
+    fn new(items: Vec<Arc<T>>) -> Self {
+        Self { items, summary: std::sync::OnceLock::new() }
+    }
+}
+
+impl<T: Summarize> ChunkItems<T> {
+    /// この塊の要約（初めて要るときに作る）
+    pub(crate) fn summary(&self) -> &T::Summary {
+        self.summary
+            .get_or_init(|| Box::new(T::summarize(&self.items)))
+            .downcast_ref()
+            .expect("要約の形は要素の型ごとに1つ")
+    }
+}
+
+/// 写した塊は要約を持たない（写すのは書く前：書けば捨てるので、作り直しを先にしない）
+impl<T> Clone for ChunkItems<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.items.clone())
+    }
+}
+
+impl<T> std::ops::Deref for ChunkItems<T> {
+    type Target = Vec<Arc<T>>;
+    fn deref(&self) -> &Vec<Arc<T>> {
+        &self.items
+    }
+}
+
+/// 中身を書く道：要約を捨てる
+impl<T> std::ops::DerefMut for ChunkItems<T> {
+    fn deref_mut(&mut self) -> &mut Vec<Arc<T>> {
+        self.summary = std::sync::OnceLock::new();
+        &mut self.items
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for ChunkItems<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.items.fmt(f)
+    }
+}
 
 /// 1つの塊の要素の数の目安（足して2倍を超えたら2つに分ける）
 const CHUNK: usize = 64;
@@ -111,7 +168,7 @@ impl<T> ChunkedList<T> {
         assert!(i <= self.len, "番号 {i} が列の長さ {} を超える", self.len);
         let all = Arc::make_mut(&mut self.chunks);
         if all.chunks.is_empty() {
-            all.chunks.push(Arc::new(Vec::new()));
+            all.chunks.push(Arc::new(ChunkItems::new(Vec::new())));
             all.bases.push(0);
         }
         let (c, k) = if i == self.len {
@@ -123,8 +180,9 @@ impl<T> ChunkedList<T> {
         let chunk = Arc::make_mut(&mut all.chunks[c]);
         chunk.insert(k, item);
         if chunk.len() > 2 * CHUNK {
-            let tail = chunk.split_off(chunk.len() / 2);
-            all.chunks.insert(c + 1, Arc::new(tail));
+            let half = chunk.len() / 2;
+            let tail = chunk.split_off(half);
+            all.chunks.insert(c + 1, Arc::new(ChunkItems::new(tail)));
             let base = all.bases[c];
             all.bases.insert(c + 1, base);
         }
@@ -156,27 +214,30 @@ impl<T> ChunkedList<T> {
         *self = Self::default();
     }
 
-    /// `keep` が偽の要素を消す。消すものの無い塊は、写さずにそのまま共有する
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&Arc<T>) -> bool) {
-        self.retain_in_chunks(|_, x| keep(x));
-    }
-
-    /// `keep`（塊の基準と要素）が偽の要素を消す。消すものの無い塊は、写さずにそのまま共有する
-    fn retain_in_chunks(&mut self, mut keep: impl FnMut(i64, &Arc<T>) -> bool) {
+    /// 番号 `range` の要素を消す。かかる塊だけを書き（範囲がまるごと入る塊は外す）、ほかの塊は写さずにそのまま共有する
+    /// （手間は塊の数と、かかる塊の中身の分。前は全部の要素で消すかを確かめた：全体の点検 2026-11-27）
+    pub(crate) fn remove_range(&mut self, range: std::ops::Range<usize>) {
+        assert!(range.end <= self.len, "範囲 {range:?} が列の長さ {} を超える", self.len);
+        if range.is_empty() {
+            return;
+        }
         let all = Arc::make_mut(&mut self.chunks);
-        for (chunk, &b) in all.chunks.iter_mut().zip(&all.bases) {
-            if !chunk.iter().all(|x| keep(b, x)) {
-                Arc::make_mut(chunk).retain(|x| keep(b, x));
+        let mut c = 0;
+        while c < all.chunks.len() {
+            let (start, len) = (all.starts[c], all.chunks[c].len());
+            let (lo, hi) = (range.start.max(start), range.end.min(start + len));
+            if lo < hi {
+                Arc::make_mut(&mut all.chunks[c]).drain(lo - start..hi - start);
+            }
+            if all.chunks[c].is_empty() {
+                all.chunks.remove(c);
+                all.bases.remove(c);
+                all.starts.remove(c);
+            } else {
+                c += 1;
             }
         }
-        let mut bases = all.bases.iter();
-        all.bases = all
-            .chunks
-            .iter()
-            .filter_map(|c| bases.next().copied().filter(|_| !c.is_empty()))
-            .collect();
-        all.chunks.retain(|c| !c.is_empty());
-        self.len = all.chunks.iter().map(|c| c.len()).sum();
+        self.len -= range.len();
         Self::restart(all);
     }
 
@@ -188,7 +249,7 @@ impl<T> ChunkedList<T> {
 
     /// 塊と、その塊の数の基準（`Keyed` でない列では 0）を並びの順に。塊は書き換えると新しい塊になり、書き換えていない塊は
     /// 写しどうしで同じ塊（復旧の書き足すファイルが、新しい塊だけを書く：`recovery_journal`）
-    pub(crate) fn chunks_with_bases(&self) -> impl Iterator<Item = (&Arc<Vec<Arc<T>>>, i64)> + '_ {
+    pub(crate) fn chunks_with_bases(&self) -> impl Iterator<Item = (&Chunk<T>, i64)> + '_ {
         self.chunks.chunks.iter().zip(self.chunks.bases.iter().copied())
     }
 
@@ -214,6 +275,88 @@ impl<T> ChunkedList<T> {
             .filter(|c| other.chunks.chunks.iter().any(|o| Arc::ptr_eq(c, o)))
             .count();
         (shared, self.chunks.chunks.len())
+    }
+
+    /// 鍵の順の列（鍵 `key`）で、鍵が `k` 以上の最初の要素の番号（無ければ列の長さ。2分探索）
+    pub(crate) fn lower_bound<K: Ord>(&self, k: &K, key: impl Fn(&T) -> K) -> usize {
+        let all = &self.chunks;
+        let c = all.chunks.partition_point(|c| key(&c[c.len() - 1]) < *k);
+        all.chunks.get(c).map_or(self.len, |chunk| all.starts[c] + chunk.partition_point(|x| key(x) < *k))
+    }
+
+    /// 鍵 `key`（列は鍵の順で、鍵は1つずつ別）が `k` の要素の番号（2分探索）
+    pub(crate) fn position_sorted<K: Ord>(&self, k: K, key: impl Fn(&T) -> K) -> Option<usize> {
+        let all = &self.chunks;
+        let c = all.chunks.partition_point(|c| key(&c[c.len() - 1]) < k);
+        let chunk = all.chunks.get(c)?;
+        let i = chunk.partition_point(|x| key(x) < k);
+        chunk.get(i).filter(|x| key(x) == k).map(|_| all.starts[c] + i)
+    }
+
+    /// `may_have`（塊）が真の塊の中で、`is_it` が真の最初の要素の番号（塊を要約などで選んでから探す。手間は塊の数と、
+    /// 選んだ塊の中身の分）
+    pub(crate) fn position_where(
+        &self,
+        may_have: impl Fn(&ChunkItems<T>) -> bool,
+        is_it: impl Fn(&T) -> bool,
+    ) -> Option<usize> {
+        let all = &self.chunks;
+        all.chunks.iter().zip(&all.starts).filter(|(c, _)| may_have(c)).find_map(|(c, &start)| {
+            c.iter().position(|x| is_it(x)).map(|i| start + i)
+        })
+    }
+
+    /// `other` と同じ並びか（要素は同じ箱か `same`。`Keyed` の列は `same_keyed`）。手間は塊の数と、書いた所の分
+    /// （`same_by_chunks`）
+    pub(crate) fn same_items(&self, other: &Self, same: impl Fn(&T, &T) -> bool) -> bool {
+        self.same_by_chunks(other, |_, _| true, |_, a, _, b| Arc::ptr_eq(a, b) || same(a, b))
+    }
+
+    /// 2つの列を、塊をそろえながら前から比べる：両方とも塊の始まりにいて、同じ塊（番地が同じで `chunk_same`（塊の番号）
+    /// が真）なら中を見ずに進み、ほかは要素を `item_same`（塊の番号と要素）で比べる。途中に足した・消した所があって塊の
+    /// 切れ目がずれても、その先の書いていない塊は両方の列で同じ塊なので、またそろって中を見ずに進む（比べる要素は、書いた
+    /// 所の分だけ。前は塊の切れ目がずれると、残りの要素をみな1つずつ比べた：全体の点検 2026-11-27）
+    fn same_by_chunks(
+        &self,
+        other: &Self,
+        chunk_same: impl Fn(usize, usize) -> bool,
+        item_same: impl Fn(usize, &Arc<T>, usize, &Arc<T>) -> bool,
+    ) -> bool {
+        if self.ptr_eq(other) {
+            return true;
+        }
+        if self.len != other.len {
+            return false;
+        }
+        let (x, y) = (&self.chunks.chunks, &other.chunks.chunks);
+        let (mut ca, mut ka, mut cb, mut kb) = (0, 0, 0, 0);
+        loop {
+            while ca < x.len() && x[ca].is_empty() {
+                ca += 1;
+            }
+            while cb < y.len() && y[cb].is_empty() {
+                cb += 1;
+            }
+            if ca == x.len() || cb == y.len() {
+                return ca == x.len() && cb == y.len();
+            }
+            if ka == 0 && kb == 0 && Arc::ptr_eq(&x[ca], &y[cb]) && chunk_same(ca, cb) {
+                ca += 1;
+                cb += 1;
+                continue;
+            }
+            if !item_same(ca, &x[ca][ka], cb, &y[cb][kb]) {
+                return false;
+            }
+            ka += 1;
+            if ka == x[ca].len() {
+                (ca, ka) = (ca + 1, 0);
+            }
+            kb += 1;
+            if kb == y[cb].len() {
+                (cb, kb) = (cb + 1, 0);
+            }
+        }
     }
 
     /// 鍵 `key`（列は鍵の順で、鍵は1つずつ別）が `k` の要素（`sorted_from` の最初の要素の鍵が `k` なら、それ）
@@ -245,7 +388,7 @@ impl<T> ChunkedList<T> {
     /// 要素を消し、`added`（鍵の順。消したあとの列に無い鍵）を足す。消す鍵か足す要素がかかる塊だけを作り直し、ほかの塊は
     /// 写さずにそのまま共有する。作り直す塊は、続けて作り直す塊を1つにまとめてから、`CHUNK` 個ほどずつにそろえて分ける
     /// （`CHUNK / 2` より小さくなれば、続く塊（無ければ前の塊）と合わせる）。手間は、塊の数と、作り直す塊の中身の分
-    pub(crate) fn replace_sorted<K: Ord + Copy>(
+    pub(crate) fn replace_sorted<K: Ord>(
         &mut self,
         gone: &[K],
         added: Vec<Arc<T>>,
@@ -324,7 +467,7 @@ impl<T> ChunkedList<T> {
 }
 
 /// 塊 `chunk` から鍵が `gone` の要素を除き、`mine` を鍵の順に混ぜて、`run` の後ろに足す（`replace_sorted`）
-fn merge_sorted<T, K: Ord + Copy>(
+fn merge_sorted<T, K: Ord>(
     run: &mut Vec<Arc<T>>,
     chunk: &[Arc<T>],
     gone: &[K],
@@ -356,7 +499,7 @@ fn split_even<T>(items: Vec<Arc<T>>, out: &mut Vec<Chunk<T>>) {
     let mut it = items.into_iter();
     for p in 0..n {
         let size = base + usize::from(p < extra);
-        out.push(Arc::new(it.by_ref().take(size).collect()));
+        out.push(Arc::new(ChunkItems::new(it.by_ref().take(size).collect())));
     }
 }
 
@@ -379,11 +522,11 @@ impl<T> FromIterator<Arc<T>> for ChunkedList<T> {
             cur.push(item);
             len += 1;
             if cur.len() == CHUNK {
-                all.chunks.push(Arc::new(std::mem::take(&mut cur)));
+                all.chunks.push(Arc::new(ChunkItems::new(std::mem::take(&mut cur))));
             }
         }
         if !cur.is_empty() {
-            all.chunks.push(Arc::new(cur));
+            all.chunks.push(Arc::new(ChunkItems::new(cur)));
         }
         all.bases = vec![0; all.chunks.len()];
         Self::restart(&mut all);
@@ -402,27 +545,15 @@ impl<T: Keyed> ChunkedList<T> {
     }
 
     /// 数と要素を、前から順に
-    /// `other` と同じ並びか：数と要素が順に同じ（要素は同じ箱か `same`）。同じ所にある同じ塊（番地と基準が同じ）は、中を
-    /// 見ない（手間は変わった塊の分。編集で写すのは触った塊だけなので、作品の大きさによらない）。塊の切れ目が違うとき
-    /// だけ、要素を順に比べる
+    /// `other` と同じ並びか：数と要素が順に同じ（要素は同じ箱か `same`）。同じ塊（番地と基準が同じ）は中を見ない
+    /// （`same_by_chunks`。手間は塊の数と、書いた所の分）
     pub(crate) fn same_keyed(&self, other: &Self, same: impl Fn(&T, &T) -> bool) -> bool {
-        if self.ptr_eq(other) {
-            return true;
-        }
-        if self.len != other.len {
-            return false;
-        }
-        let eq = |(ka, a): (usize, &Arc<T>), (kb, b): (usize, &Arc<T>)| ka == kb && (Arc::ptr_eq(a, b) || same(a, b));
-        let (x, y) = (&self.chunks, &other.chunks);
-        if x.starts != y.starts {
-            return self.iter_keyed().zip(other.iter_keyed()).all(|(a, b)| eq(a, b));
-        }
-        x.chunks.iter().zip(&y.chunks).zip(x.bases.iter().zip(&y.bases)).all(|((ca, cb), (&ba, &bb))| {
-            (Arc::ptr_eq(ca, cb) && ba == bb)
-                || ca.iter().zip(cb.iter()).all(|(a, b)| {
-                    eq(((ba + a.rel()) as usize, a), ((bb + b.rel()) as usize, b))
-                })
-        })
+        let (xb, yb) = (&self.chunks.bases, &other.chunks.bases);
+        self.same_by_chunks(
+            other,
+            |ca, cb| xb[ca] == yb[cb],
+            |ca, a, cb, b| xb[ca] + a.rel() == yb[cb] + b.rel() && (Arc::ptr_eq(a, b) || same(a, b)),
+        )
     }
 
     pub(crate) fn iter_keyed(&self) -> impl Iterator<Item = (usize, &Arc<T>)> + '_ {
@@ -483,11 +614,6 @@ impl<T: Keyed> ChunkedList<T> {
         for b in &mut all.bases[c + 1..] {
             *b += delta;
         }
-    }
-
-    /// `keep`（数と要素）が偽の要素を消す。消すものの無い塊は、写さずにそのまま共有する
-    pub(crate) fn retain_keyed(&mut self, mut keep: impl FnMut(usize, &Arc<T>) -> bool) {
-        self.retain_in_chunks(|b, x| keep((b + x.rel()) as usize, x));
     }
 
     /// 数と要素の並び（数の順）から作る（塊の基準は、みな 0 から始める）

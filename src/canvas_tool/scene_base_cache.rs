@@ -80,9 +80,7 @@ fn layer_eval_frame(
             .all(|inst| inst.binding.loop_mode == SymbolLoopMode::SingleFrame);
     let has_dyn = !all_single_frame
         && kf.cel.instances().iter().filter(|i| keep(i)).any(|inst| {
-            library
-                .iter()
-                .any(|sym| sym.id == inst.binding.symbol_id && sym.has_dynamic_animation(library))
+            library.get(inst.binding.symbol_id).is_some_and(|sym| sym.has_dynamic_animation())
         });
     if !all_single_frame && (has_tween || has_dyn) {
         frame

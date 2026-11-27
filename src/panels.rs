@@ -522,9 +522,7 @@ fn draw_group_breadcrumb(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::
         }
         let sym_name = tab
             .doc()
-            .library()
-            .iter()
-            .find(|s| s.id == lvl.symbol_id)
+            .find_symbol(lvl.symbol_id)
             .map(|s| s.name.as_str())
             .unwrap_or("Symbol");
         items.push(format!("{} {sym_name}", icons::SYMBOL));
@@ -1263,7 +1261,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     };
     let current = tl.layers[l].keyframes[k].sound.map(|c| c.sound);
     let name_of = |id: Option<u64>| {
-        id.and_then(|id| tab.doc().sounds.iter().find(|s| s.id == id))
+        id.and_then(|id| tab.doc().sounds.get(id))
             .map_or("なし", |s| s.name.as_str())
     };
 
@@ -1592,14 +1590,40 @@ fn draw_selected_library_symbol_controls(
     ui.add_space(4.0);
 }
 
+/// ライブラリの一覧（シンボル・音）の行を、見えている行だけ作って並べる（`ScrollArea::show_rows`。行の間は 3）。行の
+/// 高さは、作った行の高さを覚えて次の描画で使う（行の形は一覧ごとに1つなので、どの行も同じ高さ。初めの1回は、行の形から
+/// 出した高さ）。一覧の行の数が多くても、
+/// 1回の描画の手間は見えている行の分（前は見えない行も全部作った：全体の点検 2026-11-27）
+fn library_rows(
+    ui: &mut egui::Ui,
+    salt: &'static str,
+    area: impl FnOnce(egui::ScrollArea) -> egui::ScrollArea,
+    count: usize,
+    mut row: impl FnMut(&mut egui::Ui, usize),
+) {
+    const GAP: f32 = 3.0;
+    let key = ui.id().with(("library_row_height", salt));
+    // まだ行を作っていなければ、行の形（枠の内側の余白 4 の上下・枠の線・入力欄の高さ）と行の間から出す
+    let height = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(key))
+        .unwrap_or_else(|| ui.spacing().interact_size.y + 2.0 * 4.0 + 2.0 + GAP);
+    area(egui::ScrollArea::vertical().id_salt(salt)).show_rows(ui, height, count, |ui, range| {
+        for i in range {
+            let top = ui.cursor().min.y;
+            row(ui, i);
+            ui.add_space(GAP);
+            let h = ui.cursor().min.y - top - ui.spacing().item_spacing.y;
+            if h > 0.0 && (h - height).abs() > 0.5 {
+                ui.ctx().data_mut(|d| d.insert_temp(key, h));
+            }
+        }
+    });
+}
+
 /// ライブラリ登録シンボルのスクロール一覧を描画し、選択切替・名前変更コマンドを発行する
 fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui::Ui) {
-    let entries: Vec<(u64, String)> = tab
-        .doc()
-        .library()
-        .iter()
-        .map(|s| (s.id, s.name.clone()))
-        .collect();
+    let library = tab.doc().library();
     let shown = tab.library_symbol();
     let mut select_req: Option<u64> = None;
     let mut rename_req: Option<(u64, String)> = None;
@@ -1612,12 +1636,17 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
     } else {
         ui.available_height() / 2.0
     };
-    egui::ScrollArea::vertical()
-        .id_salt("library_symbol_list")
-        .max_height(max_height)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for (sym_id, mut name) in entries {
+    library_rows(
+        ui,
+        "library_symbol_list",
+        |a| a.max_height(max_height).auto_shrink([false, true]),
+        library.len(),
+        |ui, i| {
+            let Some(sym) = library.at(i) else {
+                return;
+            };
+            let (sym_id, mut name) = (sym.id, sym.name.clone());
+            {
                 ui.push_id((active_doc_id, sym_id), |ui| {
                     let is_sel = shown == Some(sym_id);
                     let row_fill = if is_sel {
@@ -1664,9 +1693,9 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
                             });
                         });
                 });
-                ui.add_space(3.0);
             }
-        });
+        },
+    );
 
     if let Some(sym_id) = select_req {
         actions.push(UiAction::SelectLibrarySymbol(sym_id));
@@ -1686,11 +1715,17 @@ fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui
     let mut rename_req: Option<(u64, String)> = None;
     let mut finished_id: Option<u64> = None;
     let mut delete_req: Option<u64> = None;
-    egui::ScrollArea::vertical()
-        .id_salt("library_sound_list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for s in tab.doc().sounds.iter() {
+    let sounds = &tab.doc().sounds;
+    library_rows(
+        ui,
+        "library_sound_list",
+        |a| a.auto_shrink([false, false]),
+        sounds.len(),
+        |ui, i| {
+            let Some(s) = sounds.at(i) else {
+                return;
+            };
+            {
                 ui.push_id((tab.id, "sound", s.id), |ui| {
                     egui::Frame::NONE
                         .fill(Color32::from_rgb(252, 253, 255))
@@ -1739,9 +1774,9 @@ fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui
                             });
                         });
                 });
-                ui.add_space(3.0);
             }
-        });
+        },
+    );
 
     if let Some((sound_id, new_name)) = rename_req {
         actions.push(UiAction::Doc(Action::RenameSound { sound_id, new_name }));

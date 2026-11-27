@@ -1572,6 +1572,43 @@ pub(crate) struct Keyframe {
     pub(crate) sound: Option<crate::sound::SoundClip>,
 }
 
+/// キーフレームの塊の要約：塊のキーフレームが使うシンボルの番号（インスタンス）と音の番号、インスタンスの（番号,
+/// シンボルの番号）（それぞれ小さい順に1つずつ）
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeyframeRefs {
+    pub(crate) symbols: Vec<u64>,
+    pub(crate) sounds: Vec<u64>,
+    pub(crate) instances: Vec<(u64, u64)>,
+}
+
+impl KeyframeRefs {
+    /// 小さい順に1つずつにそろえる
+    fn tidy(&mut self) {
+        self.symbols.sort_unstable();
+        self.symbols.dedup();
+        self.sounds.sort_unstable();
+        self.sounds.dedup();
+        self.instances.sort_unstable();
+        self.instances.dedup();
+    }
+}
+
+impl crate::chunked_list::Summarize for Keyframe {
+    type Summary = KeyframeRefs;
+    fn summarize(items: &[Arc<Self>]) -> KeyframeRefs {
+        let mut r = KeyframeRefs {
+            symbols: items.iter().flat_map(|kf| kf.cel.instances.iter().map(|i| i.binding.symbol_id)).collect(),
+            sounds: items.iter().filter_map(|kf| kf.sound.map(|c| c.sound)).collect(),
+            instances: items
+                .iter()
+                .flat_map(|kf| kf.cel.instances.iter().map(|i| (i.binding.instance_gid, i.binding.symbol_id)))
+                .collect(),
+        };
+        r.tidy();
+        r
+    }
+}
+
 impl crate::chunked_list::Keyed for Keyframe {
     fn rel(&self) -> i64 {
         self.rel_start
@@ -1892,7 +1929,7 @@ impl Layer {
         if removed == n {
             let last_start = self.start_of(self.keyframes.len() - 1);
             if self.keyframes.len() > 1 {
-                self.keyframes.retain_keyed(|s, _| s == last_start);
+                self.keyframes.remove_range(0..self.keyframes.len() - 1);
             }
             if last_start != 0 {
                 self.keyframes.set_key(0, 0);
@@ -1907,7 +1944,7 @@ impl Layer {
             .keyframe_index_at(end)
             .filter(|&k| (first..end).contains(&self.start_of(k)))
             .map(|_| self.snapshot_keyframe_at(end, fps));
-        self.keyframes.retain_keyed(|s, _| !(first..end).contains(&s));
+        self.remove_keyframes_starting_in(first, end - 1);
         self.keyframes
             .shift_keys_from(self.keyframes_before(first), -(removed as i64));
         if let Some(kf) = kept {
@@ -1969,10 +2006,9 @@ impl Layer {
         max_frame: usize,
         fps: u32,
     ) -> RelativeKeyframes {
-        let mut kfs: RelativeKeyframes = self
-            .keyframes_with_start()
-            .filter(|&(s, _)| s >= min_frame && s <= max_frame)
-            .map(|(s, kf)| (s - min_frame, Keyframe::clone(kf)))
+        // 区間に始まるキーフレームだけを見る（番号の範囲を2分探索で探す）
+        let mut kfs: RelativeKeyframes = (self.keyframes_before(min_frame)..self.keyframes_before(max_frame + 1))
+            .map(|i| (self.start_of(i) - min_frame, Keyframe::clone(&self.keyframes[i])))
             .collect();
 
         if kfs.first().is_none_or(|&(rel, _)| rel != 0) {
@@ -1984,9 +2020,14 @@ impl Layer {
     /// 指定フレーム区間 `[min_frame..=max_frame]` のキーフレームを外す（コマの移動の移動元）。Adobe Animate と同じく、
     /// 空いたコマには前のキーフレームの絵が続く（コマ 1 のキーフレームが抜けたときだけ、コマ 1 に空白キーフレームを置く）
     pub(crate) fn remove_keyframes_in_range(&mut self, min_frame: usize, max_frame: usize) {
-        self.keyframes
-            .retain_keyed(|s, _| s < min_frame || s > max_frame);
+        self.remove_keyframes_starting_in(min_frame, max_frame);
         self.ensure_head_keyframe();
+    }
+
+    /// 始まりのコマが `[min_frame..=max_frame]` のキーフレームを消す（番号の範囲を2分探索で探し、かかる塊だけを書く）
+    fn remove_keyframes_starting_in(&mut self, min_frame: usize, max_frame: usize) {
+        let range = self.keyframes_before(min_frame)..self.keyframes_before(max_frame.saturating_add(1));
+        self.keyframes.remove_range(range);
     }
 
     /// 抽出された相対キーフレーム群 `kfs`（相対の始まりのコマと組）を `[dst_min_frame..=dst_max_frame]` に配置する（区間にあったキーフレームは
@@ -2000,8 +2041,7 @@ impl Layer {
         if dst_max_frame >= self.frame_count {
             self.frame_count = dst_max_frame + 1;
         }
-        self.keyframes
-            .retain_keyed(|s, _| s < dst_min_frame || s > dst_max_frame);
+        self.remove_keyframes_starting_in(dst_min_frame, dst_max_frame);
         let dst_lid = self.id;
         for (rel, mut kf) in kfs {
             if kf.cel.instances.iter().any(|i| i.layer_id != dst_lid) {
@@ -2154,13 +2194,13 @@ impl Layer {
         &self,
         k: usize,
         edge: crate::sound::SoundEdge,
-        sounds: &[Arc<crate::sound::Sound>],
+        sounds: &crate::sound::SoundLibrary,
         fps: u32,
     ) -> Option<std::ops::RangeInclusive<usize>> {
         use crate::sound::{frames_to_reach, SoundEdge};
         let clip = self.keyframes[k].sound?;
         // 読めない音は長さが分からないので、端を動かせない
-        let len = sounds.iter().find(|s| s.id == clip.sound).filter(|s| s.readable())?.len();
+        let len = sounds.get(clip.sound).filter(|s| s.readable())?.len();
         let shown = self.sounding_frames(k, fps)?;
         let span_end = self.span_end_for_keyframe(k) + 1;
         Some(match edge {
@@ -2183,7 +2223,7 @@ impl Layer {
         k: usize,
         edge: crate::sound::SoundEdge,
         frame: usize,
-        sounds: &[Arc<crate::sound::Sound>],
+        sounds: &crate::sound::SoundLibrary,
         fps: u32,
     ) -> bool {
         use crate::sound::{frames_to_sound, SoundEdge};
@@ -2193,7 +2233,7 @@ impl Layer {
         let Some(clip) = self.keyframes[k].sound.filter(|_| in_range) else {
             return false;
         };
-        let Some(sound) = sounds.iter().find(|x| x.id == clip.sound) else {
+        let Some(sound) = sounds.get(clip.sound) else {
             return false;
         };
         let s = self.start_of(k);
@@ -2370,12 +2410,62 @@ impl Timeline {
             .any(|l| l.is_editable_at(self.current_frame))
     }
 
-    /// 全レイヤー・全キーフレーム内のシンボルインスタンスを列挙する
+    /// テスト用（お手本：アプリは塊の要約で引く `refs`・`has_instance`）：全レイヤー・全キーフレームのインスタンス
+    #[cfg(test)]
     pub(crate) fn instances(&self) -> impl Iterator<Item = &SymbolInstance> {
         self.layers
             .iter()
             .flat_map(|l| l.keyframes.iter())
             .flat_map(|kf| kf.cel.instances.iter())
+    }
+
+    /// このタイムラインのキーフレームが使うシンボルの番号と音の番号（それぞれ小さい順に1つずつ）。レイヤーのキーフレームの
+    /// 塊の要約（`KeyframeRefs`）を合わせて作る（手間は塊の数：書いていない塊の要約は、控えと共有して使い回す）。使って
+    /// いるものを集めるのはこれ1つ
+    pub(crate) fn refs(&self) -> KeyframeRefs {
+        let mut all = KeyframeRefs::default();
+        for l in &self.layers {
+            for (c, _) in l.keyframes.chunks_with_bases() {
+                let r = c.summary();
+                all.symbols.extend_from_slice(&r.symbols);
+                all.sounds.extend_from_slice(&r.sounds);
+            }
+        }
+        all.tidy();
+        all
+    }
+
+    /// キーフレームの塊の要約 `may_have` が真の塊の中で、`is_it` が真のキーフレームを `edit` で書く（書くのは当たった
+    /// キーフレームと、その塊だけ。手間は塊の数と、選んだ塊の中身の分）
+    pub(crate) fn edit_keyframes_where(
+        &mut self,
+        may_have: impl Fn(&KeyframeRefs) -> bool,
+        is_it: impl Fn(&Keyframe) -> bool,
+        mut edit: impl FnMut(&mut Keyframe),
+    ) {
+        for layer in &mut self.layers {
+            let mut hits = Vec::new();
+            let mut start = 0;
+            for (c, _) in layer.keyframes.chunks_with_bases() {
+                if may_have(c.summary()) {
+                    hits.extend(c.iter().enumerate().filter(|(_, kf)| is_it(kf)).map(|(k, _)| start + k));
+                }
+                start += c.len();
+            }
+            for i in hits {
+                edit(layer.keyframe_mut(i));
+            }
+        }
+    }
+
+    /// インスタンスの番号が `instance_gid` で、シンボル `symbol_id` のインスタンスが、どこかのキーフレームにあるか（塊の
+    /// 要約で引く。手間は塊の数）
+    pub(crate) fn has_instance(&self, instance_gid: u64, symbol_id: u64) -> bool {
+        self.layers.iter().any(|l| {
+            l.keyframes
+                .chunks_with_bases()
+                .any(|(c, _)| c.summary().instances.binary_search(&(instance_gid, symbol_id)).is_ok())
+        })
     }
 
     /// 全レイヤー・全キーフレームの音の区間を列挙する
