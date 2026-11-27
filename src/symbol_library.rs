@@ -137,11 +137,6 @@ impl Library {
         self.defs.iter()
     }
 
-    /// シンボルを見せる順に（ライブラリのタブ・保存）
-    pub(crate) fn iter_in_order(&self) -> impl Iterator<Item = &Arc<SymbolDef>> + '_ {
-        self.order.iter().filter_map(|s| self.get(s.0))
-    }
-
     /// 見せる順の `i` 番目のシンボル
     pub(crate) fn at(&self, i: usize) -> Option<&Arc<SymbolDef>> {
         self.order.get(i).and_then(|s| self.get(s.0))
@@ -414,7 +409,7 @@ impl Library {
     /// テスト用：表と、シンボルが持つもの（子・音・高さ・動くか）が、ライブラリの全部から作り直したもの（お手本）と同じか
     #[cfg(test)]
     pub(crate) fn check_tables(&self) -> Result<(), String> {
-        let rebuilt: Library = self.iter_in_order().map(|s| Arc::new(SymbolDef::clone(s))).collect();
+        let rebuilt: Library = self.order.iter().filter_map(|s| self.get(s.0)).map(|s| Arc::new(SymbolDef::clone(s))).collect();
         let ids = |l: &ChunkedList<Slot>| l.iter().map(|s| s.0).collect::<Vec<_>>();
         if ids(&self.order) != ids(&rebuilt.order) {
             return Err("見せる順が違う".into());

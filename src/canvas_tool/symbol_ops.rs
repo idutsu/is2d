@@ -74,9 +74,8 @@ pub(in crate::canvas_tool) fn prepare_convert_selection_to_symbol(
         .collect();
     let rest_plan = match tab.session.take_floating() {
         Some(mut fl) => {
-            // シンボルの中身に入れる片は、元の所から取り出す（元の所は切り抜いたまま書く：`Floating::place_all`）
-            fl.place_all();
-            let Ok(rest) = fl.split_off(&keep, tab.session.editing_group_path()) else {
+            // シンボルの中身に入れる片は、元の所から取り出す（元の所は切り抜いたまま書く：`Floating::take_out`）
+            let Ok(rest) = fl.take_out(&keep, tab.session.editing_group_path()) else {
                 tab.session.set_floating(before, &tab.stage());
                 tab.session.refusal = Some(crate::canvas_tool::Refusal::Unplaceable);
                 return None;

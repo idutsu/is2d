@@ -17,6 +17,7 @@ mod prefetch;
 mod project_io;
 mod recovery;
 mod recovery_journal;
+mod save_format;
 mod sound;
 mod stored_map;
 mod symbol;
@@ -434,7 +435,7 @@ impl Is2dApp {
         else {
             return;
         };
-        let name = project_io::file_name_or(&path, "音").to_owned();
+        let name = save_format::file_name_or(&path, "音").to_owned();
         match std::fs::read(&path) {
             Ok(bytes) => {
                 apply(
@@ -482,7 +483,7 @@ impl Is2dApp {
         path: &std::path::Path,
         outcome: video_export::VideoExportOutcome,
     ) {
-        let name = project_io::file_name_or(path, "動画");
+        let name = save_format::file_name_or(path, "動画");
         match outcome {
             video_export::VideoExportOutcome::Completed => {
                 self.notify_info(format!("「{name}」を書き出しました"));

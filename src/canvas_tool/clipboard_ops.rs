@@ -519,7 +519,7 @@ pub(in crate::canvas_tool) fn import_clipboard_symbols(
 
         let new_id = if target_doc_id == source_doc_id && tab.doc.find_symbol(imported.id).is_none()
         {
-            tab.doc.next_symbol_id = tab.doc.next_symbol_id.max(imported.id.saturating_add(1));
+            tab.doc.next_symbol_id.advance_past(imported.id);
             imported.id
         } else {
             tab.doc.alloc_symbol_id()

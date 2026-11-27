@@ -256,7 +256,7 @@ impl VideoExportJob {
     /// 書き出しを裏のスレッドで始める（スレッドを作れなければ `Err`）
     pub(crate) fn start(doc: Document, target_path: PathBuf) -> std::io::Result<Self> {
         let target_path = crate::project_io::resolve_target_path(&target_path);
-        let tmp_path = crate::project_io::tmp_path_for(&target_path);
+        let tmp_path = crate::save_format::tmp_path_for(&target_path);
         let total_frames = export_frames(&doc);
         let completed_frames = Arc::new(AtomicUsize::new(0));
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -434,7 +434,7 @@ fn run_video_export(
     if let Err(err) = encoder.finish() {
         return VideoExportOutcome::Failed(err);
     }
-    if let Err(err) = crate::project_io::replace_atomically(tmp_path, target_path) {
+    if let Err(err) = crate::save_format::replace_atomically(tmp_path, target_path) {
         return VideoExportOutcome::Failed(format!("動画ファイルの保存に失敗しました: {err}"));
     }
     VideoExportOutcome::Completed

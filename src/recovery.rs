@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use crate::canvas_tool::Tab;
 use crate::floating::Floating;
-use crate::project_io::{open_document_in_new_tab, read_project_document, ProjectWorkspace};
+use crate::project_io::{open_document_in_new_tab, ProjectWorkspace};
 use crate::recovery_journal::Journal;
 use crate::symbol::{Document, EditPath};
 
@@ -433,7 +433,7 @@ impl WriterCore {
     /// タブ `id` の一覧の札を、控え `path` を指すように書く（書いて置き換える：`write_atomically`）
     fn write_entry(&self, id: u64, path: &Path) -> std::io::Result<()> {
         use std::io::Write;
-        crate::project_io::write_atomically(&self.entry_path(id), |mut f| {
+        crate::save_format::write_atomically(&self.entry_path(id), |mut f| {
             f.write_all(path.to_string_lossy().as_bytes())?;
             Ok(f)
         })
@@ -558,12 +558,8 @@ impl Recovery {
         let mut trimmed_works = Vec::new();
 
         for item in found {
-            // 復旧ファイルの種類と版は頭で見る（見るのは `project_io::read_identity` の1つ。前の版のアプリが書いた `.is2d` の
-            // 形の復旧ファイルは作品ファイルとして読み、版の違うファイルは読まずに断る）
-            let read = crate::project_io::file_kind(&item.recovery_path).and_then(|kind| match kind {
-                crate::project_io::SaveKind::Journal => crate::recovery_journal::read(&item.recovery_path),
-                crate::project_io::SaveKind::Project => read_project_document(&item.recovery_path),
-            });
+            // 復旧ファイルは、作品ファイルと同じ1つの読み手で読む（`save_format::read_file`。頭の版が違えば読まずに断る）
+            let read = crate::save_format::read_file(&item.recovery_path).map(|(_, doc)| doc);
             let mut trimmed = false;
             let res = read.and_then(|mut proj_doc| {
                 let src = proj_doc.recovery_source.take();

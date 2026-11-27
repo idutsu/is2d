@@ -215,7 +215,7 @@ fn merge_shapes_into_canvas(canvas: &mut Vec<FillShape>, incoming: Vec<FillShape
             continue;
         };
         edit_canvas(canvas, layer_id, &scope, |b| {
-            b.edit_local(&b.map_change(piece.map()), &scope)
+            b.edit_local(&b.map_change(piece.map(), crate::planar_map::MapRule::Overlay), &scope)
         });
     }
 }
@@ -1258,13 +1258,7 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
     // 円の上端エッジを円内部を通って下端 (200, 250) の向こう側 (200, 275) まで突っ切るようにドラッグ
     let mut app = circle_app();
     let from = grab_point(&app);
-    assert!(apply(
-        &mut app,
-        Action::PullEdgeFromTo {
-            from,
-            to: Point::new(200.0, 275.0),
-        },
-    ));
+    assert!(pull_edge(&mut app, from, Point::new(200.0, 275.0)));
     let split_shapes = scene_summary(&app).shapes.clone();
     assert_eq!(
         split_shapes.len(),
@@ -1296,13 +1290,7 @@ fn test_pull_edge_across_circle_splits_into_two_shapes() {
     // 向こう側の円周の手前 (200, 249) で離したときは、押し出さず見えているとおりに確定し、分かれず1つのまま
     let mut app = circle_app();
     let from = grab_point(&app);
-    assert!(apply(
-        &mut app,
-        Action::PullEdgeFromTo {
-            from,
-            to: Point::new(200.0, 249.0),
-        },
-    ));
+    assert!(pull_edge(&mut app, from, Point::new(200.0, 249.0)));
     assert_eq!(
         scene_summary(&app).shapes.len(),
         1,
@@ -1585,7 +1573,7 @@ fn test_free_transform_rotate_scale_and_flip() {
     );
 
     // 2. 縮小 (0.5倍) -> 上下端 (200, 110) は範囲外になり、(200, 155) 付近に縮小されること
-    assert!(doc_actions::scale_selected_shapes(&mut app, 0.5, 0.5));
+    assert!(scale_selection(&mut app, 0.5, 0.5));
     let s0 = app.scene().get(0).unwrap();
     assert!(!s0.contains_point(Point::new(200.0, 110.0)));
     assert!(s0.contains_point(Point::new(200.0, 155.0)));
@@ -1750,7 +1738,7 @@ fn test_group_selection_bucket_protection_and_non_destructive_overlap() {
     // グループを赤い顔シェイプの上へ移動して選択解除しても下の生シェイプを切り抜かないこと
     doc_actions::apply(
         &mut app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, 100.0),
         },
     );
@@ -2133,7 +2121,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     );
 
     app.tool.brush_color = blue;
-    doc_actions::commit_raw_outline(
+    paint_rect(
         &mut app,
         &[
             Point::new(120.0, 70.0),
@@ -2155,7 +2143,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     assert_eq!(app.session.selected_indices().len(), 2);
     doc_actions::apply(
         &mut app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(30.0, 0.0),
         },
     );
@@ -2238,7 +2226,7 @@ fn test_timeline_layer_reorder_move_and_delete() {
 fn test_timeline_cell_selection_sync_with_canvas_selection() {
     let mut app = Is2dApp::default();
     let blue = Color32::from_rgb(55, 135, 245);
-    doc_actions::commit_raw_outline(
+    paint_rect(
         &mut app,
         &[
             Point::new(40.0, 40.0),
@@ -2249,7 +2237,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
     );
     doc_actions::timeline_add_layer(&mut app);
     app.tool.brush_color = blue;
-    doc_actions::commit_raw_outline(
+    paint_rect(
         &mut app,
         &[
             Point::new(140.0, 40.0),
@@ -2303,7 +2291,7 @@ fn test_timeline_cell_selection_sync_with_canvas_selection() {
 fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     let mut app = Is2dApp::default();
     let blue = Color32::from_rgb(55, 135, 245);
-    doc_actions::commit_raw_outline(
+    paint_rect(
         &mut app,
         &[
             Point::new(40.0, 40.0),
@@ -2314,7 +2302,7 @@ fn test_timeline_move_and_copy_frames_and_shift_f5_keyframe_removal() {
     );
     doc_actions::timeline_add_layer(&mut app);
     app.tool.brush_color = blue;
-    doc_actions::commit_raw_outline(
+    paint_rect(
         &mut app,
         &[
             Point::new(140.0, 40.0),
@@ -2872,7 +2860,7 @@ fn test_classic_tween_translation_and_custom_pivot_ccw_rotation() {
     doc_actions::nudge_selected_shapes(&mut app, KVec2::new(-200.0, -80.0));
 
     let joint_world = Point::new(100.0, 150.0);
-    assert!(doc_actions::set_selected_symbol_world_pivot(
+    assert!(set_pivot(
         &mut app,
         Some(joint_world),
     ));
@@ -4993,8 +4981,8 @@ fn test_project_save_and_load_roundtrip() {
             .any(|s| s.group_path == vec![gid]),
         "グループパスも完全一致で復元されること"
     );
-    assert!(loaded_app.doc.next_group_id > gid);
-    assert!(loaded_app.doc.next_symbol_id > sym_id);
+    assert!(loaded_app.doc.next_group_id.next() > gid);
+    assert!(loaded_app.doc.next_symbol_id.next() > sym_id);
 
     let _ = std::fs::remove_file(&tmp_path);
 }
@@ -5360,7 +5348,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     merge_app.set_selected_indices(vec![1]);
     doc_actions::apply(
         &mut merge_app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, -80.0),
         },
     );
@@ -5402,7 +5390,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     union_save_app.set_selected_indices(vec![1]);
     doc_actions::apply(
         &mut union_save_app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, -80.0),
         },
     );
@@ -5436,7 +5424,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     self_union_app.set_selected_indices(vec![1]);
     doc_actions::apply(
         &mut self_union_app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, -80.0),
         },
     );
@@ -5444,7 +5432,7 @@ fn test_save_while_selected_flushes_merge_drawing_and_preserves_selection() {
     assert!(doc_actions::copy_selected_shapes(&mut self_union_app));
     doc_actions::apply(
         &mut self_union_app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(10.0, 0.0),
         },
     );
@@ -5530,7 +5518,7 @@ fn test_save_io_failure_rollback_and_marquee_slice_push_undo() {
     undo_redo_merge_app.set_selected_indices(vec![1]);
     doc_actions::apply(
         &mut undo_redo_merge_app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, -80.0),
         },
     );
@@ -5566,10 +5554,9 @@ fn test_corrupt_and_truncated_file_returns_error_without_modifying_app() {
         std::env::temp_dir().join(format!("is2d_corrupt_test_{}.is2d", std::process::id()));
     let mut app = Is2dApp::default();
     app.doc.stage_size = Vec2::new(960.0, 540.0);
-    let good = project_io::project_file_bytes(
-        &project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 9)).unwrap(),
-    )
-    .unwrap();
+    let good = saved_file_bytes(
+        &crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 9).committed_document_copy().unwrap(),
+    );
 
     // 1. 途中で切れたファイル
     std::fs::write(&tmp_corrupt, &good[..good.len() / 2]).unwrap();
@@ -6661,7 +6648,7 @@ fn test_saved_file_reads_back_and_undo_history_cap() {
     );
     crate::project_io::save_project_to_path(&mut save_app, &tmp_compact).unwrap();
     assert!(
-        crate::project_io::read_project_document(&tmp_compact).is_ok(),
+        read_saved_file(&tmp_compact).is_ok(),
         "保存したファイルを読み戻せること"
     );
     let _ = std::fs::remove_file(&tmp_compact);
@@ -8259,7 +8246,7 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         .collect();
     app.set_selected_indices(sym_indices);
     let new_world_pivot = Point::new(155.0, 235.0);
-    assert!(doc_actions::set_selected_symbol_world_pivot(
+    assert!(set_pivot(
         &mut app,
         Some(new_world_pivot),
     ));
@@ -8431,7 +8418,7 @@ fn test_copy_frames_onto_a_keyframe_replaces_it_keeps_tween_pose_and_remaps_ids(
         "別レイヤーへ複製されたシンボルインスタンスの instance_gid が再採番され重複しないこと (#9-3)"
     );
     assert!(
-        tween_app.doc.next_group_id > copied_gid,
+        tween_app.doc.next_group_id.next() > copied_gid,
         "再採番後に SymbolManager::next_group_id が更新され以降の採番と衝突しないこと (#9-3)"
     );
 }
@@ -8640,11 +8627,11 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
 
     // レイヤーID・シンボルID・グループIDがすべて安全範囲内に再採番され重複していないこと
     assert_ne!(app.doc.root.layers[0].id, app.doc.root.layers[1].id);
-    assert!(app.doc.root.layers[0].id <= project_io::MAX_SAFE_ENTITY_ID);
-    assert!(app.doc.root.layers[1].id <= project_io::MAX_SAFE_ENTITY_ID);
+    assert!(app.doc.root.layers[0].id <= save_format::MAX_SAFE_ENTITY_ID);
+    assert!(app.doc.root.layers[1].id <= save_format::MAX_SAFE_ENTITY_ID);
     assert_ne!(app.doc.library().at(0).unwrap().id, app.doc.library().at(1).unwrap().id);
-    assert!(app.doc.library().at(0).unwrap().id <= project_io::MAX_SAFE_ENTITY_ID);
-    assert!(app.doc.library().at(1).unwrap().id <= project_io::MAX_SAFE_ENTITY_ID);
+    assert!(app.doc.library().at(0).unwrap().id <= save_format::MAX_SAFE_ENTITY_ID);
+    assert!(app.doc.library().at(1).unwrap().id <= save_format::MAX_SAFE_ENTITY_ID);
 
     // 読み込み後に新規レイヤー・新規シンボル・新規グループIDを追加しても既存IDと一切衝突しないこと (#13)
     doc_actions::timeline_add_layer(&mut app);
@@ -8658,8 +8645,7 @@ fn test_u64_max_entity_ids_in_crafted_json_remapped_without_collision() {
 
     let new_sym_id = app.doc.register_new_symbol(Vec::new());
     assert!(
-        app.doc
-            .library().iter_in_order()
+        symbols_in_order(app.doc.library())
             .filter(|s| s.id == new_sym_id)
             .count()
             == 1,
@@ -8686,8 +8672,8 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
             targets.push(((i / 2) + 1) as u64);
         }
         for (k, target_sym_id) in targets.into_iter().enumerate() {
-            instances.push(project_io::SavedSymbolInstance {
-                binding: project_io::SavedSymbolInstanceBinding {
+            instances.push(save_format::SavedSymbolInstance {
+                binding: save_format::SavedSymbolInstanceBinding {
                     instance_gid: ((i * 100) + k + 1) as u64,
                     symbol_id: target_sym_id,
                     xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -8701,22 +8687,22 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
                 order: k,
             });
         }
-        library.push(project_io::SavedSymbolDef {
+        library.push(save_format::SavedSymbolDef {
             id: sym_id,
             name: format!("DenseSym{sym_id}"),
-            timeline: project_io::SavedTimeline {
+            timeline: save_format::SavedTimeline {
                 fps: 24,
                 total_frames: 1,
                 current_frame: 0,
                 active_layer: 0,
                 next_layer_number: 2,
-                layers: vec![project_io::SavedLayer {
+                layers: vec![save_format::SavedLayer {
                     id: 1,
                     name: "L1".to_owned(),
                     visible: true,
                     locked: false,
                     frame_count: 1,
-                    keyframes: vec![project_io::SavedKeyframe {
+                    keyframes: vec![save_format::SavedKeyframe {
                         start_frame: 0,
                         tween: false,
                         tween_rotate: timeline::TweenRotate::Auto,
@@ -8743,7 +8729,7 @@ fn test_dense_symbol_library_cycle_detection_runs_in_linear_time() {
     };
 
     let path = std::env::temp_dir().join(format!("is2d_dense_cycle_{}.is2d", std::process::id()));
-    write_project_file(&path, &doc);
+    write_crafted_file(&path, &doc);
     let mut app = Is2dApp::default();
     let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
     let _ = std::fs::remove_file(&path);
@@ -9874,30 +9860,29 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
 
         let doc: SavedProject = serde_json::from_str(&raw_json)
             .expect("有効なJSON構文の ProjectDocument がパースできること");
-        let mut app = Is2dApp::default();
-        doc.apply_to_app(&mut app);
+        // 読み込みの道（`into_document_noting`）が直した作品（ぐるぐる回る作品は、開く入口が断る：`open_document_in_new_tab`）
+        let loaded = doc.into_document().expect("作品にできること");
 
         assert!(
-            !app.doc.root.layers.is_empty(),
+            !loaded.root.layers.is_empty(),
             "case {case_idx}: 空レイヤー配列でも最低1レイヤーに補正されること"
         );
         assert!(
-            (1..=60).contains(&app.doc.fps),
+            (1..=60).contains(&loaded.fps),
             "case {case_idx}: FPS が 1..=60 にクランプされること"
         );
         assert!(
-            app.doc.root.current_frame < app.doc.root.total_frames,
+            loaded.root.current_frame < loaded.root.total_frames,
             "case {case_idx}: current_frame が total_frames 未満に収まること"
         );
         let mut has_cycle = false;
-        for sym in app.doc.library().iter_in_order() {
+        for sym in symbols_in_order(loaded.library()) {
             assert!(
                 sym.id >= 1,
                 "case {case_idx}: シンボルIDが 1 以上に正規化されること"
             );
             for inst in sym.timeline.instances() {
-                if app
-                    .doc
+                if loaded
                     .would_create_symbol_cycle(sym.id, inst.binding.symbol_id)
                 {
                     has_cycle = true;
@@ -9906,7 +9891,7 @@ fn test_property_geometry_strokes_booleans_and_random_json_invariants() {
         }
         if has_cycle {
             assert!(
-                app.doc.symbol_nest_exceeded(),
+                loaded.symbol_nest_exceeded(),
                 "case {case_idx}: 循環参照を含む場合は symbol_nest_exceeded() が true になること"
             );
         }
@@ -9975,15 +9960,15 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
 
     // 3. #11: レイヤー数上限 (MAX_LAYERS_PER_TIMELINE = 1000) を超えて timeline_add_layer されないこと
     let mut tl = timeline::Timeline::default();
-    for i in 1..project_io::MAX_LAYERS_PER_TIMELINE {
+    for i in 1..crate::timeline::MAX_LAYERS_PER_TIMELINE {
         tl.layers
             .push(timeline::Layer::new_with_id((i + 1) as u64, "L"));
     }
-    assert_eq!(tl.layers.len(), project_io::MAX_LAYERS_PER_TIMELINE);
+    assert_eq!(tl.layers.len(), crate::timeline::MAX_LAYERS_PER_TIMELINE);
     tl.add_layer_above_active(10_000);
     assert_eq!(
         tl.layers.len(),
-        project_io::MAX_LAYERS_PER_TIMELINE,
+        crate::timeline::MAX_LAYERS_PER_TIMELINE,
         "編集時も MAX_LAYERS_PER_TIMELINE (1000) を超えてレイヤーが追加されないこと (#11)"
     );
 
@@ -10008,7 +9993,7 @@ fn test_disjoint_different_color_bbox_overlap_preserves_shape_id_and_small_shape
         let target_content = std::fs::read(&target_path).unwrap();
         assert!(
             target_content.starts_with(b"IS2D")
-                && target_content[4..8] == project_io::PROJECT_FORMAT_VERSION.to_le_bytes(),
+                && target_content[4..8] == save_format::FORMAT_VERSION.to_le_bytes(),
             "シンボリックリンクの実体ファイル側が最新の内容に更新されること (#13)"
         );
         let _ = std::fs::remove_file(&link_path);
@@ -10163,7 +10148,7 @@ fn cel_summary(doc: &symbol::Document, layer_id: u64, frame: usize) -> CelSummar
 /// テスト用：保存用の写し `pd` の中身の JSON。地図は塊の番号の並びの代わりに、塊の辺を並べたもの（色は色の表から引いた値）
 /// にし、面の図形の番号は書かない（浮いた片を写しの上で確定する保存は、呼ぶたびに片に新しい番号を振り、塊の共有の仕方も
 /// 変わるので、同じ中身でも塊の表が同じとは限らない）
-fn content_json(pd: &project_io::ProjectDocument) -> String {
+fn content_json(pd: &save_format::ProjectDocument) -> String {
     let mut v = serde_json::to_value(pd).unwrap();
     let tiles = v["map_tiles"]["tiles"].take();
     let colors = v["map_tiles"]["colors"].take();
@@ -10295,23 +10280,32 @@ fn break_map_off_grid(proj: &mut SavedProject, kf: usize) {
     proj.map_tiles.tiles.push(tile);
 }
 
-/// 保存用の型 `doc` を、今の版の `.is2d` ファイルとして `path` に書く（`project_file_bytes`）
-fn write_project_file<T: serde::Serialize>(
-    path: &std::path::Path,
-    doc: &project_io::ProjectDocument<T>,
-) {
-    std::fs::write(path, project_io::project_file_bytes(doc).unwrap()).unwrap();
+/// 保存用の型 `doc` を、中身を確かめずに今の版の `.is2d` ファイルとして `path` に書く（テストで細工したファイルを作る：
+/// `crafted_bytes`）
+fn write_crafted_file<T: serde::Serialize>(path: &std::path::Path, doc: &save_format::ProjectDocument<T>) {
+    std::fs::write(path, crafted_bytes(doc).unwrap()).unwrap();
 }
 
 /// JSON で書いた保存用の型 `json` を、今の版の `.is2d` ファイルとして `path` に書く（テストで細工したファイルを作る）
 fn write_project_json_as_file(path: &std::path::Path, json: &str) {
     let doc: SavedProject = serde_json::from_str(json).unwrap();
-    write_project_file(path, &doc);
+    write_crafted_file(path, &doc);
 }
 
 /// `.is2d` ファイルの中身 `bytes` を、アプリが開くのと同じ道で文書にする（`read_project`・`into_document`）
 fn opened_document(bytes: &[u8]) -> Result<crate::symbol::Document, String> {
-    project_io::read_project::<crate::stored_map::ReadTiles>(bytes)?.into_document()
+    let path = scratch_file_path("open");
+    std::fs::write(&path, bytes).unwrap();
+    let read = read_saved_file(&path);
+    let _ = std::fs::remove_file(&path);
+    read?.into_document()
+}
+
+/// テストで一時に書くファイルの置き場（呼ぶたびに別の名前）
+fn scratch_file_path(stem: &str) -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("is2d_{stem}_{}_{n}.is2d", std::process::id()))
 }
 
 /// 文書の地図の塊の表の保存の形：色の表と、塊の表（ファイルの塊の表の並び。アプリはこの形を丸ごと持たない：書くときは
@@ -10326,11 +10320,12 @@ pub(crate) struct SavedTiles {
 }
 
 /// 塊の表を保存の形（`SavedTiles`）のまま持つ保存用の型（中身を見たり細工したりする）
-type SavedProject = project_io::ProjectDocument<SavedTiles>;
+type SavedProject = save_format::ProjectDocument<SavedTiles>;
 
 /// `.is2d` ファイルの中身 `bytes` を、塊の表を保存の形のまま読む（アプリと同じ読み込みの道 `read_project`）
 fn project_from_bytes(bytes: &[u8]) -> Result<SavedProject, String> {
-    project_io::read_project(bytes)
+    let doc = opened_document(bytes)?;
+    format_v11::read::<SavedTiles>(&format_v11::bytes(&saved_of(&doc))?[..])
 }
 
 /// 作品のファイル `path` を、塊の表を保存の形のまま読む（中身を見たり細工したりする：`project_from_bytes`）
@@ -10338,14 +10333,289 @@ fn saved_project_at(path: &std::path::Path) -> SavedProject {
     project_from_bytes(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// テスト用：今のタブを保存した形（書いて読み戻したもの）
+/// テスト用：今のタブを保存した形（浮いた片を置いた作品を、本番の書き手で書いて読み戻したもの）
 fn saved_project_of(app: &Is2dApp) -> SavedProject {
-    saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).expect("保存できる"))
+    let doc = app.tab().committed_document_copy().expect("保存できる");
+    project_from_bytes(&saved_file_bytes(&doc)).unwrap()
 }
 
-/// 保存用の型 `doc` を今の版の `.is2d` の中身に書いて、読み戻す（保存して開くのと同じ形を通る）
-fn saved_and_read_back<T: serde::Serialize>(doc: &project_io::ProjectDocument<T>) -> SavedProject {
-    project_from_bytes(&project_io::project_file_bytes(doc).unwrap()).unwrap()
+// ---------------------------------------------------------------------------------------------------------------------
+// 本番の入口から行う、テストの手順（設計審査 01e4283 の直し 5.：テストのためだけの操作の入口を外し、テストは本番の操作を
+// 送る。ここは本番の道を組み合わせるだけで、本番のコードに道を足さない）
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// 輪郭の辺を点 `from`（ステージの座標）でつかんで `to` へ引っぱる（本番の輪郭のドラッグ `reshape_drag`）。辺に当たらない・
+/// 作品が変わらない（断られた）なら `false`
+fn pull_edge(host: &mut impl doc_actions::ActionHost, from: Point, to: Point) -> bool {
+    reshape_drag(host, from, to, false)
+}
+
+/// 輪郭の頂点を点 `from`（ステージの座標）でつかんで `to` へ動かす（本番の輪郭のドラッグ `reshape_drag`）。頂点に当たらない・
+/// 作品が変わらない（断られた）なら `false`
+fn move_vertex(host: &mut impl doc_actions::ActionHost, from: Point, to: Point) -> bool {
+    reshape_drag(host, from, to, true)
+}
+
+/// 本番の選択ツールの輪郭のドラッグ：点 `from` に、画面のカーソルと同じ当たり（`compute_hover_target`）で頂点（`vertex`）か
+/// 辺があれば、ドラッグを始め（`tool_select::start_reshape_drag`。選んでいれば外してから、つかみ直す）、`to` へ動かし
+/// （`update_reshape_drag`）、離す（`finish_reshape_drag`）。当たらなければ何もせず `false`。離したときに作品が変わった
+/// （中身の世代が進んだ）なら `true`
+fn reshape_drag(host: &mut impl doc_actions::ActionHost, from: Point, to: Point, vertex: bool) -> bool {
+    use crate::canvas_tool::{ActiveCanvasDrag, HoverTarget, SelectDragState};
+    let tab = host.tab();
+    let hover = crate::select_ops::compute_hover_target(tab.scene(), &tab.session, from, tab.view.zoom(), host.tool().select_sub_mode);
+    let on = match hover {
+        HoverTarget::Vertex { map_node, .. } => vertex && map_node.is_some(),
+        HoverTarget::Edge { map_edge, .. } => !vertex && map_edge.is_some(),
+        _ => false,
+    };
+    if !on {
+        return false;
+    }
+    crate::tool_select::start_reshape_drag(host, from, false, false);
+    let started = match &host.tab().session.drag {
+        ActiveCanvasDrag::Select(SelectDragState::MoveVertex { .. }) => vertex,
+        ActiveCanvasDrag::Select(SelectDragState::PullEdge { .. }) => !vertex,
+        _ => false,
+    };
+    if !started {
+        crate::canvas_tool::cancel_active_drag(host.tab_mut());
+        return false;
+    }
+    let before = host.tab().history.content_gen;
+    crate::tool_select::update_reshape_drag(host.tab_mut(), to);
+    crate::tool_select::finish_reshape_drag(host, Some(to));
+    host.tab().history.content_gen != before
+}
+
+/// 選んでいるものを、変形の中心のまわりに `sx`・`sy` 倍する（本番の自由変形のドラッグを離したときと同じ `Action::CommitTransformDrag`）
+fn scale_selection(host: &mut impl doc_actions::ActionHost, sx: f64, sy: f64) -> bool {
+    let tab = host.tab();
+    let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
+        return false;
+    };
+    let had_custom_pivot = tab.session.transform_pivot.is_some();
+    doc_actions::apply(
+        host,
+        doc_actions::Action::CommitTransformDrag {
+            affine: crate::vector_engine::affine_scale_around(pivot, sx, sy),
+            orig_pivot: pivot,
+            had_custom_pivot,
+            changed: true,
+        },
+    )
+}
+
+/// 変形の中心を `pivot`（ステージの座標）にする・戻す（本番の中心のドラッグを離したとき `Action::CommitPivotDrag`、戻すのは
+/// `Action::ResetTransformPivot`）
+fn set_pivot(host: &mut impl doc_actions::ActionHost, pivot: Option<Point>) -> bool {
+    let Some(new_pivot) = pivot else {
+        return doc_actions::apply(host, doc_actions::Action::ResetTransformPivot);
+    };
+    let tab = host.tab();
+    let orig_pivot = tab.session.selection_bbox_and_pivot(tab.view.zoom()).map_or(new_pivot, |(_, p)| p);
+    let had_custom_pivot = tab.session.transform_pivot.is_some();
+    doc_actions::apply(host, doc_actions::Action::CommitPivotDrag { new_pivot, orig_pivot, had_custom_pivot, changed: true })
+}
+
+/// シンボルの中から、入れ子の深さ `depth` まで出る（本番のパンくずと同じ `Action::ExitGroupSteps`。今の階層のグループからも出る）
+fn exit_symbols_to(host: &mut impl doc_actions::ActionHost, depth: usize) -> bool {
+    let mut exited = false;
+    while host.tab().session.edit_path().len() > depth {
+        if !doc_actions::apply(host, doc_actions::Action::ExitGroupSteps { steps: 1 }) {
+            break;
+        }
+        exited = true;
+    }
+    exited
+}
+
+/// まっすぐな線の区間 `segs`（ステージの座標）を、1本ずつ鉛筆で引く（本番の `Action::PencilStroke`：2点の鉛筆はその区間の線）
+fn draw_lines(host: &mut impl doc_actions::ActionHost, segs: Vec<crate::planar_map::LineSeg>) -> bool {
+    let mut all = true;
+    for (q, stroke) in segs {
+        all &= doc_actions::apply(host, doc_actions::Action::PencilStroke { points: vec![q.p0, q.p2], stroke });
+    }
+    all
+}
+
+/// 四角 `pts`（4つの角。ステージの座標）の内側に収まる太い線を、今の塗りの色のブラシで1本引く（本番の
+/// `Action::PaintStroke`：四角の短い辺の半分を太さにし、長い向きに引く。下準備に塗りを1つ置くため）
+fn paint_rect(host: &mut impl doc_actions::ActionHost, pts: &[Point]) -> bool {
+    let r = kurbo::Rect::from_points(pts[0], pts[2]);
+    let radius = r.width().min(r.height()) / 2.0;
+    let c = r.center();
+    let (a, b) = if r.width() >= r.height() {
+        (Point::new(r.x0 + radius, c.y), Point::new(r.x1 - radius, c.y))
+    } else {
+        (Point::new(c.x, r.y0 + radius), Point::new(c.x, r.y1 - radius))
+    };
+    let color = host.tool().brush_color;
+    doc_actions::apply(host, doc_actions::Action::PaintStroke { points: vec![a, b], radius: radius as f32, color })
+}
+
+/// ライブラリのシンボルを見せる順に（本番の `Library::at` で引く）
+fn symbols_in_order(lib: &crate::symbol::Library) -> impl Iterator<Item = &std::sync::Arc<crate::symbol::SymbolDef>> + '_ {
+    (0..lib.len()).filter_map(|i| lib.at(i))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 保存の形のテストの道具（設計審査 01e4283 の D-3：作品ファイルも記録の列になり、保存の型を作品から作る関数と、前の版の
+// 入れ物は本番から外した。ここは本番の関数を組み合わせるだけ）
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// 作品 `doc` の保存の型（中を見る・細工するため。本番の保存は記録の書き手 `save_format::RecordWriter` が作品から直に書く）
+fn saved_of(doc: &crate::symbol::Document) -> save_format::ProjectDocument {
+    let mut saved_timeline: save_format::SavedTimeline = (&doc.root).into();
+    saved_timeline.fps = save_format::saved_fps(doc);
+    let mut out = save_format::ProjectDocument {
+        stage_size: [doc.stage_size.x, doc.stage_size.y],
+        timeline: saved_timeline,
+        library: symbols_in_order(doc.library()).map(|s| save_format::SavedSymbolDef::from(&**s)).collect(),
+        next_symbol_id: doc.next_symbol_id.next(),
+        next_group_id: doc.next_group_id.next(),
+        recovery_source: None,
+        map_tiles: crate::stored_map::WriteTiles::default(),
+        sounds: doc.sounds.iter().map(|s| save_format::SavedSound::from(&**s)).collect(),
+        next_sound_id: doc.next_sound_id.next(),
+        next_layer_id: doc.next_layer_id.next(),
+    };
+    write_map_tiles(&mut out);
+    out
+}
+
+/// 地図のしまう形を、塊の表の塊の番号の並びにする（`saved_of` のあとに地図を細工したとき）
+fn write_map_tiles(pd: &mut save_format::ProjectDocument) {
+    let mut writer = std::mem::take(&mut pd.map_tiles);
+    pd.for_each_map(|m| m.write_tiles(&mut writer));
+    pd.map_tiles = writer;
+}
+
+/// タブの今（浮いた片を置いた文書）の保存の型。置けなければ `Err`（本番の保存と同じ断り）
+fn saved_from_app(tab: &Tab) -> Result<save_format::ProjectDocument, String> {
+    let doc = tab.committed_document_copy().ok_or_else(|| {
+        format!("選んだ図形を置けないため保存できません。{}", crate::canvas_tool::undo_exit_text())
+    })?;
+    Ok(saved_of(&doc))
+}
+
+/// 保存の型から作品を組み立てる（本番の読み込みの道 `into_document_noting`。書く形・テストの保存の形は、版 11 の入れ物で
+/// 書いて読み戻してから：中身の並びは同じ）
+trait IntoDocument {
+    fn into_document(self) -> Result<crate::symbol::Document, String>;
+    /// 組み立てた作品をタブに開く（本番の作品を開く道 `open_document_in_new_tab`：まっさらなタブなら、そのタブに入れる）
+    fn apply_to_app(self, ws: &mut impl project_io::ProjectWorkspace)
+    where
+        Self: Sized,
+    {
+        let doc = self.into_document().expect("正しい地図の文書");
+        project_io::open_document_in_new_tab(ws, doc, None).expect("作品を開ける");
+    }
+}
+
+impl IntoDocument for save_format::ProjectDocument<crate::stored_map::ReadTiles> {
+    fn into_document(self) -> Result<crate::symbol::Document, String> {
+        self.into_document_noting(&mut false)
+    }
+}
+
+impl<T: serde::Serialize> IntoDocument for save_format::ProjectDocument<T> {
+    fn into_document(self) -> Result<crate::symbol::Document, String> {
+        format_v11::read::<crate::stored_map::ReadTiles>(&format_v11::bytes(&self)?[..])?.into_document()
+    }
+}
+
+/// 保存の型 `pd` を、そのまま今の版の作品ファイル `path` に書く（中身を確かめずに書く：細工したファイルを作る。`crafted_bytes`）
+fn write_saved_file<T: serde::Serialize>(path: &std::path::Path, pd: &save_format::ProjectDocument<T>) -> Result<(), String> {
+    std::fs::write(path, crafted_bytes(pd)?).map_err(|e| e.to_string())
+}
+
+/// 保存の型 `pd` を、中身を確かめずに今の版の作品ファイルのバイトにする（テストで壊れた中身のファイルを作る。本番の記録の型と
+/// 枠で書く：`save_format::saved_project_bytes`。塊の表は保存の形に読み直してから）。正しい作品の保存は `saved_file_bytes`
+fn crafted_bytes<T: serde::Serialize>(pd: &save_format::ProjectDocument<T>) -> Result<Vec<u8>, String> {
+    let mut pd: SavedProject = format_v11::read(&format_v11::bytes(pd)?[..])?;
+    let SavedTiles { colors, tiles, strokes } = std::mem::take(&mut pd.map_tiles);
+    Ok(save_format::saved_project_bytes(&pd, colors, tiles, strokes))
+}
+
+/// 作品 `doc` を、本番の保存と同じ書き手で書いた作品ファイルのバイト（`save_format::write_project_file`）
+fn saved_file_bytes(doc: &crate::symbol::Document) -> Vec<u8> {
+    let path = scratch_file_path("save");
+    save_format::write_project_file(&path, doc).expect("保存できる");
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    bytes
+}
+
+/// 作品ファイル・復旧ファイル `path` を本番の読み手で読んだ保存の型
+fn read_saved_file(path: &std::path::Path) -> Result<save_format::ProjectDocument<crate::stored_map::ReadTiles>, String> {
+    save_format::read_file(path).map(|(_, d)| d)
+}
+
+/// 版 11 までの作品ファイルの入れ物（頭：印・版 11・中身の長さ・中身の CRC32、そのあと postcard の保存の型1つ）。前の版の
+/// ファイルを直すテスト用の変換と、保存の型から作品を組み立てるテストの道具が使う（本番は版 12 の記録の列だけを読み書きする）
+mod format_v11 {
+    use crate::save_format::{read_streamed, ProjectDocument, Streamed};
+
+    const HEADER_LEN: usize = 20;
+
+    /// 保存の型 `doc` を版 11 の入れ物で書いたバイト
+    pub(super) fn bytes<T: serde::Serialize>(doc: &ProjectDocument<T>) -> Result<Vec<u8>, String> {
+        let body = postcard::to_allocvec(doc).map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(HEADER_LEN + body.len());
+        out.extend_from_slice(b"IS2D");
+        out.extend_from_slice(&11u32.to_le_bytes());
+        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        out.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
+    /// 版 11 の入れ物を読んだ保存の型（頭・長さ・CRC32・余りを確かめる）
+    pub(super) fn read<T: serde::de::DeserializeOwned + Default>(input: &[u8]) -> Result<ProjectDocument<T>, String> {
+        if input.len() < HEADER_LEN || &input[..4] != b"IS2D" || input[4..8] != 11u32.to_le_bytes() {
+            return Err("版 11 の作品ファイルではありません".to_owned());
+        }
+        let body_len = u64::from_le_bytes(input[8..16].try_into().expect("8 バイト"));
+        let crc = u32::from_le_bytes(input[16..20].try_into().expect("4 バイト"));
+        let Streamed { value, len, crc: got, left } = read_streamed::<ProjectDocument<T>>(&input[HEADER_LEN..])?;
+        if len != body_len {
+            return Err("ファイルが壊れています（長さが合いません）".to_owned());
+        }
+        if got != crc {
+            return Err("ファイルが壊れています（中身が変わっています）".to_owned());
+        }
+        match value {
+            Ok(doc) if left == 0 => Ok(doc),
+            Ok(_) => Err("プロジェクトファイルの形式が正しくありません（余りがあります）".to_owned()),
+            Err(e) => Err(format!("プロジェクトファイルの形式が正しくありません: {e}")),
+        }
+    }
+}
+
+/// テストの手順1つ：本番の操作か、本番の操作を組み合わせた手順（`pull_edge`・`move_vertex`・`scale_selection`）
+#[derive(Clone, Debug)]
+enum Op {
+    Do(doc_actions::Action),
+    PullEdge(Point, Point),
+    MoveVertex(Point, Point),
+    Scale(f64, f64),
+}
+
+impl From<doc_actions::Action> for Op {
+    fn from(a: doc_actions::Action) -> Self {
+        Op::Do(a)
+    }
+}
+
+/// 手順 `o` を行う（効いたか）
+fn op(host: &mut impl doc_actions::ActionHost, o: Op) -> bool {
+    match o {
+        Op::Do(a) => doc_actions::apply(host, a),
+        Op::PullEdge(from, to) => pull_edge(host, from, to),
+        Op::MoveVertex(from, to) => move_vertex(host, from, to),
+        Op::Scale(sx, sy) => scale_selection(host, sx, sy),
+    }
 }
 
 fn run(host: &mut impl doc_actions::ActionHost, actions: &[doc_actions::Action]) {
@@ -10474,7 +10744,7 @@ fn test_stage01_move_deselect_merge_and_marquee_slice_restore_on_cel() {
             Action::SelectSingleAt {
                 pt: Point::new(290.0, 100.0),
             },
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: kurbo::Vec2::new(-140.0, 0.0),
             },
             Action::Deselect,
@@ -10517,7 +10787,7 @@ fn test_stage01_move_deselect_merge_and_marquee_slice_restore_on_cel() {
                 p1: Point::new(140.0, 130.0),
                 additive: false,
             },
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: kurbo::Vec2::new(0.0, 100.0),
             },
             Action::Deselect,
@@ -10530,7 +10800,7 @@ fn test_stage01_move_deselect_merge_and_marquee_slice_restore_on_cel() {
             Action::SelectSingleAt {
                 pt: Point::new(320.0, 100.0),
             },
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: kurbo::Vec2::new(-160.0, 0.0),
             },
             Action::Deselect,
@@ -10560,13 +10830,7 @@ fn test_stage01_reshape_and_anchor_edit_on_cel() {
     let bbox0 = s0.bbox.unwrap();
 
     // 1. PullEdgeFromTo（上辺を上へ引き伸ばす）
-    run(
-        &mut app,
-        &[Action::PullEdgeFromTo {
-            from: Point::new(200.0, 180.0),
-            to: Point::new(200.0, 120.0),
-        }],
-    );
+    pull_edge(&mut app, Point::new(200.0, 180.0), Point::new(200.0, 120.0));
     let s_pulled = cel_summary(&app.doc, lid, 0);
     assert!(
         s_pulled.bbox.unwrap().y0 < bbox0.y0 - 20.0,
@@ -10589,13 +10853,7 @@ fn test_stage01_reshape_and_anchor_edit_on_cel() {
     );
 
     // 追加された頂点 (200, 220) を MoveVertexFromTo で下へ移動
-    run(
-        &mut app,
-        &[Action::MoveVertexFromTo {
-            from: Point::new(200.0, 220.0),
-            to: Point::new(200.0, 270.0),
-        }],
-    );
+    move_vertex(&mut app, Point::new(200.0, 220.0), Point::new(200.0, 270.0));
     let s_moved_v = cel_summary(&app.doc, lid, 0);
     assert!(
         s_moved_v.bbox.unwrap().y1 > s_added.bbox.unwrap().y1 + 20.0,
@@ -10663,19 +10921,13 @@ fn test_stage01_group_ungroup_transform_and_clipboard_on_cel() {
 
     // 2. 自由変形（拡大・回転・反転）
     let area_before_scale = s_grp2.total_area;
-    run(
-        &mut app,
-        &[
-            Action::ScaleSelection { sx: 2.0, sy: 1.5 },
-            Action::RotateSelection {
+    scale_selection(&mut app, 2.0, 1.5);
+    run(&mut app, &[Action::RotateSelection {
                 angle_rad: std::f64::consts::FRAC_PI_2,
-            },
-            Action::FlipSelection {
+            }, Action::FlipSelection {
                 flip_x: true,
                 flip_y: false,
-            },
-        ],
-    );
+            }]);
     let s_xform = cel_summary(&app.doc, lid, 0);
     assert!(
         (s_xform.total_area - area_before_scale * 3.0).abs() < area_before_scale * 0.15,
@@ -10694,7 +10946,7 @@ fn test_stage01_group_ungroup_transform_and_clipboard_on_cel() {
             Action::SelectAll,
             Action::Copy,
             Action::Paste { in_place: false },
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: kurbo::Vec2::new(220.0, 0.0),
             },
             Action::Deselect,
@@ -10834,7 +11086,7 @@ fn test_stage01_symbol_inplace_edit_and_classic_tween_on_cel() {
                 radius: 12.0,
                 color: blue,
             },
-            Action::ExitSymbolTimeline,
+            Action::ExitGroupSteps { steps: 1 },
         ],
     );
     let s_after_inplace = cel_summary(&app.doc, lid, 0);
@@ -10855,7 +11107,7 @@ fn test_stage01_symbol_inplace_edit_and_classic_tween_on_cel() {
             },
             Action::InsertKeyframe { copy_prev: true },
             Action::SelectAll,
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: kurbo::Vec2::new(200.0, 0.0),
             },
             Action::SwitchLayerAndFrame {
@@ -10972,7 +11224,7 @@ fn test_stage01_undo_redo_coalesce_and_save_load_on_cel() {
             Action::EnterSymbolFromLibrary { sym_id },
             Action::ExtendFrame,
             Action::ExtendFrame,
-            Action::ExitSymbolTimeline,
+            Action::ExitGroupSteps { steps: 1 },
         ],
     );
     let undo_before_pb = app.history.undo_stack.len();
@@ -11399,11 +11651,11 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     }
     assert_eq!(unmoved_during_drag, 1999);
 
-    // さらにマウス移動してドラッグ確定（Action::MoveSelected 相当のタイムライン同期含む）
+    // さらにマウス移動してドラッグ確定（Action::NudgeSelection 相当のタイムライン同期含む）
     tool_select::update_reshape_drag(&mut app, Point::new(32.0, 25.0));
     run(
         &mut app,
-        &[Action::MoveSelected {
+        &[Action::NudgeSelection {
             delta: KVec2::new(4.0, 3.0),
         }],
     );
@@ -11467,7 +11719,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         "未変更のマーキースライスは選択解除時に破棄され元の1図形に戻ること"
     );
 
-    // 2. マーキースライス後に移動すると Floating.modified が true になり、Action::CommitFloating で1回だけ結合確定されること
+    // 2. マーキースライス後に移動すると Floating.modified が true になり、Action::Deselect で1回だけ結合確定されること
     run(
         &mut app,
         &[Action::SelectMarquee {
@@ -11478,7 +11730,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     );
     run(
         &mut app,
-        &[Action::MoveSelected {
+        &[Action::NudgeSelection {
             delta: KVec2::new(10.0, 0.0),
         }],
     );
@@ -11488,8 +11740,8 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
         .expect("スライス断片の移動後も Floating が保持されること");
     assert!(fl_moved.modified());
 
-    // 重なっている同色断片が Action::CommitFloating で1図形に Union 結合され、Floating が空になること
-    run(&mut app, &[Action::CommitFloating]);
+    // 重なっている同色断片が Action::Deselect で1図形に Union 結合され、Floating が空になること
+    run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating().is_none());
     assert_eq!(
         app.scene().len(),
@@ -11515,7 +11767,7 @@ fn test_stage5_floating_lifecycle_and_commit_floating() {
     assert!(fl_paste.modified());
     assert_eq!(app.scene().len(), 2);
 
-    run(&mut app, &[Action::CommitFloating]);
+    run(&mut app, &[Action::Deselect]);
     assert!(app.session.floating().is_none());
     assert_eq!(
         app.scene().len(),
@@ -11696,13 +11948,8 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
         .collect();
 
     // 非一様スケール（sx != sy）＋回転をインスタンスに適用
-    run(
-        &mut app,
-        &[
-            Action::ScaleSelection { sx: 1.73, sy: 0.61 },
-            Action::RotateSelection { angle_rad: 0.47 },
-        ],
-    );
+    scale_selection(&mut app, 1.73, 0.61);
+    run(&mut app, &[Action::RotateSelection { angle_rad: 0.47 }]);
     let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
 
     // インスタンスに入り、別の場所に50回ストロークを描いて出る
@@ -11724,7 +11971,7 @@ fn test_stage6b_non_uniform_scale_rotated_symbol_edit_preserves_untouched_shape_
             }],
         );
     }
-    run(&mut app, &[Action::ExitSymbolTimeline]);
+    run(&mut app, &[Action::ExitGroupSteps { steps: 1 }]);
     assert!(app.session.edit_path().is_empty());
 
     let sym_shapes = &app.doc.find_symbol(sym_id).unwrap().timeline.layers[0].keyframes[0]
@@ -11824,7 +12071,7 @@ fn test_stage6b_save_inside_two_level_nested_symbol_matches_save_after_exit_to_r
     assert_eq!(app.session.edit_path().len(), 2);
 
     // ルートに出てから保存
-    run(&mut app, &[Action::ExitSymbolToDepth { depth: 0 }]);
+    exit_symbols_to(&mut app, 0);
     assert!(app.session.edit_path().is_empty());
     project_io::save_project_to_path(&mut app, &path_root).unwrap();
 
@@ -11917,7 +12164,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
                 pt: Point::new(140.0, 100.0),
             },
             Action::ConvertToSymbol,
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: KVec2::new(20.0, 0.0),
             },
         ],
@@ -11950,7 +12197,7 @@ fn test_stage6b_undo_redo_across_before_inside_and_after_symbol_restores_doc_and
     run(
         &mut app,
         &[
-            Action::ExitSymbolTimeline,
+            Action::ExitGroupSteps { steps: 1 },
             Action::PaintStroke {
                 points: vec![Point::new(100.0, 260.0), Point::new(180.0, 260.0)],
                 radius: 12.0,
@@ -12801,10 +13048,10 @@ fn contour_bits(c: &vector_engine::Contour) -> Vec<[u64; 6]> {
 
 fn run_and_verify_scene_cache_consistency(
     app: &mut Is2dApp,
-    action: crate::doc_actions::Action,
+    action: impl Into<Op>,
     label: &str,
 ) {
-    run(app, &[action]);
+    op(app, action.into());
     let before: Vec<FillShape> = app.scene().iter().cloned().collect();
 
     // 1. 全部のレイヤーを作り直す（計算に使う写しの持ち主は画面の土台のまま）：図形は版まで同じ
@@ -13017,7 +13264,7 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
     { let mut sel = app.session.selection().clone(); sel.insert_shape(&sym_inst_shape); app.session.replace_selection(sel); }
     run_and_verify_scene_cache_consistency(
         &mut app,
-        Action::ScaleSelection { sx: 1.35, sy: 0.72 },
+        Op::Scale(1.35, 0.72),
         "ScaleSelection non-uniform on symbol",
     );
     run_and_verify_scene_cache_consistency(
@@ -13086,7 +13333,7 @@ fn test_stage7_scene_unchanged_after_rebuild_overlay_and_base_cache_on_every_act
     );
     run_and_verify_scene_cache_consistency(
         &mut app,
-        Action::ExitSymbolTimeline,
+        Action::ExitGroupSteps { steps: 1 },
         "ExitSymbolTimeline from rotated+scaled symbol",
     );
 }
@@ -13357,7 +13604,7 @@ fn convert_to_symbol_inside_rotated_instance_keeps_local_coordinates() {
     app.session.replace_selection(crate::canvas_tool::Selection::default());
     { let mut sel = app.session.selection().clone(); sel.insert_shape(&inner); app.session.replace_selection(sel); }
     run(&mut app, &[Action::ConvertToSymbol]);
-    let new_id = app.doc.library().iter_in_order().last().unwrap().id;
+    let new_id = symbols_in_order(app.doc.library()).last().unwrap().id;
     assert_ne!(new_id, outer_id);
 
     // 中身の大きさは、外のシンボルの中での大きさのまま（ステージ上の 1.5 倍・回転した大きさではない）
@@ -13520,7 +13767,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             apply(&mut app, Action::ConvertToSymbol),
             "8段目までのシンボル化は成功すること"
         );
-        let id = app.doc.library().iter_in_order().last().unwrap().id;
+        let id = symbols_in_order(app.doc.library()).last().unwrap().id;
         chain_sym_ids.push(id);
     }
     assert_eq!(app.doc.library().len(), 8);
@@ -13580,7 +13827,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         apply(&mut app, Action::ConvertToSymbol),
         "単段シンボルの作成は成功すること"
     );
-    let host_sym_id = app.doc.library().iter_in_order().last().unwrap().id;
+    let host_sym_id = symbols_in_order(app.doc.library()).last().unwrap().id;
     assert_eq!(app.doc.library().len(), 9);
     let _ = apply(
         &mut app,
@@ -13630,16 +13877,16 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
         app.notices.iter().last().map(|t| t.message.as_str()),
         Some("シンボルの入れ子は8段までです")
     );
-    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+    let _ = apply(&mut app, Action::ExitGroupSteps { steps: 1 });
 
     // 完了条件4 & 5: 9段のファイル・1000段の連鎖のファイルは開けずにエラーになり、タブは増えない
-    let make_chain_project = |depth: usize| -> project_io::ProjectDocument {
+    let make_chain_project = |depth: usize| -> save_format::ProjectDocument {
         let mut library = Vec::with_capacity(depth);
         for i in 0..depth {
             let sym_id = (i + 1) as u64;
             let instances = if i + 1 < depth {
-                vec![project_io::SavedSymbolInstance {
-                    binding: project_io::SavedSymbolInstanceBinding {
+                vec![save_format::SavedSymbolInstance {
+                    binding: save_format::SavedSymbolInstanceBinding {
                         instance_gid: (i + 1) as u64,
                         symbol_id: (i + 2) as u64,
                         xform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
@@ -13655,22 +13902,22 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             } else {
                 Vec::new()
             };
-            library.push(project_io::SavedSymbolDef {
+            library.push(save_format::SavedSymbolDef {
                 id: sym_id,
                 name: format!("Chain{sym_id}"),
-                timeline: project_io::SavedTimeline {
+                timeline: save_format::SavedTimeline {
                     fps: 24,
                     total_frames: 1,
                     current_frame: 0,
                     active_layer: 0,
                     next_layer_number: 2,
-                    layers: vec![project_io::SavedLayer {
+                    layers: vec![save_format::SavedLayer {
                         id: 1,
                         name: "L1".to_owned(),
                         visible: true,
                         locked: false,
                         frame_count: 1,
-                        keyframes: vec![project_io::SavedKeyframe {
+                        keyframes: vec![save_format::SavedKeyframe {
                             start_frame: 0,
                             tween: false,
                             tween_rotate: timeline::TweenRotate::Auto,
@@ -13682,7 +13929,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
                 },
             });
         }
-        project_io::ProjectDocument {
+        save_format::ProjectDocument {
             stage_size: [800.0, 450.0],
             timeline: (&timeline::Timeline::default()).into(),
             library,
@@ -13702,7 +13949,7 @@ fn test_g5_2_symbol_nest_depth_limit_and_file_rejection() {
             "is2d_g5_2_chain_{depth}_{}.is2d",
             std::process::id()
         ));
-        write_project_file(&path, &make_chain_project(depth));
+        write_crafted_file(&path, &make_chain_project(depth));
         let res = crate::project_io::open_project_in_tab(&mut app, &path, None);
         let _ = std::fs::remove_file(&path);
         assert_eq!(
@@ -13946,7 +14193,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
-        app.doc.next_layer_id = 11;
+        app.doc.next_layer_id = crate::symbol::Counter::starting_at(11);
         app.doc.root.next_layer_number = 11;
         app.doc.root.current_frame = 1_500;
         app.doc.root.active_layer = 0;
@@ -14010,7 +14257,7 @@ fn test_g4_1_shared_keyframes_fast_undo_and_rss_bound() {
                 keyframes: timeline::KeyframeList::from_keyed(kfs),
             });
         }
-        app.doc.next_layer_id = 21;
+        app.doc.next_layer_id = crate::symbol::Counter::starting_at(21);
         app.doc.root.next_layer_number = 21;
         app.doc.root.current_frame = 0;
         app.doc.root.active_layer = 0;
@@ -14658,7 +14905,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     let next_id_before = app.doc.next_layer_id;
     assert_eq!(total_before, 1);
     assert_eq!(next_num_before, 2);
-    assert_eq!(next_id_before, 2);
+    assert_eq!(next_id_before.next(), 2);
 
     // シンボルへの出入りで SymbolDef の内容やリビジョンが変わらないこと
     assert!(symbol_ops::enter_symbol_from_library(&mut app, sym_id));
@@ -14675,7 +14922,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     assert_eq!(app.doc.next_layer_id, next_id_before);
 
     // 不正な total_frames=0, next_layer_number=0, next_layer_id=0 を持つファイルを読み込んだ時点で正規化されていること
-    let mut pd = project_io::ProjectDocument::from_app(&app).unwrap();
+    let mut pd = saved_from_app(&app).unwrap();
     pd.library[0].timeline.total_frames = 0;
     pd.library[0].timeline.next_layer_number = 0;
     pd.next_layer_id = 0;
@@ -14683,7 +14930,7 @@ fn test_g3_1_symbol_enter_exit_preserves_symbol_def_and_load_normalizes() {
     let loaded_doc = pd.into_document().unwrap();
     assert!(loaded_doc.library().at(0).unwrap().timeline.total_frames >= 1);
     assert!(loaded_doc.library().at(0).unwrap().timeline.next_layer_number >= 2);
-    assert!(loaded_doc.next_layer_id >= 2);
+    assert!(loaded_doc.next_layer_id.next() >= 2);
 }
 
 #[test]
@@ -14829,7 +15076,7 @@ fn test_g3_2_end_coalesce_via_apply_preserves_playback_and_coalesce_boundaries()
     let _ = apply(&mut app, Action::EnterSymbolFromLibrary { sym_id });
     let _ = apply(&mut app, Action::ExtendFrame);
     let _ = apply(&mut app, Action::ExtendFrame);
-    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+    let _ = apply(&mut app, Action::ExitGroupSteps { steps: 1 });
     let gid = app.doc.root.layers[0].keyframes[0].cel.instances()[0]
         .binding
         .instance_gid;
@@ -15621,7 +15868,7 @@ fn test_m2_2_tween_midframe_blocks_edit_shows_warning_and_f6_enables_edit() {
     for _ in 0..7 {
         let _ = apply(&mut app, Action::ExtendFrame);
     }
-    let _ = apply(&mut app, Action::ExitSymbolTimeline);
+    let _ = apply(&mut app, Action::ExitGroupSteps { steps: 1 });
     assert_eq!(app.doc.library().at(0).unwrap().timeline.total_frames, 8);
 
     // ルートタイムラインで Frame 0..=4 の完成したクラシックトゥイーンを作成（開始 first_frame = 1）
@@ -16285,7 +16532,7 @@ fn test_m2_8_document_shapes_never_store_fill_mesh_after_playback_onion_edit_and
                     .any(|kf| kf.cel.shapes().iter().any(|s| s.has_cached_hit_bez_path()))
             })
         };
-        tl_has_hit(&doc.root) || doc.library().iter_in_order().any(|sym| tl_has_hit(&sym.timeline))
+        tl_has_hit(&doc.root) || symbols_in_order(doc.library()).any(|sym| tl_has_hit(&sym.timeline))
     };
     let _ = apply(&mut app, Action::ScrubRulerToFrame { frame: 2 });
     for s in app.scene().iter() {
@@ -16639,19 +16886,19 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 #[test]
 fn test_m3_1_write_project_reports_write_error() {
     let tab = crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1);
-    let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
+    let doc = tab.doc().clone();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
     std::fs::write(&tmp, b"orig").unwrap();
-    let ro_file = std::fs::File::open(&tmp).unwrap();
-    let res = crate::project_io::write_project(ro_file, &doc);
+    let mut ro_file = std::fs::File::open(&tmp).unwrap();
+    let res = save_format::RecordWriter::default().write(&mut ro_file, &doc, None);
     let _ = std::fs::remove_file(&tmp);
     assert!(res.is_err(), "書き込みの失敗が Err として返ること");
     // 中身の途中で書けなくなっても（入りきらない書き先）、書き込みの失敗として返る
     let (app, _) = copied_symbol_with_sound();
-    let doc = crate::project_io::ProjectDocument::of(&app.doc);
     let mut small = [0u8; 1000];
-    let err = crate::project_io::write_project(std::io::Cursor::new(&mut small[..]), &doc)
+    let err = save_format::RecordWriter::default()
+        .write(&mut std::io::Cursor::new(&mut small[..]), &app.doc, None)
         .expect_err("入りきらない書き先は Err が返ること");
     assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
 
@@ -17240,7 +17487,7 @@ fn test_move_selection_off_grid_is_refused() {
     assert!(apply(&mut app, Action::SelectAll));
     assert!(!apply(
         &mut app,
-        Action::MoveSelected {
+        Action::NudgeSelection {
             delta: KVec2::new(70_000.0, 0.0),
         },
     ));
@@ -17932,7 +18179,7 @@ fn test_video_export_common_render_and_dimensions() {
 fn test_video_export_mp4_cancel_and_error() {
     use crate::canvas_tool::View;
     use crate::vector_engine::Contour;
-    use crate::project_io::tmp_path_for;
+    use crate::save_format::tmp_path_for;
     use crate::video_export::{VideoExportJob, VideoExportOutcome};
 
     let make_rect_shape = |x: f64, y: f64, w: f64, h: f64, color: Color32| -> FillShape {
@@ -18363,19 +18610,10 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
             let p0 = pt(rng);
             Action::EraseStroke { points: vec![p0, p0 + KVec2::new(50.0, 20.0)], radius: 8.0 }
         }
-        "CommitRawOutline" => {
-            let p0 = pt(rng);
-            let r = rng.f64_range(10.0, 40.0);
-            Action::CommitRawOutline { raw: vec![p0, p0 + KVec2::new(r, 0.0), p0 + KVec2::new(r, r), p0 + KVec2::new(0.0, r)] }
-        }
         "BucketFill" => Action::BucketFill { pt: pt(rng), color: color(rng) },
         "PencilStroke" => {
             let p0 = pt(rng);
             Action::PencilStroke { points: vec![p0, p0 + KVec2::new(30.0, 10.0), p0 + KVec2::new(60.0, 35.0)], stroke: stroke(rng) }
-        }
-        "DrawLines" => {
-            let (a, b) = (pt(rng), pt(rng));
-            Action::DrawLines { segs: vec![(QuadBez::new(a, a.midpoint(b), b), stroke(rng))] }
         }
         "InkBottle" => Action::InkBottle { pt: contour_pt(rng), stroke: stroke(rng) },
         "SelectSingleAt" => {
@@ -18390,8 +18628,8 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
         }
         "SelectAll" => Action::SelectAll,
         "Deselect" => Action::Deselect,
-        "CommitFloating" => Action::CommitFloating,
-        "MoveSelected" => Action::MoveSelected { delta: KVec2::new(rng.f64_range(-20.0, 20.0), rng.f64_range(-20.0, 20.0)) },
+        "CommitFloating" => Action::Deselect,
+        "MoveSelected" => Action::NudgeSelection { delta: KVec2::new(rng.f64_range(-20.0, 20.0), rng.f64_range(-20.0, 20.0)) },
         "NudgeSelection" => Action::NudgeSelection { delta: KVec2::new([-1.0, 1.0, 10.0][rng.range(3)], 0.0) },
         "FinishMoveSelectionDrag" => Action::FinishMoveSelectionDrag { total_delta: KVec2::new(15.0, 12.0), alt_duplicate: rng.coin() },
         "DeleteSelection" => Action::DeleteSelection,
@@ -18410,20 +18648,10 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
             Some((s, q, _)) => Action::MoveVertex { layer_id: s.layer_id, orig_vertex: q.p0, target_pos: q.p0 + KVec2::new(-7.0, 9.0), follow: rng.coin() },
             None => Action::Deselect,
         },
-        "PullEdgeFromTo" => {
-            let from = contour_pt(rng);
-            Action::PullEdgeFromTo { from, to: from + KVec2::new(6.0, 6.0) }
-        }
-        "MoveVertexFromTo" => {
-            let from = on_contour(rng).map_or_else(|| pt(rng), |(_, q, _)| q.p0);
-            Action::MoveVertexFromTo { from, to: from + KVec2::new(5.0, -5.0) }
-        }
         "AddAnchor" => Action::AddAnchor { pt: contour_pt(rng) },
         "DeleteAnchor" => Action::DeleteAnchor { pt: on_contour(rng).map_or_else(|| pt(rng), |(_, q, _)| q.p0) },
-        "ScaleSelection" => Action::ScaleSelection { sx: rng.f64_range(0.6, 1.5), sy: rng.f64_range(0.6, 1.5) },
         "FlipSelection" => Action::FlipSelection { flip_x: rng.coin(), flip_y: rng.coin() },
         "RotateSelection" => Action::RotateSelection { angle_rad: rng.f64_range(-1.0, 1.0) },
-        "SetTransformPivot" => Action::SetTransformPivot { world_pivot: rng.coin().then(|| pt(rng)) },
         "ResetTransformPivot" => Action::ResetTransformPivot,
         "CommitTransformDrag" => {
             let s = rng.f64_range(0.7, 1.4);
@@ -18441,8 +18669,6 @@ fn random_action(kind: &str, rng: &mut OpRng, app: &Is2dApp) -> Action {
             Action::EnterSymbolTimeline { instance_gid: gids.get(rng.range(gids.len())).copied().unwrap_or(999) }
         }
         "EnterSymbolFromLibrary" => Action::EnterSymbolFromLibrary { sym_id: sym_id(rng) },
-        "ExitSymbolTimeline" => Action::ExitSymbolTimeline,
-        "ExitSymbolToDepth" => Action::ExitSymbolToDepth { depth: rng.range(tab.session.edit_path().levels.len() + 1) },
         "RenameSymbol" => Action::RenameSymbol { sym_id: sym_id(rng), new_name: format!("S{}", rng.range(5)) },
         "DeleteSymbol" => Action::DeleteSymbol { sym_id: sym_id(rng) },
         "DuplicateSymbol" => Action::DuplicateSymbol { sym_id: sym_id(rng) },
@@ -18547,10 +18773,86 @@ fn picture_summary_of(doc: &symbol::Document) -> Vec<String> {
         }
     };
     timeline("root".into(), &doc.root);
-    for sym in doc.library().iter_in_order() {
+    for sym in symbols_in_order(doc.library()) {
         timeline(format!("sym{} {}", sym.id, sym.name), &sym.timeline);
     }
     out
+}
+
+/// 2つの文書 `a`・`b` の絵が、地図の精度の内で同じか（`picture_summary_of` が違ったときに使う詳しい比べ）。塗りとインスタンスは
+/// 要約（外枠は 1/20px）がそのまま同じ。線は、レイヤー・キーフレーム・階層・色ごとに、片方の線の上の点（およそ 1px ごと）を
+/// もう片方の同じ太さの線が 1/20px 以内で通る。太さだけ違ってよいのは、元の絵のその点の近くに、その太さの同じ色の線が
+/// もう1本あったときだけ（ほとんど重なった2本が、別々に重ねるとき格子の目より近い所で1本にまとまる：作りの精度の内。持ち主の
+/// 了解：2026-11-28）。`Err`：違う所
+fn same_picture_within_precision(a: &symbol::Document, b: &symbol::Document) -> Result<(), String> {
+    use kurbo::ParamCurveArclen;
+    const TOL: f64 = 0.05;
+    type Lines = Vec<(kurbo::QuadBez, u8)>;
+    // 塗り・インスタンスの要約と、色ごとの線
+    let parts = |doc: &symbol::Document| {
+        let r = |v: f64| (v * 20.0).round() as i64;
+        let mut fills: Vec<String> = Vec::new();
+        let mut lines: std::collections::BTreeMap<String, Lines> = std::collections::BTreeMap::new();
+        let mut timeline = |name: String, tl: &timeline::Timeline| {
+            for (li, layer) in tl.layers.iter().enumerate() {
+                for (ki, kf) in layer.keyframes.iter().enumerate() {
+                    for m in kf.cel.maps().iter() {
+                        let base = m.base();
+                        for f in base.drawn_shapes(&m.group_path).iter().filter(|f| f.line.is_none()) {
+                            let bb = f.bounding_box();
+                            fills.push(format!("{name} L{li} K{ki} {:?} {:?} {} {} {} {}", m.group_path, f.color(), r(bb.x0), r(bb.y0), r(bb.x1), r(bb.y1)));
+                        }
+                        let map = base.map();
+                        for (e, ed) in map.edges.iter().enumerate() {
+                            if let Some(st) = ed.stroke {
+                                lines.entry(format!("{name} L{li} K{ki} {:?} {:?}", m.group_path, st.color)).or_default().push((map.quad(e), st.width));
+                            }
+                        }
+                    }
+                    for i in kf.cel.instances().iter() {
+                        fills.push(format!("{name} L{li} K{ki} inst {} {:?} {:?} {:?}", i.binding.symbol_id, i.parent_scope, i.order, i.binding.xform.as_coeffs().map(r)));
+                    }
+                }
+            }
+        };
+        timeline("root".into(), &doc.root);
+        for sym in symbols_in_order(doc.library()) {
+            timeline(format!("sym{}", sym.id), &sym.timeline);
+        }
+        fills.sort();
+        (fills, lines)
+    };
+    let ((fa, la), (fb, lb)) = (parts(a), parts(b));
+    if fa != fb {
+        return Err("塗りかインスタンスが違う".into());
+    }
+    let near = |lines: &Lines, p: Point, width: Option<u8>| {
+        lines.iter().any(|(q, w)| width.is_none_or(|x| x == *w) && crate::vector_engine::nearest_on_quad(q, p).1 <= TOL * TOL)
+    };
+    // `from` の線の点が、`to` の線で覆われるか（太さの違いは、`from` 自身にその太さの線が近くにあるときだけ許す）
+    let covered = |from: &Lines, to: &Lines, key: &str| -> Result<(), String> {
+        for (q, w) in from {
+            let n = (q.arclen(1e-6).ceil() as usize).max(2);
+            for k in 0..=n {
+                let p = q.eval(k as f64 / n as f64);
+                if near(to, p, Some(*w)) {
+                    continue;
+                }
+                let merged = to.iter().any(|(tq, tw)| crate::vector_engine::nearest_on_quad(tq, p).1 <= TOL * TOL && near(from, p, Some(*tw)));
+                if !merged {
+                    return Err(format!("{key}：太さ {w} の線の ({:.2}, {:.2}) が無い", p.x, p.y));
+                }
+            }
+        }
+        Ok(())
+    };
+    let empty = Lines::new();
+    for key in la.keys().chain(lb.keys()) {
+        let (x, y) = (la.get(key).unwrap_or(&empty), lb.get(key).unwrap_or(&empty));
+        covered(x, y, key)?;
+        covered(y, x, key)?;
+    }
+    Ok(())
 }
 
 /// でたらめな操作の試し：`Action` の全部の種類を、でたらめな順と引数で `apply` に通し、毎手、次を確かめる（設計
@@ -18565,13 +18867,13 @@ fn picture_summary_of(doc: &symbol::Document) -> Vec<String> {
 /// 6. 取り消し・やり直しは、できるときは数が1つずつ動き、できないときは何も変えない
 #[test]
 fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
-    use crate::project_io::ProjectDocument;
+    use crate::save_format::ProjectDocument;
     use std::collections::BTreeMap;
 
     let names = action_kind_names();
     let drawing = ["PaintStroke", "PencilStroke", "BucketFill", "InkBottle", "SelectMarquee", "FinishMoveSelectionDrag"];
     let saved = |app: &Is2dApp, ctx: &str| -> ProjectDocument {
-        match ProjectDocument::from_app(app.tab()) {
+        match saved_from_app(app.tab()) {
             Ok(pd) => pd,
             Err(e) => panic!("{ctx}: 保存できない（{e}）"),
         }
@@ -18615,7 +18917,8 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             // 選択の一部を外す（その部分だけ確定する）操作も、線と塗りの両方を比べる（一部を確定しても見えている重なりを
             // 変えない：外した線は、持ったままの塗りの上に重ねる線 `PieceGroup::lines_over`。前は外した線が塗りの下に入り、
             // あとで塗りを確定すると消えたので、この操作のあとは線を比べから外していた：設計審査 b7208d9 の 9.）
-            let picture_before = app.tab().committed_document_copy().map(|d| picture_summary_of(&d));
+            let doc_before = app.tab().committed_document_copy();
+            let picture_before = doc_before.as_ref().map(picture_summary_of);
             let res = apply(&mut app, action);
             assert!(app.tab().history.before.is_none(), "{ctx}: 操作の前の写しが残った");
             // ライブラリの表（見せる順・名前・使われ方・子・音・高さ・動くか）は、全部から作り直したもの（お手本）と同じ
@@ -18645,8 +18948,16 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                 // 取り消しの1手にしない操作（選ぶ・見る場所を変えるなど）は、絵を変えない（持ち上げた絵の確定は、保存する絵と
                 // 同じ絵を書く。一部だけ確定すると、図形の番号の振り方と、絵の精度より細かい座標が、一度に確定したときと違う
                 // ことがあるので、絵として比べる：`picture_summary`）
-                let picture_after = app.tab().committed_document_copy().map(|d| picture_summary_of(&d));
-                assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
+                let doc_after = app.tab().committed_document_copy();
+                let picture_after = doc_after.as_ref().map(picture_summary_of);
+                if picture_after != picture_before {
+                    let (Some(a), Some(b)) = (&doc_before, &doc_after) else {
+                        panic!("{ctx}: 取り消しの1手にしない操作が、置ける・置けないを変えた");
+                    };
+                    if let Err(e) = same_picture_within_precision(a, b) {
+                        panic!("{ctx}: 取り消しの1手にしない操作が絵を変えた：{e}");
+                    }
+                }
                 assert_eq!(after_undo, before_undo, "{ctx}: 取り消しの1手にしない操作が取り消しを積んだ");
                 continue;
             }
@@ -18711,7 +19022,7 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
                 }
             }
         }
-        for sym in doc.library().iter_in_order() {
+        for sym in symbols_in_order(doc.library()) {
             for layer in &sym.timeline.layers {
                 for kf in &layer.keyframes {
                     for sh in kf.cel.shapes().iter() {
@@ -18773,7 +19084,7 @@ fn test_m5_2_n1001_contour_segments_capacity_equals_len_after_merge_insert_and_r
     ));
     assert_all_contours_shrunk(&app.tab().doc, "after AddAnchor");
 
-    let loaded_doc = saved_and_read_back(&project_io::ProjectDocument::from_app(&app).unwrap());
+    let loaded_doc = saved_project_of(&app);
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
     assert_all_contours_shrunk(&reopened.tab().doc, "after save and reopen");
@@ -18815,7 +19126,7 @@ fn test_transform_move_drag_translates_custom_pivot_once() {
 fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup() {
     use crate::canvas_tool::{CoalesceKey, View};
     use crate::doc_actions::{apply, Action};
-    use crate::project_io::{ProjectDocument, SavedSymbolInstanceBinding};
+    use crate::save_format::SavedSymbolInstanceBinding;
     use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode};
     use crate::vector_engine::Contour;
     use crate::video_export::{export_dimensions, render_frame};
@@ -19005,7 +19316,7 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
             effect: ColorEffect::new(0.35, -0.25),
         },
     ));
-    let loaded_doc = saved_and_read_back(&ProjectDocument::from_app(&export_app).unwrap());
+    let loaded_doc = saved_project_of(&export_app);
     let mut reopened = Is2dApp::default();
     loaded_doc.apply_to_app(&mut reopened);
     let reopened_eff = reopened.doc.root.layers[0].keyframes[0].cel.instances()[0]
@@ -19178,7 +19489,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     ));
     crate::project_io::save_project_to_path(&mut app, &saved_proj_path).unwrap();
     assert_eq!(
-        crate::project_io::read_project_document(&saved_proj_path)
+        read_saved_file(&saved_proj_path)
             .unwrap()
             .recovery_source,
         None,
@@ -19351,7 +19662,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     std::fs::write(&bad_entry, bad_rec.to_string_lossy().as_bytes()).unwrap();
     let bad_journal = rec_dir.join("RECOVER_headonly.is2dj");
     let bad_journal_entry = rec_dir.join("0-9997.entry");
-    std::fs::write(&bad_journal, project_io::file_identity(project_io::SaveKind::Journal)).unwrap();
+    std::fs::write(&bad_journal, save_format::file_identity(save_format::SaveKind::Journal)).unwrap();
     std::fs::write(&bad_journal_entry, bad_journal.to_string_lossy().as_bytes()).unwrap();
     let no_src_rec = rec_dir.join("RECOVER_no_source.is2d");
     let no_src_entry = rec_dir.join("0-9998.entry");
@@ -19409,7 +19720,7 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(nan_app.doc.root.layers[0].keyframes[0].cel.is_empty());
     crate::project_io::save_project_to_path(&mut nan_app, &nan_save_path).unwrap();
     // 読むときに数がみな有限か確かめる（`only_finite_numbers`）ので、読めれば有限でない数は入っていない
-    let reloaded = crate::project_io::read_project_document(&nan_save_path)
+    let reloaded = read_saved_file(&nan_save_path)
         .unwrap()
         .into_document()
         .unwrap();
@@ -19498,9 +19809,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
     // 3, 13, 14. B が残り、変形が A×B になり、B も選択され、Undo で分解前の A に戻る
     {
         let (mut app, sym_a_id, sym_b_id) = build_nested_app(1);
-        let orig_b_in_a = app
-            .doc
-            .library().iter_in_order()
+        let orig_b_in_a = symbols_in_order(app.doc.library())
             .find(|s| s.id == sym_a_id)
             .unwrap()
             .timeline
@@ -19839,7 +20148,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         app.session.replace_selection(crate::canvas_tool::Selection::default());
         app.session.add_to_selection([c_stroke_id], std::iter::empty());
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
+        let sym_c_id = symbols_in_order(app.doc.library()).last().unwrap().id;
         assert_ne!(sym_c_id, sym_a_id);
         assert_ne!(sym_c_id, sym_b_id);
 
@@ -19909,7 +20218,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
         ));
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
+        let sym_c_id = symbols_in_order(app.doc.library()).last().unwrap().id;
         assert_ne!(sym_c_id, sym_b_id);
         assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
 
@@ -19918,9 +20227,7 @@ fn test_nested_symbol_ungroup_preserves_child_instances_frames_and_resets_color_
             &mut app,
             Action::EnterSymbolFromLibrary { sym_id: sym_a_id },
         ));
-        let b_gid_in_a = app
-            .doc
-            .library().iter_in_order()
+        let b_gid_in_a = symbols_in_order(app.doc.library())
             .find(|s| s.id == sym_a_id)
             .unwrap()
             .timeline
@@ -20100,7 +20407,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     proj_kf.timeline.layers[0].frame_count = 1;
     proj_kf.timeline.layers[0]
         .keyframes
-        .push(crate::project_io::SavedKeyframe {
+        .push(crate::save_format::SavedKeyframe {
             start_frame: 5,
             tween: false,
             tween_rotate: crate::symbol::TweenRotate::Auto,
@@ -20108,7 +20415,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
             instances: Vec::new(),
             sound: None,
         });
-    crate::project_io::write_project_file_atomically(&out_of_range_kf_path, &proj_kf).unwrap();
+    write_saved_file(&out_of_range_kf_path, &proj_kf).unwrap();
 
     let mut app_kf = Is2dApp::default();
     assert_eq!(
@@ -20123,15 +20430,15 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     //     キーフレームの数が同じになって見逃した
     let hidden_trim_path = base_dir.join("hidden_trim.is2d");
     let mut proj_hidden = proj_kf.clone();
-    proj_hidden.library.push(crate::project_io::SavedSymbolDef {
+    proj_hidden.library.push(crate::save_format::SavedSymbolDef {
         id: 77,
         name: "空".to_owned(),
-        timeline: crate::project_io::SavedTimeline {
+        timeline: crate::save_format::SavedTimeline {
             layers: Vec::new(),
             ..proj_hidden.timeline.clone()
         },
     });
-    crate::project_io::write_project_file_atomically(&hidden_trim_path, &proj_hidden).unwrap();
+    write_saved_file(&hidden_trim_path, &proj_hidden).unwrap();
     let mut app_hidden = Is2dApp::default();
     assert_eq!(
         open_project_in_tab(&mut app_hidden, &hidden_trim_path, None).unwrap(),
@@ -20148,7 +20455,7 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
         l.id = (proj_layers.timeline.layers.len() + 1) as u64;
         proj_layers.timeline.layers.push(l);
     }
-    crate::project_io::write_project_file_atomically(&over_layers_path, &proj_layers).unwrap();
+    write_saved_file(&over_layers_path, &proj_layers).unwrap();
 
     let mut app_layers = Is2dApp::default();
     assert_eq!(
@@ -20165,12 +20472,12 @@ fn test_open_project_reports_trimmed_data_and_marks_unsaved() {
     let mut proj_broken = saved_project_at(&normal_path);
     let n = proj_broken.map_tiles.tiles.len() as u32;
     proj_broken.timeline.layers[0].keyframes[0].maps[0].tiles[0] = n + 5;
-    crate::project_io::write_project_file_atomically(&broken_path, &proj_broken).unwrap();
+    write_saved_file(&broken_path, &proj_broken).unwrap();
     let err = open_project_in_tab(&mut Is2dApp::default(), &broken_path, None).unwrap_err();
     assert!(err.contains("地図が壊れています"), "{err}");
     let mut proj_cross = saved_project_at(&normal_path);
     break_map_colors(&mut proj_cross, 0);
-    crate::project_io::write_project_file_atomically(&broken_path, &proj_cross).unwrap();
+    write_saved_file(&broken_path, &proj_cross).unwrap();
     let mut app_cross = Is2dApp::default();
     assert!(open_project_in_tab(&mut app_cross, &broken_path, None).is_ok());
     assert!(app_cross.scene().len() == 0, "壊れた地図は何も無い地図");
@@ -20830,7 +21137,7 @@ fn test_alt_duplicate_and_paste_raw_shape_with_group_keeps_both_selected() {
     );
     assert!(apply(
         &mut app,
-        Action::MoveSelected {
+        Action::NudgeSelection {
             delta: kurbo::Vec2::new(0.0, 200.0),
         },
     ));
@@ -21633,7 +21940,7 @@ fn committing_floating_pieces_onto_a_changed_cel_is_refused() {
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 200.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(0.0, 200.0) }));
     assert!(app.session.floating().is_some());
     // 確定を通らずに、同じセル画が別の絵に変わる（確定の呼び忘れの代わり）
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(500.0, 100.0, 600.0, 200.0, Color32::BLUE)]);
@@ -21647,7 +21954,7 @@ fn committing_floating_pieces_onto_a_changed_cel_is_refused() {
     assert!(app.notices.iter().last().unwrap().message.contains("取り消し（"), "知らせが出口を案内しない");
     assert!(apply(&mut app, Action::Undo), "確定を断られたあとの取り消しが効かない");
     assert!(app.session.floating().is_none_or(|f| !f.modified()), "取り消しても動かしたまま");
-    assert!(crate::project_io::ProjectDocument::from_app(app.tab()).is_ok(), "取り消したあとも保存できない");
+    assert!(saved_from_app(app.tab()).is_ok(), "取り消したあとも保存できない");
     assert!(apply(&mut app, Action::Deselect), "取り消したあとも選択を外せない");
 }
 
@@ -21698,7 +22005,7 @@ fn group_transforms_go_through_the_one_map_entry() {
     assert_eq!(scopes.len(), 2, "2つのレイヤーのグループの階層");
     let at = |app: &Is2dApp, x: f64| app.scene().iter().any(|s| s.contains_point(Point::new(x, 150.0)));
     // 動かすと、両方のレイヤーのグループが動く
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 300.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(0.0, 300.0) }));
     assert!(!at(&app, 150.0) && !at(&app, 350.0), "どちらかのグループが動かずに残った");
     assert!(apply(&mut app, Action::Undo));
     assert!(at(&app, 150.0) && at(&app, 350.0));
@@ -21750,7 +22057,7 @@ fn installing_a_work_always_gives_the_tab_a_new_identity() {
         assert!(apply(app, Action::PaintStroke { points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)], radius: 8.0, color }));
         assert!(apply(app, Action::SelectAll));
         assert!(apply(app, Action::ConvertToSymbol));
-        app.tab().doc().library().iter_in_order().last().unwrap().id
+        symbols_in_order(app.tab().doc().library()).last().unwrap().id
     };
     // 赤い絵のシンボルをコピーする
     let mut app = Is2dApp::default();
@@ -21962,7 +22269,7 @@ fn ink_bottle_again_where_a_line_was_moved_away() {
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 100.0), false, true);
     assert!(app.scene().iter().any(|s| s.line.is_some() && app.session.selection().contains_shape(s)), "上の辺の線を選んだ");
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, -50.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(0.0, -50.0) }));
     assert!(apply(&mut app, Action::Deselect));
     assert!(app.session.floating().is_none());
     assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }), "かけ直したインクボトルが断られた: {:?}", app.notices.iter().last().map(|t| &t.message));
@@ -22070,7 +22377,7 @@ fn line_ids_stay_the_same_when_lines_move() {
     // グループにして動かす
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::Group));
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(-30.0, 10.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(-30.0, 10.0) }));
     assert_eq!(line_ids(&app), first, "グループにして動かしたら番号が変わった");
     // 取り消し・やり直し
     assert!(apply(&mut app, Action::Undo));
@@ -22227,7 +22534,7 @@ fn selections_keep_their_lines_through_operations() {
                 7 => ("シンボル化", apply(&mut app, Action::ConvertToSymbol).then_some(KVec2::ZERO)),
                 8 => {
                     let d = KVec2::new(rng.f64() * 60.0 - 30.0, rng.f64() * 60.0 - 30.0).round();
-                    ("移動", apply(&mut app, Action::MoveSelected { delta: d }).then_some(d))
+                    ("移動", apply(&mut app, Action::NudgeSelection { delta: d }).then_some(d))
                 }
                 9 => {
                     let d = KVec2::new(rng.f64() * 300.0 - 100.0, rng.f64() * 200.0).round();
@@ -22239,7 +22546,7 @@ fn selections_keep_their_lines_through_operations() {
                     let ok = apply(&mut app, Action::Copy) && apply(&mut app, Action::Paste { in_place: true });
                     ("その場に貼り付け", ok.then_some(KVec2::ZERO))
                 }
-                11 => ("拡大", { apply(&mut app, Action::ScaleSelection { sx: 1.25, sy: 0.8 }); None }),
+                11 => ("拡大", { scale_selection(&mut app, 1.25, 0.8); None }),
                 12 => ("回転", { apply(&mut app, Action::RotateSelection { angle_rad: 0.4 }); None }),
                 13 => ("反転", { apply(&mut app, Action::FlipSelection { flip_x: true, flip_y: false }); None }),
                 14 => ("取り消し", { apply(&mut app, Action::Undo); None }),
@@ -22801,7 +23108,7 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
     app.recovery_writer.as_ref().unwrap().flush(unsaved.get());
     let rec = journals(&rec_dir);
     assert_eq!(rec.len(), 1);
-    let written = crate::recovery_journal::read(&rec[0]).unwrap();
+    let written = read_saved_file(&rec[0]).unwrap();
     assert_eq!(written.recovery_source.as_deref(), Some(path.as_path()));
     // 浮いた片を置いた形：動かした先（y が 200 ずれた所）に絵がある
     let doc = written.into_document().unwrap();
@@ -22817,7 +23124,7 @@ fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
     app.recovery_writer.as_ref().unwrap().flush(unsaved.get());
     let bytes = std::fs::read(&rec[0]).unwrap();
     std::fs::write(&rec[0], &bytes[..bytes.len() - 1]).unwrap();
-    let cut = crate::recovery_journal::read(&rec[0]).expect("終わりが欠けたファイルを読めない").into_document().unwrap();
+    let cut = read_saved_file(&rec[0]).expect("終わりが欠けたファイルを読めない").into_document().unwrap();
     assert_eq!(cut.root.layers[0].cel_at(0).unwrap().maps()[0].base().drawn_shapes(&[]).len(), before);
     // 閉じる（確認ありで終わる）：書いたものはみな消える
     app.recovery_writer.take().unwrap().finish(true);
@@ -22885,8 +23192,10 @@ fn a_work_the_app_can_make_always_opens() {
         app.notices.iter().any(|t| t.message.contains(&format!("{} 段", crate::timeline::MAX_GROUP_DEPTH))),
         "断ったわけを知らせない"
     );
-    let bytes = project_io::project_file_bytes(&project_io::ProjectDocument::of(app.tab().doc())).unwrap();
-    let back = project_io::read_project::<crate::stored_map::ReadTiles>(&bytes[..]).and_then(|d| d.into_document());
+    let path = scratch_file_path("deep_groups");
+    save_format::write_project_file(&path, app.tab().doc()).unwrap();
+    let back = read_saved_file(&path).and_then(|d| d.into_document());
+    let _ = std::fs::remove_file(&path);
     assert!(back.is_ok(), "アプリで作った作品が開けない：{:?}", back.err());
 }
 
@@ -22898,15 +23207,15 @@ fn restoring_a_recovery_file_reports_what_was_trimmed() {
     let _ = std::fs::remove_dir_all(&rec_dir);
     std::fs::create_dir_all(&rec_dir).unwrap();
     let app = Is2dApp::default();
-    let mut saved = project_io::ProjectDocument::of(app.tab().doc());
+    let mut saved = saved_of(app.tab().doc());
     let extra = saved.timeline.layers[0].clone();
     while saved.timeline.layers.len() <= crate::timeline::MAX_LAYERS_PER_TIMELINE {
         let id = saved.timeline.layers.len() as u64 + 1;
-        saved.timeline.layers.push(project_io::SavedLayer { id, ..extra.clone() });
+        saved.timeline.layers.push(save_format::SavedLayer { id, ..extra.clone() });
     }
     saved.next_layer_id = saved.timeline.layers.len() as u64 + 1;
     let rec = rec_dir.join("0_0-1-RECOVER_無題-1.is2d");
-    write_project_file(&rec, &saved);
+    write_crafted_file(&rec, &saved);
     std::fs::write(rec_dir.join("0_0-1.entry"), rec.to_string_lossy().as_bytes()).unwrap();
     let ctx = egui::Context::default();
     let mut next = Is2dApp::default();
@@ -23004,7 +23313,7 @@ fn the_recovery_writer_reports_failures_and_keeps_the_previous_copy() {
     writer.flush(copies.get());
     let journal = with_ext(&rec, "is2dj").pop().expect("控え");
     std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
-    std::fs::create_dir(project_io::tmp_path_for(&journal)).unwrap();
+    std::fs::create_dir(save_format::tmp_path_for(&journal)).unwrap();
     for y in [40.0, 50.0] {
         stroke(&mut app, y);
         copies.refresh(&app.tabs);
@@ -23015,7 +23324,7 @@ fn the_recovery_writer_reports_failures_and_keeps_the_previous_copy() {
     let mut recovery = Recovery { dir: Some(rec.clone()), ..Default::default() };
     recovery.find_leftovers();
     assert_eq!(recovery.found.len(), 1, "前に書けた控えが復元の一覧から外れた");
-    assert!(crate::recovery_journal::read(&journal).is_ok(), "前に書けた控えが読めない");
+    assert!(read_saved_file(&journal).is_ok(), "前に書けた控えが読めない");
     // (C) 名前が変わったタブで、新しい控えを作れない
     let rec = base.join("c");
     let writer = RecoveryWriter::start(rec.clone());
@@ -23028,7 +23337,7 @@ fn the_recovery_writer_reports_failures_and_keeps_the_previous_copy() {
     app.tabs[0].file = Some(base.join("名前を付けた.is2d"));
     stroke(&mut app, 40.0);
     let renamed = rec.join(old.file_name().unwrap().to_string_lossy().replace("無題-1", "名前を付けた"));
-    std::fs::create_dir(project_io::tmp_path_for(&renamed)).unwrap();
+    std::fs::create_dir(save_format::tmp_path_for(&renamed)).unwrap();
     copies.refresh(&app.tabs);
     writer.flush(copies.get());
     assert!(!writer.take_failures().is_empty(), "新しい控えを作れなかったことを知らせない");
@@ -23683,16 +23992,10 @@ fn test_move_vertex_preserves_untouched_hole_contours() {
     let orig_shape = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
     assert!(orig_shape.holes().len() >= 30);
 
-    // Action::MoveVertexFromTo を穴の多い図形に行ったとき、触っていない穴が操作前の Contour と同じもの（ptr_eq）として残ること
+    // 頂点を動かす（本番の Action::MoveVertex）のを穴の多い図形に行ったとき、触っていない穴が操作前の Contour と同じもの（ptr_eq）として残ること
     let v_from = orig_shape.holes()[0].segments[0].p0;
     let v_to = v_from + kurbo::Vec2::new(1.0, 1.0);
-    assert!(apply(
-        &mut app,
-        Action::MoveVertexFromTo {
-            from: v_from,
-            to: v_to,
-        },
-    ));
+    assert!(move_vertex(&mut app, v_from, v_to));
     let after_shape = &app.doc.root.layers[0].keyframes[0].cel.shapes()[0];
     assert_eq!(after_shape.holes().len(), orig_shape.holes().len());
     for untouched_hole in &orig_shape.holes()[1..] {
@@ -23929,7 +24232,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     assert!(file1.starts_with(b"IS2D"));
     assert_eq!(
         file1[4..8],
-        project_io::PROJECT_FORMAT_VERSION.to_le_bytes()
+        save_format::FORMAT_VERSION.to_le_bytes()
     );
     let parsed_val = serde_json::to_value(project_from_bytes(&file1).unwrap()).unwrap();
     let kf_json = &parsed_val["timeline"]["layers"][0]["keyframes"][0];
@@ -24050,13 +24353,7 @@ fn test_format_v2_contour_rounding_idempotence_and_unrounded_symbol_xform() {
     ));
     sym_app.set_selected_indices(vec![0]);
     doc_actions::convert_selection_to_symbol(&mut sym_app).unwrap();
-    assert!(apply(
-        &mut sym_app,
-        Action::ScaleSelection {
-            sx: 1.3456789012345,
-            sy: 0.8765432109876,
-        },
-    ));
+    assert!(scale_selection(&mut sym_app, 1.3456789012345, 0.8765432109876));
     assert!(apply(
         &mut sym_app,
         Action::RotateSelection {
@@ -24200,7 +24497,7 @@ fn test_video_export_parallel_render_frames_and_without_mesh() {
     }
 
     // 4. 文書の図形はメッシュを持たず、書き出し用の展開はメッシュを持たず、画面用の展開はメッシュを持つ
-    for sym in doc.library().iter_in_order() {
+    for sym in symbols_in_order(doc.library()) {
         for layer in &sym.timeline.layers {
             for kf in &layer.keyframes {
                 for s in kf.cel.shapes().iter() {
@@ -24320,7 +24617,7 @@ fn test_reshape_edge_with_floating_commits_first_and_empty_v1_file_rejected() {
         next_sound_id: 1,
         next_layer_id: 2,
     };
-    let mut v2_bytes = project_io::project_file_bytes(&empty_doc).unwrap();
+    let mut v2_bytes = crafted_bytes(&empty_doc).unwrap();
     v2_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     let v2_path = std::env::temp_dir().join(format!("is2d_empty_v2_{}.is2d", std::process::id()));
     std::fs::write(&v2_path, &v2_bytes).unwrap();
@@ -24422,7 +24719,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     let green = Color32::from_rgb(40, 180, 90);
     let yellow = Color32::from_rgb(230, 200, 40);
     let lib_names =
-        |app: &Is2dApp| -> Vec<String> { app.doc.library().iter_in_order().map(|s| s.name.clone()).collect() };
+        |app: &Is2dApp| -> Vec<String> { symbols_in_order(app.doc.library()).map(|s| s.name.clone()).collect() };
 
     // 1. タブ A で赤の線をシンボル S にしてコピーし、新しいタブ B に貼る。B のライブラリは ["Symbol 1"]
     let mut app = Is2dApp::default();
@@ -24458,7 +24755,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
             color: blue,
         },
     ));
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::Copy));
 
@@ -24488,10 +24785,10 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     ));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_c_id = app.doc.library().iter_in_order().last().unwrap().id;
+    let sym_c_id = symbols_in_order(app.doc.library()).last().unwrap().id;
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let sym_p_id = app.doc.library().iter_in_order().last().unwrap().id;
+    let sym_p_id = symbols_in_order(app.doc.library()).last().unwrap().id;
     assert!(apply(&mut app, Action::Copy));
 
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
@@ -24511,7 +24808,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
             color: yellow,
         },
     ));
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::Copy));
 
@@ -24539,14 +24836,14 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
             color: blue,
         },
     ));
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert!(apply(&mut app, Action::PlaceSymbol { sym_id: sym_c_id }));
     assert!(apply(&mut app, Action::Copy));
 
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 7);
-    let new_c_in_b = app.doc.library().iter_in_order().last().unwrap().id;
+    let new_c_in_b = symbols_in_order(app.doc.library()).last().unwrap().id;
 
     crate::project_io::switch_to_tab(&mut app, 0, Some(&ctx));
     let p_gid = app.doc.root.layers[0].keyframes[0]
@@ -24563,7 +24860,7 @@ fn test_cross_tab_repaste_after_source_symbol_edit_imports_current_content() {
     crate::project_io::switch_to_tab(&mut app, 1, Some(&ctx));
     assert!(apply(&mut app, Action::Paste { in_place: true }));
     assert_eq!(app.doc.library().len(), 8);
-    let new_p_in_b = app.doc.library().iter_in_order().last().unwrap();
+    let new_p_in_b = symbols_in_order(app.doc.library()).last().unwrap();
     assert!(
         new_p_in_b
             .timeline
@@ -24993,7 +25290,7 @@ fn test_leaving_symbol_releases_backdrop_cache() {
     assert!(app.tab().session.backdrop_cache.lock().entry_count() > 0);
 
     // 写しは、直前の描画で使わなかったものを、次の描画の始めに捨てる（出たあとの1回目の描画では使わない）
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     for _ in 0..2 {
         let _ = ctx.run(raw_input.clone(), |ctx| app.update_ui(ctx));
     }
@@ -25084,13 +25381,7 @@ fn test_vertex_drag_flip_removes_flipped_part() {
         let mut app = Is2dApp::default();
         let lid = app.doc.root.layers[0].id;
         put_cel_shapes(&mut app, 0, 0, vec![make_poly(pts, lid)]);
-        assert!(apply(
-            &mut app,
-            Action::MoveVertexFromTo {
-                from: from_pt,
-                to: to_pt,
-            },
-        ));
+        assert!(move_vertex(&mut app, from_pt, to_pt));
         assert!(app.doc.root.layers[0].keyframes[0].cel.shapes().is_empty());
         assert!(apply(&mut app, Action::Undo));
         assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
@@ -25100,13 +25391,7 @@ fn test_vertex_drag_flip_removes_flipped_part() {
     let mut app = Is2dApp::default();
     let lid = app.doc.root.layers[0].id;
     put_cel_shapes(&mut app, 0, 0, vec![make_poly(&square_pts, lid)]);
-    assert!(apply(
-        &mut app,
-        Action::MoveVertexFromTo {
-            from: Point::new(100.0, 100.0),
-            to: Point::new(300.0, 150.0),
-        },
-    ));
+    assert!(move_vertex(&mut app, Point::new(100.0, 100.0), Point::new(300.0, 150.0)));
     let shapes = &app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert_eq!(shapes.len(), 1);
     let area = shapes[0].exterior().signed_area();
@@ -25273,7 +25558,7 @@ fn test_drag_bucket_fill_boundary_moves_both_sides() {
         (Point::new(300.0, 392.0), Point::new(300.0, 400.0)),
     ] {
         let mut app = ring_with_bucket_fill();
-        assert!(apply(&mut app, Action::PullEdgeFromTo { from, to }));
+        assert!(pull_edge(&mut app, from, to));
         assert_eq!(
             shared_boundary_coverage(&app, in_disk, area),
             (0, 0),
@@ -25295,7 +25580,7 @@ fn test_drag_bucket_fill_boundary_moves_both_sides() {
         .segments[2]
         .p0;
     let to = v + (Point::new(300.0, 300.0) - v) * (15.0 / (Point::new(300.0, 300.0) - v).hypot());
-    assert!(apply(&mut app, Action::MoveVertexFromTo { from: v, to }));
+    assert!(move_vertex(&mut app, v, to));
     assert_eq!(
         shared_boundary_coverage(&app, in_disk, area),
         (0, 0),
@@ -25318,13 +25603,7 @@ fn test_drag_overpainted_brush_boundary_moves_both_sides() {
     let area = (110.0, 181.0, 490.0, 219.0);
     // 青の右の辺を、赤の帯の所で青の中へ
     let mut app = crossed_brush_strokes();
-    assert!(apply(
-        &mut app,
-        Action::PullEdgeFromTo {
-            from: Point::new(315.0, 200.0),
-            to: Point::new(305.0, 200.0)
-        }
-    ));
+    assert!(pull_edge(&mut app, Point::new(315.0, 200.0), Point::new(305.0, 200.0)));
     assert_eq!(shared_boundary_coverage(&app, in_strip, area), (0, 0));
     // 赤（左）の切り口を直接つかんで右へ、赤（左）の角の頂点を直接動かす
     for move_vertex in [false, true] {
@@ -25345,17 +25624,11 @@ fn test_drag_overpainted_brush_boundary_moves_both_sides() {
         let seg = red.exterior().segments[si];
         // 境目の線は1本なので、赤の側からつかんでも同じ辺・同じ頂点になる
         let action = if move_vertex {
-            Action::MoveVertexFromTo {
-                from: seg.p0,
-                to: seg.p0 + KVec2::new(-9.0, -8.0),
-            }
+            Op::MoveVertex(seg.p0, seg.p0 + KVec2::new(-9.0, -8.0))
         } else {
-            Action::PullEdgeFromTo {
-                from: seg.eval(0.5),
-                to: seg.eval(0.5) + KVec2::new(12.0, 0.0),
-            }
+            Op::PullEdge(seg.eval(0.5), seg.eval(0.5) + KVec2::new(12.0, 0.0))
         };
-        assert!(apply(&mut app, action));
+        assert!(op(&mut app, action));
         assert_eq!(
             shared_boundary_coverage(&app, in_strip, area),
             (0, 0),
@@ -25473,7 +25746,7 @@ fn test_drag_three_color_junction_vertex() {
             + (c - j) * (6.0 / (c - j).hypot())
             + KVec2::new(0.0, if j.y < 300.0 { -2.0 } else { 2.0 });
         assert!(
-            apply(&mut app, Action::MoveVertexFromTo { from: j, to }),
+            move_vertex(&mut app, j, to),
             "{j:?} の頂点をつかめる"
         );
         assert_eq!(
@@ -25519,15 +25792,9 @@ fn test_random_shared_boundary_drags_keep_shapes_together() {
         let d = KVec2::new(ang.cos(), ang.sin()) * (2.0 + 4.0 * rnd());
         if rnd() < 0.5 {
             let p = q.eval(0.3 + 0.4 * rnd());
-            let _ = apply(&mut app, Action::PullEdgeFromTo { from: p, to: p + d });
+            let _ = pull_edge(&mut app, p, p + d);
         } else {
-            let _ = apply(
-                &mut app,
-                Action::MoveVertexFromTo {
-                    from: q.p0,
-                    to: q.p0 + d,
-                },
-            );
+            let _ = move_vertex(&mut app, q.p0, q.p0 + d);
         }
         assert_eq!(
             shared_boundary_coverage(
@@ -25615,13 +25882,7 @@ fn test_reshape_rewrites_only_touched_shapes() {
         .collect();
     // 青と黒の境目（円の内側のふち、上のほう）を少しだけ外へ
     let from = Point::new(300.0, 300.0 - 92.0);
-    assert!(apply(
-        &mut app,
-        Action::PullEdgeFromTo {
-            from,
-            to: from + KVec2::new(0.0, -2.0),
-        },
-    ));
+    assert!(pull_edge(&mut app, from, from + KVec2::new(0.0, -2.0)));
     let after = scene_summary(&app).shapes.clone();
     for id in &red_ids {
         let (b, a) = (
@@ -25886,7 +26147,7 @@ fn alt_duplicate_drop_reuses_the_committed_picture_from_the_drag() {
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(30.0, 40.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(30.0, 40.0) }));
     let from = Point::new(150.0, 200.0);
     let drag = crate::clipboard_ops::begin_move_selection_drag(&mut app, from, true);
     // 画面の図形の番地で見る：ドラッグの前の土台 `b0`、ドラッグ中の画面 `during`、離したあとの土台 `b1`
@@ -26142,7 +26403,7 @@ fn drag_previews_match_the_drop() {
         select(&mut app, &mut rng, &mut ops, true);
         if rng.bool() && !app.session.selection().is_empty() {
             ops.push("移動".into());
-            apply(&mut app, Action::MoveSelected { delta: KVec2::new(rng.f64() * 120.0 - 60.0, rng.f64() * 120.0 - 60.0) });
+            apply(&mut app, Action::NudgeSelection { delta: KVec2::new(rng.f64() * 120.0 - 60.0, rng.f64() * 120.0 - 60.0) });
             select(&mut app, &mut rng, &mut ops, false);
         }
         if app.session.selection().is_empty() {
@@ -26325,23 +26586,11 @@ fn test_reshape_on_broken_face_contour_repaints_layer() {
     let undo0 = app.history.undo_stack.len();
     // 赤の左上の角を左へ 2px：左のフチが傾き、赤は三角形 1つ分（2 × 100 / 2 = 100）ふえる
     // （塗り重ねで、赤の右のフチのふくらみのうち緑の下になる所は、緑が見えるので赤から外れる）
-    assert!(apply(
-        &mut app,
-        Action::MoveVertexFromTo {
-            from: p(100.0, 100.0),
-            to: p(98.0, 100.0),
-        }
-    ));
+    assert!(move_vertex(&mut app, p(100.0, 100.0), p(98.0, 100.0)));
     let red1 = red_area(&app);
     assert!((red1 - (red0 + 100.0)).abs() < 5.0, "赤 {red0} → {red1}");
     // 上のフチを上へ 2px 引っぱる：赤がふえる
-    assert!(apply(
-        &mut app,
-        Action::PullEdgeFromTo {
-            from: p(150.0, 100.0),
-            to: p(150.0, 98.0),
-        }
-    ));
+    assert!(pull_edge(&mut app, p(150.0, 100.0), p(150.0, 98.0)));
     assert!(red_area(&app) > red1 + 50.0, "引っぱった分だけ赤がふえる");
     assert!((green_area(&app) - green0).abs() < 0.01, "緑はそのまま");
     assert_eq!(app.history.undo_stack.len(), undo0 + 2, "Undo を積む");
@@ -28574,17 +28823,17 @@ mod map_overlay {
             Point::new(160.0, 221.0),
         ];
         for (k, action) in [
-            doc_actions::Action::MoveSelected {
+            Op::Do(doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(0.051, 0.0),
-            },
-            doc_actions::Action::MoveSelected {
+            }),
+            Op::Do(doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(0.0, 0.01),
-            },
-            doc_actions::Action::MoveSelected {
+            }),
+            Op::Do(doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(30.0, 0.0),
-            },
-            doc_actions::Action::RotateSelection { angle_rad: 0.003 },
-            doc_actions::Action::ScaleSelection { sx: 1.02, sy: 1.02 },
+            }),
+            Op::Do(doc_actions::Action::RotateSelection { angle_rad: 0.003 }),
+            Op::Scale(1.02, 1.02),
         ]
         .into_iter()
         .enumerate()
@@ -28598,7 +28847,7 @@ mod map_overlay {
                 false,
             );
             assert!(!app.session.selection().is_empty(), "{k}");
-            assert!(doc_actions::apply(&mut app, action));
+            assert!(op(&mut app, action));
             assert!(canvas_tool::clear_selection(&mut app));
             assert!(layer_map_valid(&app, 0), "{k}");
             if k < 2 {
@@ -28659,7 +28908,7 @@ mod map_overlay {
         assert!(doc_actions::paste_clipboard(&mut app, true));
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(37.0, 9.0)
             }
         ));
@@ -28821,30 +29070,23 @@ mod map_overlay {
                     select_ops::apply_marquee_selection(&mut app, a, b, false);
                     if !app.session.selection().is_empty() {
                         let action = match kind {
-                            3 => Action::MoveSelected {
+                            3 => Op::Do(Action::NudgeSelection {
                                 delta: KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0),
-                            },
-                            4 => Action::RotateSelection {
+                            }),
+                            4 => Op::Do(Action::RotateSelection {
                                 angle_rad: (r.f() - 0.5) * 0.6,
-                            },
-                            _ => Action::ScaleSelection {
-                                sx: 0.7 + r.f() * 0.6,
-                                sy: 0.7 + r.f() * 0.6,
-                            },
+                            }),
+                            _ => Op::Scale(0.7 + r.f() * 0.6, 0.7 + r.f() * 0.6),
                         };
-                        let _ = doc_actions::apply(&mut app, action);
+                        let _ = op(&mut app, action);
                     }
                     assert!(canvas_tool::clear_selection(&mut app));
                 }
                 6 | 7 => {
                     let from = rp(&mut r);
                     let to = from + KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0);
-                    let action = if kind == 6 {
-                        Action::PullEdgeFromTo { from, to }
-                    } else {
-                        Action::MoveVertexFromTo { from, to }
-                    };
-                    let _ = doc_actions::apply(&mut app, action);
+                    let action = if kind == 6 { Op::PullEdge(from, to) } else { Op::MoveVertex(from, to) };
+                    let _ = op(&mut app, action);
                 }
                 8 => {
                     let _ = doc_actions::apply(&mut app, Action::AddAnchor { pt: rp(&mut r) });
@@ -28952,7 +29194,7 @@ mod map_overlay {
                             let action = if kind == 3 {
                                 let o =
                                     [0.0, 0.01, 0.051, 0.2, 1.0, 15.0][(r.f() * 6.0) as usize % 6];
-                                doc_actions::Action::MoveSelected {
+                                doc_actions::Action::NudgeSelection {
                                     delta: KVec2::new(o, o * 0.5),
                                 }
                             } else {
@@ -28977,7 +29219,7 @@ mod map_overlay {
                             if doc_actions::paste_clipboard(&mut app, true) {
                                 let _ = doc_actions::apply(
                                     &mut app,
-                                    doc_actions::Action::MoveSelected {
+                                    doc_actions::Action::NudgeSelection {
                                         delta: KVec2::new(r.f() * 40.0 - 20.0, r.f() * 40.0 - 20.0),
                                     },
                                 );
@@ -28988,10 +29230,7 @@ mod map_overlay {
                     _ => {
                         let a = rp(&mut r);
                         let to = a + KVec2::new(r.f() * 30.0 - 15.0, r.f() * 30.0 - 15.0);
-                        let _ = doc_actions::apply(
-                            &mut app,
-                            doc_actions::Action::PullEdgeFromTo { from: a, to },
-                        );
+                        let _ = pull_edge(&mut app, a, to);
                     }
                 }
                 let el = t.elapsed().as_secs_f64() * 1e3;
@@ -29113,7 +29352,7 @@ mod map_overlay {
         ));
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(0.0, 150.0)
             }
         ));
@@ -29373,7 +29612,7 @@ mod map_overlay {
         select_ops::apply_marquee_selection(&mut app, a, b, false);
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(10.0, 0.0)
             }
         ));
@@ -29504,13 +29743,13 @@ mod map_overlay {
             select_ops::apply_marquee_selection(&mut app, a, b, false);
             assert!(doc_actions::apply(
                 &mut app,
-                doc_actions::Action::MoveSelected {
+                doc_actions::Action::NudgeSelection {
                     delta: KVec2::new(10.0, 0.0)
                 }
             ));
             assert!(doc_actions::apply(
                 &mut app,
-                doc_actions::Action::MoveSelected {
+                doc_actions::Action::NudgeSelection {
                     delta: KVec2::new(-10.0, 0.0)
                 }
             ));
@@ -29703,7 +29942,7 @@ mod map_overlay {
             select_ops::apply_marquee_selection(&mut app, a, b, false);
             doc_actions::apply(
                 &mut app,
-                doc_actions::Action::MoveSelected {
+                doc_actions::Action::NudgeSelection {
                     delta: KVec2::new(7.0, 3.0),
                 },
             );
@@ -29728,7 +29967,7 @@ mod map_overlay {
                 select_ops::apply_marquee_selection(&mut app, a, b, false);
                 doc_actions::apply(
                     &mut app,
-                    doc_actions::Action::MoveSelected {
+                    doc_actions::Action::NudgeSelection {
                         delta: KVec2::new(7.0, 3.0),
                     },
                 );
@@ -29860,22 +30099,15 @@ mod map_overlay {
             Color32::from_rgb(60, 120, 220),
             Color32::from_rgb(40, 180, 90),
         ];
-        run(
-            &mut app,
-            &[
-                Action::PaintStroke {
+        run(&mut app, &[Action::PaintStroke {
                     points: vec![Point::new(100.0, 100.0), Point::new(220.0, 115.0)],
                     radius: 14.0,
                     color: colors[0],
-                },
-                Action::SelectSingleAt {
+                }, Action::SelectSingleAt {
                     pt: Point::new(160.0, 107.0),
-                },
-                Action::ConvertToSymbol,
-                Action::ScaleSelection { sx: 1.73, sy: 0.61 },
-                Action::RotateSelection { angle_rad: 0.47 },
-            ],
-        );
+                }, Action::ConvertToSymbol]);
+        scale_selection(&mut app, 1.73, 0.61);
+        run(&mut app, &[Action::RotateSelection { angle_rad: 0.47 }]);
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
         run(
             &mut app,
@@ -30159,7 +30391,7 @@ mod map_overlay {
         }
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(0.0, 200.0)
             }
         ));
@@ -30502,7 +30734,7 @@ mod map_overlay {
             let t_sel = ms(t);
             assert!(doc_actions::apply(
                 &mut app,
-                doc_actions::Action::MoveSelected {
+                doc_actions::Action::NudgeSelection {
                     delta: KVec2::new(10.0, 0.0)
                 }
             ));
@@ -30829,7 +31061,7 @@ mod map_overlay {
         app.set_selected_indices(vec![black]);
         assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
         assert!(doc_actions::rotate_selected_shapes(&mut app, 0.6));
-        assert!(doc_actions::scale_selected_shapes(&mut app, 0.45, 0.8));
+        assert!(scale_selection(&mut app, 0.45, 0.8));
         let (binding, _, _) = symbol_ops::selected_single_symbol_info(&app).unwrap();
         assert!(symbol_ops::enter_symbol_timeline(
             &mut app,
@@ -30866,10 +31098,7 @@ mod map_overlay {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        doc_actions::apply(
-            &mut app,
-            doc_actions::Action::ExitSymbolToDepth { depth: 0 },
-        );
+        exit_symbols_to(&mut app, 0);
         let lid = app.doc.root.layers[0].id;
         assert!(doc_actions::paste_clipboard(&mut app, true));
         let pieces = app.session.floating_view().pieces().to_vec();
@@ -30947,7 +31176,7 @@ mod map_overlay {
         );
         app.set_selected_indices(vec![0]);
         assert!(doc_actions::convert_selection_to_symbol(&mut app).is_some());
-        assert!(doc_actions::scale_selected_shapes(&mut app, 3.0, 3.0));
+        assert!(scale_selection(&mut app, 3.0, 3.0));
         let before = app.doc.root.layers[0].keyframes[0].cel.clone();
         let undo = app.history.undo_stack.len();
         assert!(!doc_actions::ungroup_selected_shapes(&mut app));
@@ -30973,7 +31202,7 @@ mod map_overlay {
         let sym_id = app.doc.register_new_symbol(s0);
         extend_frame_at(&mut app.doc.root, 0, 7);
         app.doc.root.sync_total_frames();
-        app.doc.next_group_id = 2;
+        app.doc.next_group_id = crate::symbol::Counter::starting_at(2);
         let inst = |x: f64, first_frame: usize| timeline::SymbolInstance {
             binding: symbol::SymbolInstanceBinding {
                 instance_gid: 1,
@@ -31201,7 +31430,7 @@ mod map_overlay {
         crate::project_io::save_project_to_path(&mut app, &path).unwrap();
         let size = std::fs::metadata(&path).unwrap().len();
         let t = std::time::Instant::now();
-        let doc = crate::project_io::read_project_document(&path)
+        let doc = read_saved_file(&path)
             .unwrap()
             .into_document()
             .unwrap();
@@ -31562,7 +31791,7 @@ mod map_overlay {
         let before = ids(&app);
         assert_eq!(before.len(), 3);
         for action in [
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(13.0, -7.0),
             },
             doc_actions::Action::RotateSelection { angle_rad: 0.7 },
@@ -31588,10 +31817,7 @@ mod map_overlay {
         );
         // 大きく縮めて頂点が近づいても（塗り重ねて作る：`realized`）、正しい地図で、図形の番号は引き継ぐ。Undo で戻る
         let n = app.history.undo_stack.len();
-        assert!(doc_actions::apply(
-            &mut app,
-            doc_actions::Action::ScaleSelection { sx: 0.02, sy: 0.02 }
-        ));
+        assert!(scale_selection(&mut app, 0.02, 0.02));
         assert!(app.doc.root.layers[0].keyframes[0].cel.maps_problem().is_none());
         assert!(ids(&app).iter().all(|id| before.contains(id)));
         while app.history.undo_stack.len() > n {
@@ -31682,13 +31908,13 @@ mod map_overlay {
         assert!(doc_actions::apply(&mut app, doc_actions::Action::SelectAll));
         doc_actions::convert_selection_to_symbol(&mut app).expect("シンボル化");
         for action in [
-            doc_actions::Action::MoveSelected {
+            Op::Do(doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(300.0, 0.0),
-            },
-            doc_actions::Action::RotateSelection { angle_rad: 0.3 },
-            doc_actions::Action::ScaleSelection { sx: 1.4, sy: 0.8 },
+            }),
+            Op::Do(doc_actions::Action::RotateSelection { angle_rad: 0.3 }),
+            Op::Scale(1.4, 0.8),
         ] {
-            assert!(doc_actions::apply(&mut app, action));
+            assert!(op(&mut app, action));
         }
         let binding = app.scene().iter().find_map(|s| s.symbol_instance).unwrap();
         assert!(doc_actions::apply(
@@ -31826,7 +32052,7 @@ mod map_overlay {
         // グループの変形：格子の外へ出るなら何も動かさない
         assert!(!doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(100_000.0, 0.0),
             },
         ));
@@ -31846,7 +32072,7 @@ mod map_overlay {
         app.set_selected_indices(vec![inst_idx]);
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(65_530.0, 0.0),
             },
         ));
@@ -31894,7 +32120,7 @@ mod map_overlay {
             .is_some_and(|_| !app.session.floating_view().pieces().is_empty()));
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(37.0, -21.0),
             },
         ));
@@ -31947,7 +32173,7 @@ mod map_overlay {
             let t = std::time::Instant::now();
             doc_actions::apply(
                 &mut app,
-                doc_actions::Action::MoveSelected {
+                doc_actions::Action::NudgeSelection {
                     delta: KVec2::new(23.0, -17.0),
                 },
             );
@@ -32051,7 +32277,7 @@ mod map_overlay {
                             && doc_actions::convert_selection_to_symbol(&mut app).is_some();
                         if ok && r.f() < 0.7 {
                             let _ = doc_actions::rotate_selected_shapes(&mut app, r.f() - 0.5);
-                            let _ = doc_actions::scale_selected_shapes(
+                            let _ = scale_selection(
                                 &mut app,
                                 0.5 + r.f(),
                                 0.5 + r.f(),
@@ -32114,7 +32340,7 @@ mod map_overlay {
                 t_max[kind] = t_max[kind].max(el);
             }
             let broken = std::iter::once(&app.doc.root)
-                .chain(app.doc.library().iter_in_order().map(|s| &s.timeline))
+                .chain(symbols_in_order(app.doc.library()).map(|s| &s.timeline))
                 .flat_map(|tl| tl.layers.iter().flat_map(|l| l.keyframes.iter()))
                 .filter(|k| k.cel.maps_problem().is_some())
                 .count();
@@ -32267,7 +32493,7 @@ mod map_overlay {
                 t_sel = t_sel.min(ms(t));
                 assert!(doc_actions::apply(
                     &mut app,
-                    doc_actions::Action::MoveSelected {
+                    doc_actions::Action::NudgeSelection {
                         delta: KVec2::new(25.0, 0.0)
                     }
                 ));
@@ -32310,7 +32536,7 @@ mod map_overlay {
         assert!(doc_actions::paste_clipboard(&mut app, true));
         assert!(doc_actions::apply(
             &mut app,
-            doc_actions::Action::MoveSelected {
+            doc_actions::Action::NudgeSelection {
                 delta: KVec2::new(16.0, 16.0)
             }
         ));
@@ -32677,9 +32903,7 @@ fn renewing_labels_keeps_equal_labels_equal_and_distinct_labels_distinct() {
 fn moving_shared_keyframes_to_another_layer_keeps_their_maps_shared() {
     const N: usize = 20;
     let file = |app: &Is2dApp| {
-        project_io::project_file_bytes(&project_io::ProjectDocument::of(&app.doc))
-            .unwrap()
-            .len()
+        saved_file_bytes(&app.doc).len()
     };
     let mut app = Is2dApp::default();
     let empty = file(&app);
@@ -33096,7 +33320,7 @@ fn refused_commit_keeps_the_floating_pieces() {
     for (a, b) in doc_before.layers.iter().zip(&app.tab().doc.root.layers) {
         assert!(std::sync::Arc::ptr_eq(&a.keyframes[0], &b.keyframes[0]));
     }
-    assert!(project_io::ProjectDocument::from_app(app.tab()).is_err());
+    assert!(saved_from_app(app.tab()).is_err());
 
     app.tab_mut().with_active_timeline_mut(|tl, _| {
         tl.layers
@@ -33318,7 +33542,7 @@ fn deselecting_a_moved_piece_keeps_it_above_a_piece_selected_later() {
     // 残した青を下へ動かしても、赤はそのまま（青は確定していないので、その下の中身を削っていない）
     assert!(doc_actions::apply(
         &mut app,
-        doc_actions::Action::MoveSelected {
+        doc_actions::Action::NudgeSelection {
             delta: KVec2::new(0.0, 100.0),
         },
     ));
@@ -33485,7 +33709,7 @@ fn loaded_keyframes_share_map_tiles() {
         .map(|j| Point::new(600.0 + j as f64 * 4.0, 500.0))
         .collect();
     commit_brush_line(&mut app, &brush_line(&pts, 4.0));
-    let loaded = saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).unwrap());
+    let loaded = saved_project_of(&app);
     let doc = loaded.into_document().unwrap();
     let kfs = &doc.root.layers[0].keyframes;
     assert_eq!(kfs.len(), 2);
@@ -33595,10 +33819,7 @@ fn collapsing_transforms_are_refused() {
     // 0.01 倍を4回：合わせて 1e-8 倍（行列式 1e-16）は潰れるので、どこかで断る
     let mut done = 0;
     for _ in 0..4 {
-        if doc_actions::apply(
-            &mut app,
-            doc_actions::Action::ScaleSelection { sx: 0.01, sy: 0.01 },
-        ) {
+        if scale_selection(&mut app, 0.01, 0.01) {
             done += 1;
         }
     }
@@ -33791,8 +34012,7 @@ fn measure_undo_and_paste_with_a_large_library() {
         let proto = app.doc.library().at(0).unwrap().clone();
         for k in 0..n {
             let mut s = (*proto).clone();
-            s.id = app.doc.next_symbol_id;
-            app.doc.next_symbol_id += 1;
+            s.id = app.doc.next_symbol_id.take();
             s.name = format!("bench {k}");
             app.doc.add_symbol(None, s);
         }
@@ -34120,7 +34340,7 @@ fn colour_picking_sees_symbol_edits_before_the_next_redraw() {
     let gid = app.doc.root.layers[0].keyframes[0].cel.instances()[0].binding.instance_gid;
     assert!(apply(&mut app, Action::EnterSymbolTimeline { instance_gid: gid }));
     assert!(apply(&mut app, Action::BucketFill { pt, color: Color32::BLUE }));
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert_eq!(seen(&app), Some(Color32::BLUE), "シンボルの中身を変えたのに、古い色を拾った");
 }
 
@@ -34166,12 +34386,12 @@ fn ink_bottle_while_holding_moved_pieces_keeps_the_work_savable() {
     let mut app = Is2dApp::default();
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(20.0, 0.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(20.0, 0.0) }));
     assert!(app.session.floating().is_some_and(|f| f.modified()));
     // 残りの右の縁に線を付ける
     let ink = EdgeStroke { color: Color32::BLACK, width: 4 };
     apply(&mut app, Action::InkBottle { pt: Point::new(300.0, 200.0), stroke: ink });
-    assert!(crate::project_io::ProjectDocument::from_app(app.tab()).is_ok(), "インクボトルのあと保存できない");
+    assert!(saved_from_app(app.tab()).is_ok(), "インクボトルのあと保存できない");
     assert!(apply(&mut app, Action::Deselect), "インクボトルのあと選択を外せない");
 }
 
@@ -34183,7 +34403,7 @@ fn writing_under_lifted_pieces_is_refused_at_the_write_entry() {
     let mut app = Is2dApp::default();
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
-    assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(20.0, 0.0) }));
+    assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(20.0, 0.0) }));
     let lid = app.doc.root.layers[0].id;
     let before = app.doc.root.layers[0].keyframes[0].cel.maps().clone();
     let tab = app.tab_mut();
@@ -34254,13 +34474,7 @@ fn off_grid_strokes_and_reshapes_are_refused_with_a_notice() {
         &mut app,
         doc_actions::Action::SetTool { tool: Tool::Select },
     );
-    assert!(!doc_actions::apply(
-        &mut app,
-        doc_actions::Action::PullEdgeFromTo {
-            from: Point::new(150.0, 110.0),
-            to: Point::new(150.0, 200_000.0),
-        },
-    ));
+    assert!(!pull_edge(&mut app, Point::new(150.0, 110.0), Point::new(150.0, 200_000.0)));
     assert_eq!(
         app.notices.iter().last().map(|t| t.message.as_str()),
         Some(off_grid.as_str())
@@ -34351,10 +34565,7 @@ fn anchor_hover_works_on_unmoved_slices() {
 #[test]
 fn loading_checks_scopes_and_reports_every_trim() {
     use crate::doc_actions::{apply, Action};
-    use crate::project_io::{
-        open_project_in_tab, save_project_to_path, write_project_file_atomically,
-        OpenProjectOutcome,
-    };
+    use crate::project_io::{open_project_in_tab, save_project_to_path, OpenProjectOutcome};
     let dir = std::env::temp_dir().join(format!("is2d_load_scopes_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -34373,7 +34584,7 @@ fn loading_checks_scopes_and_reports_every_trim() {
         let mut proj = saved_project_at(&normal);
         edit(&mut proj);
         let path = dir.join(name);
-        write_project_file_atomically(&path, &proj).unwrap();
+        write_saved_file(&path, &proj).unwrap();
         let mut app = Is2dApp::default();
         open_project_in_tab(&mut app, &path, None)
     };
@@ -34899,7 +35110,7 @@ fn pasting_reuses_the_polylines_of_unmoved_edges() {
     let edges = piece.edges.len();
     let before = crate::planar_map::polys_built();
     // 片を置く（1本の道：`edit_local`）
-    let pasted = match base.edit_local(&base.map_change(&piece), &[]) {
+    let pasted = match base.edit_local(&base.map_change(&piece, crate::planar_map::MapRule::Overlay), &[]) {
         LocalEdit::Changed(w) => w.stored.to_dense(),
         LocalEdit::Same => base.map().clone(),
         LocalEdit::Refused(r) => panic!("重ねられない {r:?}"),
@@ -34936,7 +35147,7 @@ fn pasting_onto_the_same_lines_cuts_nothing() {
     let m = m.checked().unwrap().uniquely_labeled().into_map();
     let base = LayerBase::new(&m);
     // 片を置く（1本の道：`edit_local`）
-    let paste = |p: &PlanarMap| match base.edit_local(&base.map_change(p), &[]) {
+    let paste = |p: &PlanarMap| match base.edit_local(&base.map_change(p, crate::planar_map::MapRule::Overlay), &[]) {
         LocalEdit::Changed(w) => w.stored.to_dense(),
         LocalEdit::Same => base.map().clone(),
         LocalEdit::Refused(r) => panic!("重ねられない {r:?}"),
@@ -35675,7 +35886,7 @@ fn moving_part_of_a_large_face_keeps_its_number() {
     );
     assert!(apply(
         &mut app,
-        Action::MoveSelected {
+        Action::NudgeSelection {
             delta: KVec2::new(5.0, 5.0)
         }
     ));
@@ -35730,7 +35941,7 @@ fn measure_new_edges_after_moving_a_small_part() {
         }
         assert!(apply(
             &mut app,
-            Action::MoveSelected {
+            Action::NudgeSelection {
                 delta: KVec2::new(3.0, 2.0)
             }
         ));
@@ -35772,8 +35983,7 @@ fn drawing_inside_a_symbol_copies_only_that_symbol() {
     let proto: crate::symbol::SymbolDef = (**app.doc.library().at(0).unwrap()).clone();
     for k in 0..200 {
         let mut s = proto.clone();
-        s.id = app.doc.next_symbol_id;
-        app.doc.next_symbol_id += 1;
+        s.id = app.doc.next_symbol_id.take();
         s.name = format!("copy {k}");
         app.doc.add_symbol(None, s);
     }
@@ -36307,7 +36517,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
             },
         ],
     );
-    let sym_b = app.doc.library().iter_in_order().map(|s| s.id).max().unwrap();
+    let sym_b = symbols_in_order(app.doc.library()).map(|s| s.id).max().unwrap();
     assert_ne!(sym_b, sym_a);
     let path = app.session.edit_path();
     assert_eq!(path.len(), 2, "子のシンボルの中");
@@ -36341,7 +36551,7 @@ fn library_edit_shows_only_the_symbol_without_picking_an_instance() {
     );
 
     // 4. 出るとシーンに戻り、ステージをまた描く
-    run(&mut app, &[Action::ExitSymbolTimeline]);
+    run(&mut app, &[Action::ExitGroupSteps { steps: 1 }]);
     assert!(app.session.edit_path().is_empty());
     assert!(stage_rects(&mut app) > 0);
 }
@@ -36431,7 +36641,7 @@ fn double_click_needs_both_clicks_at_the_same_place() {
 /// 版 6〜版 10 の保存用の型のうち、版 11 で変わった所（タイムラインごとにレイヤーの番号の数え札を持った）。版 8〜版 10 の
 /// ファイルはこの型で読んでから、今の版にする（版 11 で、レイヤーの番号の数え札を作品に1つにした）
 mod format_v10 {
-    use crate::project_io::{ProjectDocument, SavedLayer, SavedSound, SavedSymbolDef, SavedTimeline};
+    use crate::save_format::{ProjectDocument, SavedLayer, SavedSound, SavedSymbolDef, SavedTimeline};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36523,7 +36733,7 @@ mod format_v10 {
 }
 
 mod format_v9 {
-    use crate::project_io::ProjectDocument;
+    use crate::save_format::ProjectDocument;
     use crate::stored_map::{SavedStroke, SavedTile};
     use crate::canvas_tool::tests::SavedTiles;
     use serde::Deserialize;
@@ -36572,7 +36782,7 @@ mod format_v9 {
 }
 
 mod format_v8 {
-    use crate::project_io::ProjectDocument;
+    use crate::save_format::ProjectDocument;
     use crate::stored_map::{SavedEdge, SavedTile};
     use crate::canvas_tool::tests::SavedTiles;
     use serde::Deserialize;
@@ -36613,7 +36823,7 @@ mod format_v8 {
 }
 
 mod format_v7 {
-    use crate::project_io::{ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolInstance};
+    use crate::save_format::{ProjectDocument, SavedKeyframe, SavedLayer, SavedSymbolInstance};
     use crate::canvas_tool::tests::SavedTiles;
     use crate::timeline::SavedScopeMap;
     use crate::timeline::TweenRotate;
@@ -36729,7 +36939,7 @@ mod format_v7 {
 /// 前の版（版 5 の JSON・版 6）の保存用の型。計測用の作品を今の版に直すためだけに使う（アプリは前の版を開かない）。地図は
 /// 頂点と辺で書き、面の図形の番号は書かない
 mod old_format {
-    use crate::project_io::SavedSymbolInstance;
+    use crate::save_format::SavedSymbolInstance;
     use crate::timeline::TweenRotate;
     use serde::Deserialize;
 
@@ -36813,12 +37023,16 @@ fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     let (old, version): (old_format::Document, u32) = if bytes.first() == Some(&b'{') {
         assert!(
             bytes.starts_with(br#"{"version":5,"#),
-            "直せるのは、版 5 の JSON と版 6〜版 10 のファイルだけ"
+            "直せるのは、版 5 の JSON と版 6〜版 11 のファイルだけ"
         );
         (
             serde_json::from_slice(bytes).expect("版 5 の JSON として読めること"),
             5,
         )
+    } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 11u32.to_le_bytes() {
+        // 版 11：頭＋中身1つの入れ物（保存の型は今と同じ）
+        let v11: SavedProject = format_v11::read(bytes).expect("版 11 の作品ファイルとして読めること");
+        return Some((v11, 11));
     } else if bytes.len() >= 20 && &bytes[..4] == b"IS2D" && bytes[4..8] == 10u32.to_le_bytes() {
         let v10: format_v10::Document<SavedTiles> =
             postcard::from_bytes(&bytes[20..]).expect("版 10 の中身として読めること");
@@ -36843,12 +37057,13 @@ fn old_format_document(bytes: &[u8]) -> Option<(SavedProject, u32)> {
     } else {
         return None;
     };
-    Some((saved_and_read_back(&current_document_of(old)), version))
+    let doc = current_document_of(old).into_document().expect("作品にできること");
+    Some((project_from_bytes(&saved_file_bytes(&doc)).expect("読み戻せること"), version))
 }
 
 /// 前の版の保存用の型 `old` を、今の版の保存用の型にする。地図は確かめて面に1つずつ別の番号を記し（`uniquely_labeled`）、
 /// 同じレイヤーの直前のキーフレームの同じ階層の地図と塊を共有させる（アプリで写したのと同じ）。壊れた地図は読んだまま
-fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument {
+fn current_document_of(old: old_format::Document) -> save_format::ProjectDocument {
     use crate::stored_map::StoredMap;
     let stored_of = |m: &old_format::Map, prev: Option<&StoredMap>| -> StoredMap {
         let color = |i: usize| {
@@ -36893,7 +37108,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
             .map(|l| {
                 let mut prev: std::collections::HashMap<Vec<u64>, StoredMap> =
                     std::collections::HashMap::new();
-                project_io::SavedLayer {
+                save_format::SavedLayer {
                     id: l.id,
                     name: l.name,
                     visible: l.visible,
@@ -36902,7 +37117,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
                     keyframes: l
                         .keyframes
                         .into_iter()
-                        .map(|k| project_io::SavedKeyframe {
+                        .map(|k| save_format::SavedKeyframe {
                             start_frame: k.start_frame,
                             tween: k.tween,
                             tween_rotate: k.tween_rotate,
@@ -36927,7 +37142,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
             })
             .collect(),
     };
-    let mut pd: project_io::ProjectDocument = format_v10::Document {
+    let mut pd: save_format::ProjectDocument = format_v10::Document {
         stage_size: old.stage_size,
         timeline: timeline(old.timeline),
         library: old
@@ -36943,7 +37158,7 @@ fn current_document_of(old: old_format::Document) -> project_io::ProjectDocument
         next_sound_id: 1,
     }
     .current();
-    pd.write_map_tiles();
+    write_map_tiles(&mut pd);
     pd
 }
 
@@ -36955,7 +37170,7 @@ fn work_file_in_current_format(path: &std::path::Path) -> std::path::PathBuf {
         return path.to_path_buf();
     };
     let out = std::env::temp_dir().join("is2d_measure_work_current_format.is2d");
-    write_project_file(&out, &doc);
+    save_format::write_project_file(&out, &doc.into_document().expect("作品にできること")).unwrap();
     eprintln!(
         "前の版（版 {version}）なので、今の版に直したファイルで測る：{:.1}MB → {:.1}MB（{}）",
         bytes.len() as f64 / 1e6,
@@ -36982,8 +37197,8 @@ fn convert_work_files_to_current_format() {
         return;
     };
     let opens = |path: &std::path::Path| {
-        project_io::read_project_document(path)
-            .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
+        read_saved_file(path)
+            .and_then(save_format::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
             .is_ok()
     };
     for path in list
@@ -37015,7 +37230,8 @@ fn convert_work_files_to_current_format() {
         // 直したファイルを隣に書いて開けることを確かめてから、元のファイルを残し、直したファイルに名前を替える
         // （途中で失敗しても、元のファイルは消えない）
         let converted = path.with_extension("converting.is2d");
-        write_project_file(&converted, &doc);
+        // 本番の書き手で書く（作品にしてから：本番が書くのと同じ形）
+        save_format::write_project_file(&converted, &doc.into_document().expect("作品にできること")).unwrap();
         assert!(opens(&converted), "直したファイルを開けること");
         std::fs::rename(path, &backup).expect("元のファイルを残せること");
         std::fs::rename(&converted, path).expect("直したファイルの名前を替えられること");
@@ -37209,7 +37425,7 @@ fn measure_work() {
             if !(apply(&mut app, Action::SelectAll)
                 && apply(
                     &mut app,
-                    Action::MoveSelected {
+                    Action::NudgeSelection {
                         delta: kurbo::Vec2::new(25.0, 0.0),
                     },
                 ))
@@ -37262,7 +37478,7 @@ fn measure_work() {
             };
             let base = cel.scope_base(&scope);
             let t = Instant::now();
-            if let Some(next) = l.committed_local(&base, &scope) {
+            if let Some(next) = l.committed_local(&base) {
                 let _ = base.replace_local(&next, &scope);
             }
             per_layer.push(ms(t));
@@ -37321,23 +37537,17 @@ fn measure_work() {
         for &(mid, corner) in &candidates {
             let from = if edge { mid } else { corner };
             let to = from + kurbo::Vec2::new(0.0, 15.0);
-            let action = |from, to| {
-                if edge {
-                    Action::PullEdgeFromTo { from, to }
-                } else {
-                    Action::MoveVertexFromTo { from, to }
-                }
-            };
+            let action = |from, to| if edge { Op::PullEdge(from, to) } else { Op::MoveVertex(from, to) };
             let n = app.history.undo_stack.len();
             let t = Instant::now();
-            if !apply(&mut app, action(from, to)) {
+            if !op(&mut app, action(from, to)) {
                 continue;
             }
             times.push(ms(t));
             undo_to(&mut app, n);
             for _ in 1..runs {
                 let t = Instant::now();
-                if !apply(&mut app, action(from, to)) {
+                if !op(&mut app, action(from, to)) {
                     break;
                 }
                 times.push(ms(t));
@@ -37796,7 +38006,7 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
     let mut proj = saved_project_at(&path);
     break_map_off_grid(&mut proj, 1);
     let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
-    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+    write_saved_file(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
@@ -38034,17 +38244,17 @@ fn library_deep_revision_and_users_follow_the_nesting() {
     stroke(&mut app, 100.0);
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let child = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    let child = symbols_in_order(app.tab().doc().library()).last().unwrap().id;
     assert!(canvas_tool::clear_selection(&mut app));
     // 親：子のインスタンスを選んでシンボルにする
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let parent = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    let parent = symbols_in_order(app.tab().doc().library()).last().unwrap().id;
     assert!(canvas_tool::clear_selection(&mut app));
     stroke(&mut app, 600.0);
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(580.0, 280.0), p1: Point::new(700.0, 340.0), additive: false }));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let other = app.tab().doc().library().iter_in_order().last().unwrap().id;
+    let other = symbols_in_order(app.tab().doc().library()).last().unwrap().id;
     let lib = |app: &Is2dApp| app.tab().doc().library().clone();
     let l = lib(&app);
     assert_eq!(l.users_of(child).collect::<Vec<_>>(), vec![parent], "子を使っている親");
@@ -38065,7 +38275,7 @@ fn library_deep_revision_and_users_follow_the_nesting() {
     assert!(l.get(child).unwrap().has_dynamic_animation() && l.get(parent).unwrap().has_dynamic_animation(), "子が2コマなのに親が動かない");
     assert!(l.check_tables().is_ok());
     // 子を消す：親の中のインスタンスも消え、使われ方の表から外れる
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert!(apply(&mut app, Action::DeleteSymbol { sym_id: child }));
     let l = lib(&app);
     assert!(l.get(child).is_none());
@@ -38080,7 +38290,8 @@ fn library_deep_revision_and_users_follow_the_nesting() {
 /// 目録までの作品として読める（設計審査 4f8ef46 の D-3）
 #[test]
 fn recovery_journal_reads_back_the_same_work_after_every_edit() {
-    use crate::recovery_journal::{read, Journal};
+    use crate::recovery_journal::Journal;
+    let read = read_saved_file;
     let dir = std::env::temp_dir().join(format!("is2d_journal_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -38091,7 +38302,7 @@ fn recovery_journal_reads_back_the_same_work_after_every_edit() {
         "PaintStroke", "PencilStroke", "BucketFill", "InkBottle", "SelectMarquee", "FinishMoveSelectionDrag", "ConvertToSymbol",
         "EnterSymbolFromLibrary", "ImportSound", "SetKeyframeSound",
     ];
-    let canonical = |pd: project_io::ProjectDocument| content_json(&pd);
+    let canonical = |pd: save_format::ProjectDocument| content_json(&pd);
     for seed in [0x4a52_0001u64, 0x4a52_0002] {
         let mut rng = OpRng(seed);
         let mut app = Is2dApp::default();
@@ -38124,10 +38335,10 @@ fn recovery_journal_reads_back_the_same_work_after_every_edit() {
             let restored = back.into_document_noting(&mut trimmed).expect("文書にできる");
             assert!(!trimmed, "seed={seed:#x} step={step}: 読み戻しで何かを外した");
             // お手本：同じ作品を、ふつうの保存の形で丸ごと書いて読み戻したもの（読み込みの道が直す所も同じに直る）
-            let whole = project_io::ProjectDocument::of(&doc).into_document().expect("丸ごと保存して読める");
+            let whole = saved_of(&doc).into_document().expect("丸ごと保存して読める");
             assert_eq!(
-                canonical(project_io::ProjectDocument::of(&restored)),
-                canonical(project_io::ProjectDocument::of(&whole)),
+                canonical(saved_of(&restored)),
+                canonical(saved_of(&whole)),
                 "seed={seed:#x} step={step}: 読み戻した作品が違う"
             );
             last_len = std::fs::metadata(&path).unwrap().len();
@@ -38168,13 +38379,13 @@ fn measure_symbol_heavy() {
     stroke(&mut app, 0);
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::ConvertToSymbol));
-    let long = app.tab().doc().library().iter_in_order().next().unwrap().id;
+    let long = symbols_in_order(app.tab().doc().library()).next().unwrap().id;
     assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id: long }));
     for i in 1..600 {
         assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
         stroke(&mut app, i);
     }
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     for _ in 1..count {
         assert!(apply(&mut app, Action::DuplicateSymbol { sym_id: long }));
     }
@@ -38251,9 +38462,9 @@ fn measure_deep_nested_paste() {
             app.doc.add_symbol(None, def);
         }
     }
-    app.doc.next_symbol_id = id(levels, 0) + 1;
+    app.doc.next_symbol_id = crate::symbol::Counter::starting_at(id(levels, 0) + 1);
     let top = inst(id(0, 0));
-    app.doc.next_group_id = gid + 1;
+    app.doc.next_group_id = crate::symbol::Counter::starting_at(gid + 1);
     app.doc.root.layers[0].keyframe_mut(0).cel = crate::timeline::Cel::new_with_instances(Vec::new(), vec![top]);
     app.refresh_scene_base();
     assert!(apply(&mut app, Action::SelectAll));
@@ -38385,7 +38596,7 @@ fn renaming_a_sound_appends_only_its_name_to_the_recovery_file() {
         journal.write(&app.tab().committed_document_copy().unwrap(), None).unwrap();
         let appended = std::fs::metadata(&path).unwrap().len() - before;
         assert!(appended < 1_000, "名前を変えて書き足した量 {appended} バイトが、音のデータの大きさに比例している");
-        let read = crate::recovery_journal::read(&path).unwrap();
+        let read = read_saved_file(&path).unwrap();
         assert_eq!(read.sounds.len(), 1);
         assert_eq!(read.sounds[0].name, name);
         assert_eq!(&*read.sounds[0].bytes, &*app.doc.sounds.iter().next().unwrap().encoded);
@@ -38399,16 +38610,17 @@ fn renaming_a_sound_appends_only_its_name_to_the_recovery_file() {
 #[test]
 fn a_recovery_file_of_another_version_is_kept_and_reported() {
     use crate::recovery::RecoveryWriter;
-    use project_io::{file_identity, read_identity, SaveKind, JOURNAL_RECORD_VERSION, PROJECT_FORMAT_VERSION};
-    // 頭の決まり：作品ファイルは前と同じバイト（印・保存の形の版）。復旧ファイルは印・保存の形の版・復旧の記録の版
+    use save_format::{file_identity, read_identity, SaveKind, FORMAT_VERSION};
+    // 頭の決まり：作品ファイルも復旧ファイルも、印と保存の形の版（版は1つ：設計審査 01e4283 の D-3）
     let mut project = b"IS2D".to_vec();
-    project.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
-    assert_eq!(file_identity(SaveKind::Project), project);
+    project.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    assert_eq!(file_identity(SaveKind::Project).to_vec(), project);
     let journal = file_identity(SaveKind::Journal);
+    assert_eq!(&journal[..4], b"IS2J");
     assert_eq!(read_identity(&journal), Ok(SaveKind::Journal));
     assert_eq!(read_identity(&project), Ok(SaveKind::Project));
-    let mut other = journal.clone();
-    other[8..12].copy_from_slice(&(JOURNAL_RECORD_VERSION + 1).to_le_bytes());
+    let mut other = journal;
+    other[4..8].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
     assert!(read_identity(&other).is_err());
     assert!(read_identity(b"IS2DJRN1").is_err(), "版を持たない前の復旧ファイル");
     // 版の違う復旧ファイルを復元すると、名前を替えて中身を残し、版の違いを知らせる
@@ -38429,7 +38641,7 @@ fn a_recovery_file_of_another_version_is_kept_and_reported() {
         .collect();
     assert_eq!(written.len(), 1);
     let mut bytes = std::fs::read(&written[0]).unwrap();
-    bytes[8..12].copy_from_slice(&(JOURNAL_RECORD_VERSION + 1).to_le_bytes());
+    bytes[4..8].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
     std::fs::write(&written[0], &bytes).unwrap();
     let ctx = egui::Context::default();
     let mut next = Is2dApp::default();
@@ -38462,11 +38674,11 @@ fn an_old_recovery_file_converts_to_the_current_project_file() {
     std::fs::write(&old, journal_v1::from_current(&std::fs::read(&current).unwrap())).unwrap();
     let converted = dir.join("old.is2d");
     journal_v1::convert(&old, &converted);
-    let want = crate::recovery_journal::read(&current).unwrap().into_document().unwrap();
-    let got = project_io::read_project_document(&converted).unwrap().into_document().unwrap();
+    let want = read_saved_file(&current).unwrap().into_document().unwrap();
+    let got = read_saved_file(&converted).unwrap().into_document().unwrap();
     assert_eq!(
-        content_json(&project_io::ProjectDocument::of(&got)),
-        content_json(&project_io::ProjectDocument::of(&want)),
+        content_json(&saved_of(&got)),
+        content_json(&saved_of(&want)),
         "直した作品が、今の版の復旧ファイルの作品と違う"
     );
     assert_eq!(got.sounds.len(), 1);
@@ -38497,14 +38709,22 @@ mod journal_v1 {
         h
     }
 
-    /// 前の版の復旧ファイルか（版 1・版 2）
+    /// 版 3 の頭（保存の形の版 11・記録の版 3。記録の枠は長さ・CRC32 だけ）
+    fn head_v3() -> Vec<u8> {
+        let mut h = b"IS2J".to_vec();
+        h.extend_from_slice(&11u32.to_le_bytes());
+        h.extend_from_slice(&3u32.to_le_bytes());
+        h
+    }
+
+    /// 前の版の復旧ファイルか（版 1・版 2・版 3）
     pub(super) fn is_old(bytes: &[u8]) -> bool {
-        bytes.starts_with(HEAD) || bytes.starts_with(&head_v2())
+        bytes.starts_with(HEAD) || bytes.starts_with(&head_v2()) || bytes.starts_with(&head_v3())
     }
 
     #[derive(Serialize, Deserialize)]
     struct Layer {
-        header: project_io::SavedLayer,
+        header: save_format::SavedLayer,
         keyframes: u64,
     }
 
@@ -38544,7 +38764,7 @@ mod journal_v1 {
         next_sound_id: u64,
         next_layer_id: u64,
         recovery_source: Option<std::path::PathBuf>,
-        timeline: Timeline<project_io::SavedTimeline>,
+        timeline: Timeline<save_format::SavedTimeline>,
         library: Vec<u64>,
         order: Vec<u64>,
         sounds: u64,
@@ -38567,17 +38787,52 @@ mod journal_v1 {
         out.extend_from_slice(body);
     }
 
+    /// 今の版（版 12）の記録の列（枠：長さ・CRC32・種類・番号）の中身を読む
+    fn records_v12(mut at: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while at.len() >= 17 {
+            let len = u32::from_le_bytes(at[..4].try_into().unwrap()) as usize;
+            out.push(at[17..17 + len].to_vec());
+            at = &at[17 + len..];
+        }
+        out
+    }
+
+    /// 中身 `body`（前の版の決まりの postcard の記録：先頭の1バイトが列挙の何番目か、番号のある記録は次が番号）を、今の版の
+    /// 枠（長さ・CRC32・種類・番号）で書く
+    fn frame_v12(out: &mut Vec<u8>, body: &[u8]) {
+        let kind = body[0];
+        let id = match kind {
+            1..=6 | 9 => {
+                let mut v = 0u64;
+                for (i, b) in body[1..].iter().enumerate() {
+                    v |= u64::from(b & 0x7f) << (7 * i);
+                    if b & 0x80 == 0 {
+                        break;
+                    }
+                }
+                v
+            }
+            _ => 0,
+        };
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
+        out.push(kind);
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(body);
+    }
+
     fn record(kind: u8, payload: &impl Serialize) -> Vec<u8> {
         let mut body = vec![kind];
         body.extend(postcard::to_allocvec(payload).unwrap());
         body
     }
 
-    fn timeline_v3(t: Timeline<format_v10::Timeline>) -> Timeline<project_io::SavedTimeline> {
+    fn timeline_v3(t: Timeline<format_v10::Timeline>) -> Timeline<save_format::SavedTimeline> {
         Timeline { header: t.header.current(), layers: t.layers }
     }
 
-    fn timeline_v2(t: Timeline<project_io::SavedTimeline>, next_layer_id: u64) -> Timeline<format_v10::Timeline> {
+    fn timeline_v2(t: Timeline<save_format::SavedTimeline>, next_layer_id: u64) -> Timeline<format_v10::Timeline> {
         let h = t.header;
         Timeline {
             header: format_v10::Timeline {
@@ -38598,7 +38853,7 @@ mod journal_v1 {
         let mut out = Vec::new();
         for body in records(rest) {
             if body[0] == SOUND {
-                let s: project_io::SavedSound = postcard::from_bytes(&body[1..]).expect("版 1 の音の記録");
+                let s: save_format::SavedSound = postcard::from_bytes(&body[1..]).expect("版 1 の音の記録");
                 // データの記録の番号は音の番号を使う（データの記録の番号は、データの記録の中で重ならなければよい）
                 out.push(record(SOUND_BYTES, &(s.id, &*s.bytes)));
                 out.push(record(SOUND, &(s.id, &s.name, s.id)));
@@ -38618,7 +38873,7 @@ mod journal_v1 {
             match body[0] {
                 SYMBOLS => {
                     let (id, syms): (u64, Vec<Symbol<format_v10::Timeline>>) = postcard::from_bytes(&body[1..]).unwrap();
-                    let syms: Vec<Symbol<project_io::SavedTimeline>> = syms
+                    let syms: Vec<Symbol<save_format::SavedTimeline>> = syms
                         .into_iter()
                         .map(|s| {
                             most = most.max(s.timeline.header.next_layer_id);
@@ -38653,15 +38908,18 @@ mod journal_v1 {
         out
     }
 
-    /// 前の版（版 1・版 2）の復旧ファイルの中身を、今の版の中身にする
+    /// 前の版（版 1・版 2・版 3）の復旧ファイルの中身を、今の版の中身にする
     pub(super) fn to_current(bytes: &[u8]) -> Vec<u8> {
-        let bodies = match bytes.strip_prefix(HEAD.as_slice()) {
-            Some(rest) => v1_to_v2(rest),
-            None => records(bytes.strip_prefix(head_v2().as_slice()).expect("版 2 の頭")),
+        let v3 = match bytes.strip_prefix(head_v3().as_slice()) {
+            Some(rest) => records(rest),
+            None => v2_to_v3(match bytes.strip_prefix(HEAD.as_slice()) {
+                Some(rest) => v1_to_v2(rest),
+                None => records(bytes.strip_prefix(head_v2().as_slice()).expect("版 2 の頭")),
+            }),
         };
-        let mut out = project_io::file_identity(project_io::SaveKind::Journal);
-        for body in v2_to_v3(bodies) {
-            frame(&mut out, &body);
+        let mut out = save_format::file_identity(save_format::SaveKind::Journal).to_vec();
+        for body in v3 {
+            frame_v12(&mut out, &body);
         }
         out
     }
@@ -38669,8 +38927,7 @@ mod journal_v1 {
     /// 今の版の復旧ファイルの中身から、版 1 の中身を作る（変換を確かめるテストの材料。タイムラインの数え札は目録の作品の
     /// 数え札にする）
     pub(super) fn from_current(bytes: &[u8]) -> Vec<u8> {
-        let id_len = project_io::SaveKind::Journal.identity_len();
-        let bodies = records(&bytes[id_len..]);
+        let bodies = records_v12(&bytes[save_format::IDENTITY_LEN..]);
         let most = bodies
             .iter()
             .filter(|b| b[0] == MANIFEST)
@@ -38688,10 +38945,10 @@ mod journal_v1 {
                 }
                 SOUND => {
                     let (id, name, b): (u64, String, u64) = postcard::from_bytes(&body[1..]).unwrap();
-                    record(SOUND, &project_io::SavedSound { id, name, bytes: data[&b].clone().into() })
+                    record(SOUND, &save_format::SavedSound { id, name, bytes: data[&b].clone().into() })
                 }
                 SYMBOLS => {
-                    let (id, syms): (u64, Vec<Symbol<project_io::SavedTimeline>>) = postcard::from_bytes(&body[1..]).unwrap();
+                    let (id, syms): (u64, Vec<Symbol<save_format::SavedTimeline>>) = postcard::from_bytes(&body[1..]).unwrap();
                     let syms: Vec<Symbol<format_v10::Timeline>> = syms
                         .into_iter()
                         .map(|s| Symbol { id: s.id, name: s.name, timeline: timeline_v2(s.timeline, most) })
@@ -38727,9 +38984,9 @@ mod journal_v1 {
     pub(super) fn convert(old: &std::path::Path, target: &std::path::Path) {
         let current = target.with_extension("converting.is2dj");
         std::fs::write(&current, to_current(&std::fs::read(old).unwrap())).unwrap();
-        let doc = crate::recovery_journal::read(&current).expect("今の版の復旧ファイルとして読める").into_document().unwrap();
+        let doc = read_saved_file(&current).expect("今の版の復旧ファイルとして読める").into_document().unwrap();
         let _ = std::fs::remove_file(&current);
-        write_project_file(target, &project_io::ProjectDocument::of(&doc));
+        save_format::write_project_file(target, &doc).unwrap();
     }
 }
 
@@ -38753,14 +39010,14 @@ fn deselecting_an_unmoved_part_after_moving_keeps_it() {
         );
         assert!(apply(&mut app, Action::SetTool { tool: Tool::Select }));
         assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(80.0, 80.0), p1: Point::new(170.0, 170.0), additive: false }));
-        assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 200.0) }));
+        assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(0.0, 200.0) }));
         assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(280.0, 80.0), p1: Point::new(570.0, 170.0), additive: true }));
         let green = app.scene().iter().position(|s| s.color() == Color32::GREEN).expect("緑");
         assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: green }));
         assert!(app.scene().iter().any(|s| s.color() == Color32::GREEN), "外した緑がその場で消えた");
         match then {
             "Delete" => assert!(apply(&mut app, Action::DeleteSelection)),
-            _ => assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(30.0, 0.0) })),
+            _ => assert!(apply(&mut app, Action::NudgeSelection { delta: KVec2::new(30.0, 0.0) })),
         }
         assert!(apply(&mut app, Action::Deselect));
         let doc = app.tab().doc();
@@ -38846,11 +39103,11 @@ fn sample_work_maps_are_all_valid_with_the_current_code() {
         "見本の作品が無い：{}（作り方は `make_sample_work` の説明）",
         path.display()
     );
-    let doc = project_io::read_project_document(&path)
-        .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
+    let doc = read_saved_file(&path)
+        .and_then(save_format::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
         .expect("見本の作品を開ける");
     let maps = std::iter::once(&doc.root)
-        .chain(doc.library().iter_in_order().map(|s| &s.timeline))
+        .chain(symbols_in_order(doc.library()).map(|s| &s.timeline))
         .flat_map(|tl| &tl.layers)
         .flat_map(|l| l.keyframes.iter())
         .map(|k| k.cel.maps().len())
@@ -38874,8 +39131,8 @@ fn list_maps_failing_the_current_check() {
         eprintln!("IS2D_WORK に作品のパスを入れて実行してください");
         return;
     };
-    let doc = project_io::read_project_document(std::path::Path::new(&work))
-        .and_then(project_io::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
+    let doc = read_saved_file(std::path::Path::new(&work))
+        .and_then(save_format::ProjectDocument::<crate::stored_map::ReadTiles>::into_document)
         .expect("作品を開ける");
     for n in check_all_maps(&doc) {
         eprintln!("{n:?}");
@@ -38932,7 +39189,7 @@ fn a_map_failing_the_current_check_is_recut_when_opened() {
     let mut proj = saved_project_at(&path);
     break_map_colors(&mut proj, 1);
     let broken = saved_map_content(&proj, &proj.timeline.layers[0].keyframes[1].maps[0]);
-    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+    write_saved_file(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
@@ -38967,7 +39224,7 @@ fn a_map_failing_the_current_check_is_recut_when_opened() {
 fn unreadable_sound_opens_silently_and_keeps_its_bytes() {
     let mut app = Is2dApp::default();
     assert!(import_sound(&mut app, short_wav()));
-    let mut saved = project_io::ProjectDocument::of(&app.doc);
+    let mut saved = saved_of(&app.doc);
     saved.sounds[0].bytes = b"broken"[..].into();
     let clip = saved.timeline.layers[0].keyframes[0].sound;
     let doc = saved.clone().into_document().expect("読めない音があっても開く");
@@ -38980,7 +39237,7 @@ fn unreadable_sound_opens_silently_and_keeps_its_bytes() {
     assert!(crate::sound::sounding_at(&doc, &doc.root, 0).iter().all(|v| v.sound.pcm.samples.is_empty()), "鳴らす波形が無い");
     assert!(doc.root.layers[0].sound_trim_range(0, crate::sound::SoundEdge::End, &doc.sounds, doc.fps).is_none());
     // 保存すると、バイトと区間をそのまま書く
-    let again = project_io::ProjectDocument::of(&doc);
+    let again = saved_of(&doc);
     assert_eq!(&*again.sounds[0].bytes, b"broken");
     assert_eq!(format!("{:?}", again.timeline.layers[0].keyframes[0].sound), format!("{clip:?}"));
 }
@@ -38994,7 +39251,7 @@ fn maps_are_checked_in_the_background_after_opening() {
     let path = save_many_keyframes("background_check", 4);
     let mut proj = saved_project_at(&path);
     break_map_off_grid(&mut proj, 1);
-    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+    write_saved_file(&path, &proj).unwrap();
 
     let mut app = Is2dApp::default();
     crate::project_io::open_project_in_tab(&mut app, &path, None).expect("開ける");
@@ -39040,7 +39297,7 @@ fn maps_are_checked_in_the_background_after_opening() {
     assert!(app.scene().len() > 0);
 
     // 閉じた文書の地図は確かめない
-    let doc = crate::project_io::read_project_document(&path)
+    let doc = read_saved_file(&path)
         .unwrap()
         .into_document()
         .unwrap();
@@ -39058,7 +39315,7 @@ fn maps_are_checked_in_the_background_after_opening() {
 fn shape_labels_in_a_file_never_become_shape_numbers() {
     let path = save_many_keyframes("crafted_labels", 2);
     let read = || {
-        crate::project_io::read_project_document(&path)
+        read_saved_file(&path)
             .unwrap()
             .into_document()
             .unwrap()
@@ -39089,7 +39346,7 @@ fn shape_labels_in_a_file_never_become_shape_numbers() {
 
     let mut proj = saved_project_at(&path);
     proj.map_tiles.tiles[0].edges[0].left_src = u64::MAX - 1;
-    crate::project_io::write_project_file_atomically(&path, &proj).unwrap();
+    write_saved_file(&path, &proj).unwrap();
     let mut app = Is2dApp::default();
     let before = crate::vector_engine::next_shape_id();
     let opened = crate::project_io::open_project_in_tab(&mut app, &path, None);
@@ -39157,12 +39414,12 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
             },
             Action::ConvertToSymbol,
             Action::Deselect,
-            Action::ExitSymbolTimeline,
+            Action::ExitGroupSteps { steps: 1 },
         ],
     );
     let sym_b = app.doc.library().at(1).unwrap().id;
     let name_a = app.doc.library().at(0).unwrap().name.clone();
-    let ids = |app: &Is2dApp| app.doc.library().iter_in_order().map(|s| s.id).collect::<Vec<_>>();
+    let ids = |app: &Is2dApp| symbols_in_order(app.doc.library()).map(|s| s.id).collect::<Vec<_>>();
     assert_eq!(ids(&app), vec![sym_a, sym_b]);
     // シンボルの一つ目のコマの形（色と輪郭）と、中のインスタンス（シンボル・番号）
     let cel_of = |app: &Is2dApp, id: u64| {
@@ -39230,7 +39487,7 @@ fn duplicating_a_symbol_adds_a_copy_below_it() {
                 radius: 14.0,
                 color: blue,
             },
-            Action::ExitSymbolTimeline,
+            Action::ExitGroupSteps { steps: 1 },
         ],
     );
     assert_ne!(cel_of(&app, copy1).0, shapes_a, "複製は変わる");
@@ -39270,7 +39527,7 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
                 Action::Deselect,
             ],
         );
-        app.doc.library().iter_in_order().last().unwrap().id
+        symbols_in_order(app.doc.library()).last().unwrap().id
     };
     let sym_a = make_symbol(&mut app, 300.0, red);
     let sym_b = make_symbol(&mut app, 450.0, green);
@@ -39401,8 +39658,6 @@ fn swapping_replaces_the_symbol_of_selected_instances_and_keeps_their_settings()
     ));
 }
 
-/// 保存の形（版 6）：頭（印・版・長さ・CRC32）と postcard の中身。書いて読み戻すと、中身はビットまで同じ（座標・番号・
-/// 名前・インスタンスの変換と色効果・復旧元のパス）
 #[test]
 fn project_file_round_trip_keeps_every_bit() {
     use doc_actions::Action;
@@ -39438,128 +39693,59 @@ fn project_file_round_trip_keeps_every_bit() {
             },
         ],
     );
-    let mut pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
-    pd.recovery_source = Some(std::path::PathBuf::from("/tmp/作品/場面1.is2d"));
-    let bytes = project_io::project_file_bytes(&pd).unwrap();
+    let doc = app.tab().committed_document_copy().unwrap();
+    let path = scratch_file_path("round_trip");
+    save_format::write_project_file(&path, &doc).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..4], b"IS2D");
-    assert_eq!(
-        bytes[4..8],
-        project_io::PROJECT_FORMAT_VERSION.to_le_bytes()
-    );
-    assert_eq!(
-        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-        (bytes.len() - 20) as u64
-    );
-    assert_eq!(
-        u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
-        crc32fast::hash(&bytes[20..])
-    );
-    // 流し込んで書いた中身は、postcard でまとめて書いたものとバイトまで同じ。ファイルへの保存（復旧ファイルも同じ）も同じ
-    // バイト列を書く
-    assert_eq!(bytes[20..], postcard::to_allocvec(&pd).unwrap());
-    let path = std::env::temp_dir().join(format!("is2d_round_trip_{}.is2d", std::process::id()));
-    project_io::write_project_file_atomically(&path, &pd).unwrap();
-    let written = std::fs::read(&path).unwrap();
+    assert_eq!(bytes[4..8], save_format::FORMAT_VERSION.to_le_bytes());
+    let back = read_saved_file(&path).unwrap().into_document().unwrap();
     let _ = std::fs::remove_file(&path);
-    assert_eq!(written, bytes);
-    let back = project_from_bytes(&bytes).unwrap();
-    // 中身を JSON にして比べる（f64 は読み戻すと同じ値になる最短の10進で書くので、文字が同じなら数もビットまで同じ）
-    assert_eq!(
-        serde_json::to_string(&back).unwrap(),
-        serde_json::to_string(&pd).unwrap()
-    );
-    let nodes = |d: &SavedProject| -> Vec<u64> {
-        d.map_tiles
-            .tiles
-            .iter()
-            .flat_map(|t| {
-                t.nodes
-                    .iter()
-                    .flatten()
-                    .chain(t.edges.iter().flat_map(|e| e.ctrl.iter()))
-                    .map(|v| v.to_bits())
-            })
-            .collect()
-    };
-    // 書いた塊の表を、postcard を通さずに（JSON で）保存の形にしたものとも比べる
-    let pd_saved: SavedProject =
-        serde_json::from_value(serde_json::to_value(&pd).unwrap()).unwrap();
-    assert!(!nodes(&pd_saved).is_empty());
-    assert_eq!(nodes(&back), nodes(&pd_saved), "頂点の座標はビットまで同じ");
-    assert_eq!(back.library[0].name, "顔のパーツ（目）");
-    assert_eq!(back.recovery_source, pd.recovery_source);
-    // 読み戻した文書を保存し直すと、同じバイト列になる
-    assert_eq!(project_io::project_file_bytes(&back).unwrap(), bytes);
+    let bits = |d: &crate::symbol::Document| format_v11::bytes(&saved_of(d)).unwrap();
+    assert_eq!(bits(&back), bits(&doc), "書いて読み戻すと保存の型が変わった");
+    // 復旧ファイル：復旧元のパスも戻る
+    let jpath = scratch_file_path("round_trip_journal");
+    let src = std::path::PathBuf::from("/tmp/作品/場面1.is2d");
+    crate::recovery_journal::Journal::create(&jpath, &doc, Some(&src)).unwrap();
+    let jback = read_saved_file(&jpath).unwrap();
+    let _ = std::fs::remove_file(&jpath);
+    assert_eq!(jback.recovery_source.as_deref(), Some(src.as_path()));
+    assert_eq!(bits(&jback.into_document().unwrap()), bits(&doc));
 }
 
-/// 保存の形（版 6 から）を読むときは、頭から順に確かめ、違うものをそれぞれの知らせで断る：前の形式（JSON）・is2d でない・
-/// 版が違う・長さが合わない（途中で切れた・後ろに余り）・CRC が合わない・postcard で読めない・中身の後ろに余り・
-/// 有限でない数
+/// 保存の形（版 12）を読むときは、頭から順に確かめ、違うものをそれぞれの知らせで断る：前の形式（JSON）・is2d でない・版が
+/// 違う・壊れている（途中で切れた・中身が変わった：記録の CRC32 が合わない所から後は読まず、最後の目録まで読めなければ断る）・
+/// 有限でない数。後ろに余りがあっても、最後の目録までの作品は開く（作品ファイルも復旧ファイルも同じ読み手：設計審査 01e4283 の D-3）
 #[test]
 fn project_file_refuses_wrong_or_broken_files() {
-    let pd =
-        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1)).unwrap();
-    let good = project_io::project_file_bytes(&pd).unwrap();
+    let doc = crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1).doc().clone();
+    let path = scratch_file_path("refuse");
+    save_format::write_project_file(&path, &doc).unwrap();
+    let good = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
     assert!(opened_document(&good).is_ok());
-    // 中身 `body` に正しい頭を付けたファイル
-    let with_header = |version: u32, body: &[u8]| -> Vec<u8> {
-        let mut b = b"IS2D".to_vec();
-        b.extend_from_slice(&version.to_le_bytes());
-        b.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        b.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
-        b.extend_from_slice(body);
-        b
-    };
     let err = |bytes: &[u8]| opened_document(bytes).expect_err("断る");
-    let body = &good[20..];
-
-    let json = serde_json::to_vec(&pd).unwrap();
+    let json = serde_json::to_vec(&saved_of(&doc)).unwrap();
     assert_eq!(err(&json), "前の形式（JSON）のファイルは開けません");
-    assert_eq!(
-        err(b"PK\x03\x04 zip file ........"),
-        "is2d のファイルではありません"
-    );
+    assert_eq!(err(b"PK\x03\x04 zip file ........"), "is2d のファイルではありません");
     assert_eq!(err(b"IS2D"), "is2d のファイルではありません", "頭より短い");
     assert_eq!(err(b""), "is2d のファイルではありません", "空のファイル");
-    let next = project_io::PROJECT_FORMAT_VERSION + 1;
-    assert_eq!(
-        err(&with_header(next, body)),
-        format!("未対応のプロジェクトバージョンです (version: {next})")
-    );
-    assert_eq!(
-        err(&with_header(6, body)),
-        "未対応のプロジェクトバージョンです (version: 6)",
-        "前の版（地図を頂点と辺で書いた版 6）は開かない"
-    );
-    assert_eq!(
-        err(&good[..good.len() - 1]),
-        "ファイルが壊れています（長さが合いません）",
-        "途中で切れた"
-    );
+    let with_version = |v: u32| {
+        let mut b = good.clone();
+        b[4..8].copy_from_slice(&v.to_le_bytes());
+        b
+    };
+    let next = save_format::FORMAT_VERSION + 1;
+    assert_eq!(err(&with_version(next)), format!("未対応のプロジェクトバージョンです (version: {next})"));
+    assert_eq!(err(&with_version(11)), "未対応のプロジェクトバージョンです (version: 11)", "前の版（頭＋中身1つ）は開かない");
+    assert_eq!(err(&good[..good.len() - 1]), "ファイルが壊れています", "途中で切れた");
+    let mut flipped = good.clone();
+    let last = flipped.len() - 3;
+    flipped[last] ^= 0x10;
+    assert_eq!(err(&flipped), "ファイルが壊れています", "中身が変わった");
     let mut longer = good.clone();
     longer.push(0);
-    assert_eq!(
-        err(&longer),
-        "ファイルが壊れています（長さが合いません）",
-        "後ろに余り"
-    );
-    let mut flipped = good.clone();
-    let mid = 20 + body.len() / 2;
-    flipped[mid] ^= 0x10;
-    assert_eq!(
-        err(&flipped),
-        "ファイルが壊れています（中身が変わっています）"
-    );
-    let mut extra = body.to_vec();
-    extra.push(0);
-    assert_eq!(
-        err(&with_header(project_io::PROJECT_FORMAT_VERSION, &extra)),
-        "プロジェクトファイルの形式が正しくありません（余りがあります）"
-    );
-    assert!(
-        err(&with_header(project_io::PROJECT_FORMAT_VERSION, &[0xff; 3]))
-            .starts_with("プロジェクトファイルの形式が正しくありません: ")
-    );
+    assert!(opened_document(&longer).is_ok(), "後ろに余りがあっても、最後の目録までの作品は開く");
     // 有限でない数（JSON では書けなかった）：頂点の座標・ステージの大きさ
     let mut app = Is2dApp::default();
     run(
@@ -39570,54 +39756,22 @@ fn project_file_refuses_wrong_or_broken_files() {
             color: Color32::RED,
         }],
     );
-    let drawn = saved_and_read_back(&project_io::ProjectDocument::from_app(app.tab()).unwrap());
+    let drawn = saved_project_of(&app);
     let mut nan_node = drawn.clone();
     nan_node.map_tiles.tiles[0].nodes[0][0] = f64::NAN;
     let mut inf_stage = drawn.clone();
     inf_stage.stage_size[1] = f32::INFINITY;
     for broken in [nan_node, inf_stage] {
-        assert_eq!(
-            err(&project_io::project_file_bytes(&broken).unwrap()),
-            "ファイルが壊れています（有限でない数があります）"
-        );
+        assert_eq!(err(&crafted_bytes(&broken).unwrap()), "ファイルが壊れています（有限でない数があります）");
     }
 }
 
-/// レビュー e90f27c の N-5002：ファイルは流しながら読み、CRC32 は読み終えてから確かめるので、壊れたファイルの長さの数
-/// （塊・色・音の数、文字列の長さ）がどれだけ大きくても、その数で前もって取らない（取るのは読めたバイトの分だけ）。
-/// 数を大きくした中身は、頭の CRC32 が合わなければ「中身が変わっています」、合っていても読めないので「形式が正しく
-/// ありません」で断る。途中で切れたファイルも同じ
+/// レビュー e90f27c の N-5002：ファイルは流しながら読み、記録の CRC32 は読み終えてから確かめるので、壊れたファイルの長さの数
+/// （塊・色・音の数、文字列の長さ）がどれだけ大きくても、その数で前もって取らない（取るのは読めたバイトの分だけ）。CRC32 を
+/// 合わせても読めないので「壊れています」で断る。大きな記録（塊の表：2回目に流して読む）と小さな記録（目録：1回目に読む）の
+/// どちらでも同じ
 #[test]
 fn project_file_with_huge_counts_or_cut_body_is_refused_without_taking_memory() {
-    let pd =
-        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1)).unwrap();
-    let good = project_io::project_file_bytes(&pd).unwrap();
-    let body = &good[20..];
-    // 中身の終わりは、復旧の元の場所（無し）・色の数・塊の数・音の数・次の音の番号・次のレイヤーの番号
-    let (prefix, tail) = body.split_at(body.len() - 6);
-    assert_eq!(tail, [0, 0, 0, 0, 1, 2]);
-    let file = |body: &[u8], crc: u32| -> Vec<u8> {
-        let mut b = good[..8].to_vec();
-        b.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        b.extend_from_slice(&crc.to_le_bytes());
-        b.extend_from_slice(body);
-        b
-    };
-    for huge in [usize::MAX, 1 << 40] {
-        let count = postcard::to_allocvec(&huge).unwrap();
-        // 文字列の長さ・色の数・塊の数・音の数を大きくし、その後ろは無い
-        for head in [&[1u8][..], &[0], &[0, 0], &[0, 0, 0]] {
-            let broken = [prefix, head, &count].concat();
-            assert_eq!(
-                opened_document(&file(&broken, crc32fast::hash(&broken) ^ 1)).expect_err("断る"),
-                "ファイルが壊れています（中身が変わっています）"
-            );
-            assert!(opened_document(&file(&broken, crc32fast::hash(&broken)))
-                .expect_err("断る")
-                .starts_with("プロジェクトファイルの形式が正しくありません: "));
-        }
-    }
-    // 地図のある作品の中身を途中で切ったファイル：頭の長さのままなら「長さが合いません」、頭を合わせても読めない
     let mut app = Is2dApp::default();
     run(
         &mut app,
@@ -39627,18 +39781,41 @@ fn project_file_with_huge_counts_or_cut_body_is_refused_without_taking_memory() 
             color: Color32::RED,
         }],
     );
-    let drawn =
-        project_io::project_file_bytes(&project_io::ProjectDocument::from_app(app.tab()).unwrap())
-            .unwrap();
-    let cut = &drawn[..20 + (drawn.len() - 20) / 2];
-    assert_eq!(
-        opened_document(cut).expect_err("断る"),
-        "ファイルが壊れています（長さが合いません）"
-    );
-    let cut_body = &cut[20..];
-    assert!(opened_document(&file(cut_body, crc32fast::hash(cut_body)))
-        .expect_err("断る")
-        .starts_with("プロジェクトファイルの形式が正しくありません: "));
+    let doc = app.doc.clone();
+    let path = scratch_file_path("huge");
+    save_format::write_project_file(&path, &doc).unwrap();
+    let good = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    // 記録の枠（長さ・CRC32・種類・番号）と中身の場所
+    let mut frames: Vec<(usize, u8, std::ops::Range<usize>)> = Vec::new();
+    let mut at = save_format::IDENTITY_LEN;
+    while at + 17 <= good.len() {
+        let len = u32::from_le_bytes(good[at..at + 4].try_into().unwrap()) as usize;
+        frames.push((at, good[at + 8], at + 17..at + 17 + len));
+        at += 17 + len;
+    }
+    // 記録 `k` の中身を `body` にしたファイル（枠の長さと CRC32 を合わせる）
+    let with_body = |k: usize, body: &[u8]| -> Vec<u8> {
+        let (at, _, ref r) = frames[k];
+        let mut b = good[..at].to_vec();
+        b.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        b.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
+        b.extend_from_slice(&good[at + 8..at + 17]);
+        b.extend_from_slice(body);
+        b.extend_from_slice(&good[r.end..]);
+        b
+    };
+    let tiles = frames.iter().position(|f| f.1 == 0).expect("塊の表の記録");
+    let manifest = frames.iter().rposition(|f| f.1 == 7).expect("目録の記録");
+    for huge in [usize::MAX, 1 << 40] {
+        let count = postcard::to_allocvec(&huge).unwrap();
+        for k in [tiles, manifest] {
+            let r = frames[k].2.clone();
+            // 記録の初め（種類の番号）のあとの数を大きくし、その後ろは無い
+            let broken = [&good[r.start..r.start + 1], &count].concat();
+            assert_eq!(opened_document(&with_body(k, &broken)).expect_err("断る"), "ファイルが壊れています");
+        }
+    }
 }
 
 /// ステージの大きさは、書く入口（`apply` の `SetStageSize`）とファイルを読む入口が同じ1つの判定（`stage_size_of`）で決める：
@@ -39668,16 +39845,16 @@ fn stage_size_is_decided_by_one_rule_at_the_entries() {
         "範囲にそろえる"
     );
     // ファイルを読む入口も同じ判定：有限でない大きさのファイルは断り、範囲の外はそろえて読む
-    let pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let pd = saved_from_app(app.tab()).unwrap();
     let mut nan_stage = pd.clone();
     nan_stage.stage_size = [f32::NAN, 450.0];
     assert_eq!(
-        opened_document(&project_io::project_file_bytes(&nan_stage).unwrap()).expect_err("断る"),
+        opened_document(&crafted_bytes(&nan_stage).unwrap()).expect_err("断る"),
         "ファイルが壊れています（有限でない数があります）"
     );
     let mut wide = pd;
     wide.stage_size = [10_000.0, 10.0];
-    let doc = project_from_bytes(&project_io::project_file_bytes(&wide).unwrap())
+    let doc = project_from_bytes(&crafted_bytes(&wide).unwrap())
         .expect("読める")
         .into_document()
         .expect("読める");
@@ -39707,12 +39884,7 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
     let undo_before = app.history.undo_stack.len();
     app.notices = Default::default();
     // 中心点を有限でない所に置く（変換の逆で写すと NaN）：書く入口で断る
-    assert!(!apply(
-        &mut app,
-        Action::SetTransformPivot {
-            world_pivot: Some(Point::new(f64::NAN, 0.0)),
-        },
-    ));
+    assert!(!set_pivot(&mut app, Some(Point::new(f64::NAN, 0.0))));
     assert_eq!(binding(&app), before, "インスタンスは変わらない");
     assert_eq!(app.history.undo_stack.len(), undo_before);
     assert_eq!(
@@ -39730,7 +39902,7 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
     content.instances_mut()[0].binding.pivot = Point::new(f64::NAN, 0.0);
     assert!(!cel.insert_content(&[], &content, None));
     // ファイルを読む入口も同じ判定で断る
-    let pd = project_io::ProjectDocument::from_app(app.tab()).unwrap();
+    let pd = saved_from_app(app.tab()).unwrap();
     let mut nan_inst = pd.clone();
     nan_inst.timeline.layers[0].keyframes[0].instances[0]
         .binding
@@ -39747,11 +39919,11 @@ fn non_finite_instance_numbers_are_refused_at_the_entries() {
         .brightness = f32::INFINITY;
     for broken in [nan_inst, nan_effect, inf_effect] {
         assert_eq!(
-            opened_document(&project_io::project_file_bytes(&broken).unwrap()).expect_err("断る"),
+            opened_document(&crafted_bytes(&broken).unwrap()).expect_err("断る"),
             "ファイルが壊れています（有限でない数があります）"
         );
     }
-    assert!(opened_document(&project_io::project_file_bytes(&pd).unwrap()).is_ok());
+    assert!(opened_document(&crafted_bytes(&pd).unwrap()).is_ok());
 }
 
 /// 段0（claude/触った所だけを計算する地図の設計_22fbbbe.md）：地図の頂点と辺の番号をでたらめに並べ替え、辺の向きも
@@ -40234,13 +40406,7 @@ fn measure_edit_scaling_by_cel_size() {
             let q = pick_edge(&mut r);
             let from = q.eval(0.5);
             let s = Instant::now();
-            let pulled = apply(
-                &mut app,
-                Action::PullEdgeFromTo {
-                    from,
-                    to: from + kurbo::Vec2::new(3.0, 2.0),
-                },
-            );
+            let pulled = pull_edge(&mut app, from, from + kurbo::Vec2::new(3.0, 2.0));
             t[5].push(ms(s));
             if pulled {
                 assert!(apply(&mut app, Action::Undo));
@@ -40248,13 +40414,7 @@ fn measure_edit_scaling_by_cel_size() {
             // 7. 頂点の移動
             let q = pick_edge(&mut r);
             let s = Instant::now();
-            let moved = apply(
-                &mut app,
-                Action::MoveVertexFromTo {
-                    from: q.p0,
-                    to: q.p0 + kurbo::Vec2::new(2.0, 1.0),
-                },
-            );
+            let moved = move_vertex(&mut app, q.p0, q.p0 + kurbo::Vec2::new(2.0, 1.0));
             t[6].push(ms(s));
             if moved {
                 assert!(apply(&mut app, Action::Undo));
@@ -40273,7 +40433,7 @@ fn measure_edit_scaling_by_cel_size() {
             t[7].push(ms(s));
             let moved = apply(
                 &mut app,
-                Action::MoveSelected {
+                Action::NudgeSelection {
                     delta: KVec2::new(5.0, 4.0),
                 },
             );
@@ -40414,7 +40574,7 @@ fn windowed_overlay_matches_full_on_large_map() {
                             ),
                         };
                         let moved = piece.transformed(kurbo::Affine::translate(off));
-                        base.edit_local(&base.map_change(&moved), &[])
+                        base.edit_local(&base.map_change(&moved, crate::planar_map::MapRule::Overlay), &[])
                     }
                     _ => {
                         let e = (rng.f() * full.edges.len() as f64) as usize % full.edges.len();
@@ -40753,74 +40913,65 @@ fn random_operation_marathon(seed: u64, steps: usize) {
                 let points = (0..n)
                     .map(|_| p0 + kurbo::Vec2::new(rng.f() * 120.0 - 60.0, rng.f() * 80.0 - 40.0))
                     .collect();
-                Action::PaintStroke {
+                Op::Do(Action::PaintStroke {
                     points,
                     radius: 2.0 + rng.f() as f32 * 9.0,
                     color: colors[(rng.f() * 4.0) as usize % 4],
-                }
+                })
             }
             3 => {
                 let p0 = pt(&mut rng);
-                Action::EraseStroke {
+                Op::Do(Action::EraseStroke {
                     points: vec![
                         p0,
                         p0 + kurbo::Vec2::new(rng.f() * 80.0 - 40.0, rng.f() * 50.0 - 25.0),
                     ],
                     radius: 2.0 + rng.f() as f32 * 8.0,
-                }
+                })
             }
-            4 => Action::BucketFill {
+            4 => Op::Do(Action::BucketFill {
                 pt: pt(&mut rng),
                 color: colors[(rng.f() * 4.0) as usize % 4],
-            },
+            }),
             5 => match on_outline(&app, &mut rng, false, 0.0, false) {
-                Some(p) => Action::AddAnchor { pt: p },
-                None => Action::Deselect,
+                Some(p) => Op::Do(Action::AddAnchor { pt: p }),
+                None => Op::Do(Action::Deselect),
             },
             6 => match on_outline(&app, &mut rng, true, 0.0, false) {
-                Some(p) => Action::DeleteAnchor { pt: p },
-                None => Action::Deselect,
+                Some(p) => Op::Do(Action::DeleteAnchor { pt: p }),
+                None => Op::Do(Action::Deselect),
             },
             7 => match on_outline(&app, &mut rng, true, 0.0, false) {
-                Some(p) => Action::MoveVertexFromTo {
-                    from: p,
-                    to: p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0),
-                },
-                None => Action::Deselect,
+                Some(p) => Op::MoveVertex(p, p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0)),
+                None => Op::Do(Action::Deselect),
             },
             8 => match on_outline(&app, &mut rng, false, 20.0, true) {
-                Some(p) => Action::PullEdgeFromTo {
-                    from: p,
-                    to: p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0),
-                },
-                None => Action::Deselect,
+                Some(p) => Op::PullEdge(p, p + kurbo::Vec2::new(rng.f() * 30.0 - 15.0, rng.f() * 30.0 - 15.0)),
+                None => Op::Do(Action::Deselect),
             },
             9 | 10 => {
                 let p0 = pt(&mut rng);
-                Action::SelectMarquee {
+                Op::Do(Action::SelectMarquee {
                     p0,
                     p1: p0 + kurbo::Vec2::new(10.0 + rng.f() * 200.0, 10.0 + rng.f() * 120.0),
                     additive: rng.f() < 0.25,
-                }
+                })
             }
-            11 => Action::SelectSingleAt { pt: pt(&mut rng) },
-            12 => Action::MoveSelected {
+            11 => Op::Do(Action::SelectSingleAt { pt: pt(&mut rng) }),
+            12 => Op::Do(Action::NudgeSelection {
                 delta: kurbo::Vec2::new(rng.f() * 60.0 - 30.0, rng.f() * 60.0 - 30.0),
-            },
+            }),
             13 => match (rng.f() * 3.0) as usize {
-                0 => Action::ScaleSelection {
-                    sx: 0.6 + rng.f() * 0.9,
-                    sy: 0.6 + rng.f() * 0.9,
-                },
-                1 => Action::RotateSelection {
+                0 => Op::Scale(0.6 + rng.f() * 0.9, 0.6 + rng.f() * 0.9),
+                1 => Op::Do(Action::RotateSelection {
                     angle_rad: rng.f() * 1.5 - 0.75,
-                },
-                _ => Action::FlipSelection {
+                }),
+                _ => Op::Do(Action::FlipSelection {
                     flip_x: rng.f() < 0.5,
                     flip_y: rng.f() < 0.5,
-                },
+                }),
             },
-            14 => Action::DeleteSelection,
+            14 => Op::Do(Action::DeleteSelection),
             15 => {
                 // 先にクリックで1つ選んでから（グループ化は、選んだものが1つのレイヤーだけのときに効く。解除は、選んだ
                 // 図形がグループの中なら効く）
@@ -40840,63 +40991,58 @@ fn random_operation_marathon(seed: u64, steps: usize) {
                             std::panic::resume_unwind(e)
                         });
                 if pre_is_marquee {
-                    Action::Group
+                    Op::Do(Action::Group)
                 } else {
-                    Action::Ungroup
+                    Op::Do(Action::Ungroup)
                 }
             }
             16 => {
                 if rng.f() < 0.5 {
-                    Action::Copy
+                    Op::Do(Action::Copy)
                 } else {
-                    Action::Paste {
+                    Op::Do(Action::Paste {
                         in_place: rng.f() < 0.5,
-                    }
+                    })
                 }
             }
-            17 | 18 => Action::Undo,
-            19 => Action::Redo,
-            20 => Action::SwitchLayerAndFrame {
+            17 | 18 => Op::Do(Action::Undo),
+            19 => Op::Do(Action::Redo),
+            20 => Op::Do(Action::SwitchLayerAndFrame {
                 layer_idx: (rng.f() * 3.0) as usize % 3,
                 frame: 0,
-            },
-            _ => {
-                if rng.f() < 0.5 {
-                    Action::Deselect
-                } else {
-                    Action::CommitFloating
-                }
-            }
+            }),
+            _ => Op::Do(Action::Deselect),
         };
         log.push(format!("{step}: {action:?}"));
         let name: &'static str = match &action {
-            Action::PaintStroke { .. } => "ブラシ",
-            Action::EraseStroke { .. } => "消しゴム",
-            Action::BucketFill { .. } => "バケツ",
-            Action::AddAnchor { .. } => "アンカー+",
-            Action::DeleteAnchor { .. } => "アンカー-",
-            Action::MoveVertexFromTo { .. } => "頂点",
-            Action::PullEdgeFromTo { .. } => "引っぱり",
-            Action::SelectMarquee { .. } => "矩形",
-            Action::SelectSingleAt { .. } => "クリック選択",
-            Action::MoveSelected { .. } => "動かす",
-            Action::ScaleSelection { .. }
-            | Action::RotateSelection { .. }
-            | Action::FlipSelection { .. } => "変形",
-            Action::DeleteSelection => "削除",
-            Action::Group => "グループ化",
-            Action::Ungroup => "解除",
-            Action::Copy => "コピー",
-            Action::Paste { .. } => "貼り付け",
-            Action::Undo => "取り消し",
-            Action::Redo => "やり直し",
-            Action::SwitchLayerAndFrame { .. } => "レイヤー",
-            _ => "確定・選択解除",
+            Op::MoveVertex(..) => "頂点",
+            Op::PullEdge(..) => "引っぱり",
+            Op::Scale(..) => "変形",
+            Op::Do(a) => match a {
+                Action::PaintStroke { .. } => "ブラシ",
+                Action::EraseStroke { .. } => "消しゴム",
+                Action::BucketFill { .. } => "バケツ",
+                Action::AddAnchor { .. } => "アンカー+",
+                Action::DeleteAnchor { .. } => "アンカー-",
+                Action::SelectMarquee { .. } => "矩形",
+                Action::SelectSingleAt { .. } => "クリック選択",
+                Action::NudgeSelection { .. } => "動かす",
+                Action::RotateSelection { .. } | Action::FlipSelection { .. } => "変形",
+                Action::DeleteSelection => "削除",
+                Action::Group => "グループ化",
+                Action::Ungroup => "解除",
+                Action::Copy => "コピー",
+                Action::Paste { .. } => "貼り付け",
+                Action::Undo => "取り消し",
+                Action::Redo => "やり直し",
+                Action::SwitchLayerAndFrame { .. } => "レイヤー",
+                _ => "確定・選択解除",
+            },
         };
         let tag = format!("seed {seed} step {step}");
         let mut applied = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            applied = apply(&mut app, action);
+            applied = op(&mut app, action);
             check_maps_after_step(&app, &tag);
             if step % 10 == 9 {
                 check_scene_matches_full_rebuild(&mut app, &tag);
@@ -41926,8 +42072,7 @@ fn sound_only_keyframes_are_not_blank() {
 fn sounds_survive_save_and_open() {
     let mut app = Is2dApp::default();
     assert!(import_sound(&mut app, short_wav()));
-    let saved = project_io::ProjectDocument::of(&app.doc);
-    let bytes = project_io::project_file_bytes(&saved).unwrap();
+    let bytes = saved_file_bytes(&app.doc);
     let doc = project_from_bytes(&bytes)
         .unwrap()
         .into_document()
@@ -41941,7 +42086,7 @@ fn sounds_survive_save_and_open() {
         doc.root.layers[0].keyframes[0].sound,
         app.doc.root.layers[0].keyframes[0].sound
     );
-    assert!(doc.next_sound_id > doc.sounds.at(0).unwrap().id);
+    assert!(doc.next_sound_id.next() > doc.sounds.at(0).unwrap().id);
 }
 
 /// 壊れた音のデータ（無い音を指す区間・始まりが終わり以降の区間・絵のあるキーフレームの音・重なる番号）は、開くときに
@@ -41951,14 +42096,14 @@ fn sounds_survive_save_and_open() {
 fn broken_sound_data_is_refused_when_opening() {
     let mut app = Is2dApp::default();
     assert!(import_sound(&mut app, short_wav()));
-    let good = project_io::ProjectDocument::of(&app.doc);
+    let good = saved_of(&app.doc);
     assert!(good.clone().into_document().is_ok());
-    let refused = |f: &dyn Fn(&mut project_io::ProjectDocument)| {
+    let refused = |f: &dyn Fn(&mut save_format::ProjectDocument)| {
         let mut d = good.clone();
         f(&mut d);
         d.into_document().is_err()
     };
-    fn kf(d: &mut project_io::ProjectDocument) -> &mut project_io::SavedKeyframe {
+    fn kf(d: &mut save_format::ProjectDocument) -> &mut save_format::SavedKeyframe {
         &mut d.timeline.layers[0].keyframes[0]
     }
     assert!(!refused(&|d| d.sounds[0].bytes = b"broken"[..].into()), "読めない音は開く");
@@ -41983,10 +42128,10 @@ fn broken_sound_data_is_refused_when_opening() {
             color: Color32::RED,
         }
     ));
-    let mut d = project_io::ProjectDocument::of(&drawn.doc);
+    let mut d = saved_of(&drawn.doc);
     d.sounds = good.sounds.clone();
     d.timeline.layers[0].keyframes[0].sound = good.timeline.layers[0].keyframes[0].sound;
-    d.write_map_tiles();
+    write_map_tiles(&mut d);
     assert!(d.into_document().is_err());
 }
 
@@ -42000,7 +42145,7 @@ fn a_clip_longer_than_its_sound_opens_with_a_notice() {
         let mut app = Is2dApp::default();
         assert!(import_sound(&mut app, short_wav()));
         let len = app.doc.sounds.at(0).unwrap().len();
-        let mut d = project_io::ProjectDocument::of(&app.doc);
+        let mut d = saved_of(&app.doc);
         {
             let kf = &mut d.timeline.layers[0].keyframes[0];
             let c = kf.sound.as_mut().unwrap();
@@ -42049,7 +42194,7 @@ fn doc_with_flat_sound() -> symbol::Document {
     let bytes = wav_bytes(48_000, 1, &vec![16384i16; 48_000]);
     let s = crate::sound::Sound::new(1, "flat".to_owned(), bytes.into()).unwrap();
     doc.sounds.push_new(std::sync::Arc::new(s));
-    doc.next_sound_id = 2;
+    doc.next_sound_id = crate::symbol::Counter::starting_at(2);
     doc
 }
 
@@ -42328,7 +42473,7 @@ fn deleting_and_renaming_library_sounds_with_undo() {
     assert_eq!(root[top], None);
     assert_eq!(root[0].map(|c| c.sound), Some(b), "ほかの音はそのまま");
     assert_eq!(inner, None);
-    let saved = project_io::ProjectDocument::of(&app.doc);
+    let saved = saved_of(&app.doc);
     assert!(saved.into_document().is_ok(), "無い音を指す区間は残らない");
     assert!(!doc_actions::apply(&mut app, doc_actions::Action::DeleteSound { sound_id: a }));
 
@@ -42380,7 +42525,7 @@ fn copied_symbol_with_sound() -> (Is2dApp, u64) {
     assert!(apply(&mut app, Action::EnterSymbolFromLibrary { sym_id }));
     assert!(apply(&mut app, Action::AddLayer));
     assert!(import_sound(&mut app, short_wav()));
-    assert!(apply(&mut app, Action::ExitSymbolTimeline));
+    assert!(apply(&mut app, Action::ExitGroupSteps { steps: 1 }));
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::Copy));
     (app, sym_id)
@@ -42388,8 +42533,7 @@ fn copied_symbol_with_sound() -> (Is2dApp, u64) {
 
 /// テスト用：文書 `doc` を保存したバイトを開き直した文書（開けなければ `Err`）
 fn reopened(doc: &symbol::Document) -> Result<symbol::Document, String> {
-    let bytes = project_io::project_file_bytes(&project_io::ProjectDocument::of(doc))?;
-    project_from_bytes(&bytes)?.into_document()
+    opened_document(&saved_file_bytes(doc))
 }
 
 /// 文書 `doc` のシンボル `sym_id` のタイムラインの音の区間が指す音のバイト（区間がライブラリの音に収まること）
@@ -42692,7 +42836,7 @@ fn doc_with_saw_sound() -> symbol::Document {
     let bytes = wav_bytes(48_000, 1, &samples);
     let s = crate::sound::Sound::new(1, "saw".to_owned(), bytes.into()).unwrap();
     doc.sounds.push_new(std::sync::Arc::new(s));
-    doc.next_sound_id = 2;
+    doc.next_sound_id = crate::symbol::Counter::starting_at(2);
     put_clip(&mut doc.root, 10, flat_clip());
     doc
 }
@@ -43026,7 +43170,7 @@ fn renaming_a_layer_is_one_undo_step_and_is_saved() {
     assert_eq!(name(&app), "背景");
 
     let opened = opened_document(
-        &project_io::project_file_bytes(&project_io::ProjectDocument::of(&app.doc)).unwrap(),
+        &saved_file_bytes(&app.doc),
     )
     .unwrap();
     assert_eq!(opened.root.layers[0].name, "背景", "保存して開いても名前が残る");
@@ -43855,7 +43999,7 @@ mod strokes {
         let mut app = Is2dApp::default();
         // 何も無い所の線：両側が何も無く、線のある辺が1本（塗りは無い）
         let seg = line(Point::new(500.0, 100.0), Point::new(700.0, 150.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+        assert!(draw_lines(&mut app, vec![seg]));
         let m = cel_map(&app);
         assert_eq!(m.edges.len(), 1);
         assert_eq!((m.edges[0].left, m.edges[0].right, m.edges[0].stroke), (None, None, Some(INK)));
@@ -43864,7 +44008,7 @@ mod strokes {
         assert_eq!(app.scene().iter().filter(|s| s.line == Some(INK)).count(), 1);
         // 離れた所にもう1本引き、1本目の上をブラシで塗る：触っていない2本目の線の図形は、作り直さずに使い回す
         let far = line(Point::new(500.0, 400.0), Point::new(700.0, 450.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![far] }));
+        assert!(draw_lines(&mut app, vec![far]));
         let lines_of = |app: &Is2dApp| {
             let tl = app.tab().active_timeline();
             let cel = tl.layers[0].cel_at(0).unwrap();
@@ -43882,7 +44026,7 @@ mod strokes {
         let mut app = Is2dApp::default();
         put_cel_shapes(&mut app, 0, 0, vec![rect(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
         let across = line(Point::new(50.0, 200.0), Point::new(350.0, 200.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![across] }));
+        assert!(draw_lines(&mut app, vec![across]));
         let m = cel_map(&app);
         let (faces, broken) = m.faces();
         assert_eq!((faces.len(), broken), (2, 0));
@@ -43891,13 +44035,13 @@ mod strokes {
         assert_eq!(counts(&app).1, 3);
         // 塗りの中で止まる線（行き止まり）：面の数は変わらない
         let spur = line(Point::new(150.0, 100.0), Point::new(150.0, 150.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![spur] }));
+        assert!(draw_lines(&mut app, vec![spur]));
         let m = cel_map(&app);
         assert_eq!(m.faces().0.len(), 2);
         assert!(m.is_valid());
         // 塗りの中に浮いた線（どこにもつながらない）：面積 0 の穴として、それを含む面に入る
         let island = line(Point::new(200.0, 250.0), Point::new(260.0, 270.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![island] }));
+        assert!(draw_lines(&mut app, vec![island]));
         let m = cel_map(&app);
         let (faces, broken) = m.faces();
         assert_eq!((faces.len(), broken), (2, 0));
@@ -43919,7 +44063,7 @@ mod strokes {
             Point::new(500.0, 600.0),
         );
         let square = vec![line(a, b, INK), line(b, c, INK), line(c, d, INK), line(d, a, INK)];
-        assert!(apply(&mut app, Action::DrawLines { segs: square }));
+        assert!(draw_lines(&mut app, square));
         assert!(apply(&mut app, Action::BucketFill { pt: Point::new(550.0, 550.0), color: Color32::GREEN }));
         let m = cel_map(&app);
         let (faces, _) = m.faces();
@@ -44042,9 +44186,9 @@ mod strokes {
             line(c, Point::new(400.0, 300.0), INK),
             line(c, Point::new(300.0, 200.0), INK),
         ];
-        assert!(apply(&mut app, Action::DrawLines { segs }));
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(c, Point::new(300.0, 400.0), thin)] }));
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(Point::new(600.0, 300.0), Point::new(700.0, 300.0), INK)] }));
+        assert!(draw_lines(&mut app, segs));
+        assert!(draw_lines(&mut app, vec![line(c, Point::new(300.0, 400.0), thin)]));
+        assert!(draw_lines(&mut app, vec![line(Point::new(600.0, 300.0), Point::new(700.0, 300.0), INK)]));
         assert_eq!(counts(&app).1, 5);
         assert!(apply(&mut app, Action::SelectConnectedAt { pt: Point::new(250.0, 300.5), add: false }));
         assert_eq!(app.session.selection().shapes.len(), 3);
@@ -44057,7 +44201,7 @@ mod strokes {
     fn a_line_copied_to_another_layer_is_a_different_line() {
         let mut app = Is2dApp::default();
         let seg = line(Point::new(100.0, 100.0), Point::new(300.0, 150.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+        assert!(draw_lines(&mut app, vec![seg]));
         // 同じ所に貼り付けて、別のレイヤーへ
         run(&mut app, &[Action::SelectAll, Action::Copy, Action::AddLayer, Action::Paste { in_place: true }, Action::Deselect]);
         let lines: Vec<_> = app.scene().iter().filter(|s| s.line.is_some()).map(|s| (s.layer_id, s.shape_id)).collect();
@@ -44162,7 +44306,7 @@ mod strokes {
         let picked = |y: f64, zoom: f32| {
             let mut app = inked_square_app();
             let seg = line(Point::new(100.0, 600.0), Point::new(300.0, 600.0), thin);
-            assert!(apply(&mut app, Action::DrawLines { segs: vec![seg] }));
+            assert!(draw_lines(&mut app, vec![seg]));
             app.tab_mut().view.set_zoom(zoom);
             let _ = apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, y) });
             let ids: Vec<_> = app.session.selection().shapes.iter().copied().collect();
@@ -44191,7 +44335,7 @@ mod strokes {
         // 直して出す（浮いた片の残り）。作り直した線も、塗りより上に描く
         let mut app = inked_square_app();
         let whisker = line(Point::new(100.0, 100.0), Point::new(40.0, 60.0), INK);
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![whisker] }));
+        assert!(draw_lines(&mut app, vec![whisker]));
         assert!(lines_above_fills(&app));
         assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(70.0, 80.0) }));
         let picked: Vec<_> = app.session.selection().shapes.iter().copied().collect();
@@ -44243,7 +44387,7 @@ mod strokes {
         let (a, b) = (Point::new(100.0, 100.0), Point::new(200.0, 100.0));
         let th: f64 = 0.01;
         let c = b + KVec2::new(th.cos(), th.sin()) * 100.0;
-        assert!(apply(&mut app, Action::DrawLines { segs: vec![line(a, b, INK), line(b, c, INK)] }));
+        assert!(draw_lines(&mut app, vec![line(a, b, INK), line(b, c, INK)]));
         assert_eq!(counts(&app).1, 2);
         let r = INK.width as f64 / 2.0;
         // 曲がりは時計回り（y が下向きの座標で下へ）なので、外側は上（−y）の側
@@ -44295,7 +44439,7 @@ mod strokes {
             assert!(apply(&mut app, Action::SelectAll));
             assert!(apply(&mut app, Action::Group));
             if scale {
-                assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+                assert!(scale_selection(&mut app, 2.0, 2.0));
             } else {
                 assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(30.0, 20.0), alt_duplicate: false }));
             }
@@ -44333,7 +44477,7 @@ mod strokes {
         // 生の絵
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectAll));
-        assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+        assert!(scale_selection(&mut app, 2.0, 2.0));
         assert!(near(&thickness(&app), 4.0), "生の絵：選んでいる間 {:?}", thickness(&app));
         assert!(apply(&mut app, Action::Deselect));
         assert!(near(&thickness(&app), 4.0), "生の絵：確定したあと {:?}", thickness(&app));
@@ -44349,7 +44493,7 @@ mod strokes {
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::ConvertToSymbol));
-        assert!(apply(&mut app, Action::ScaleSelection { sx: 2.0, sy: 2.0 }));
+        assert!(scale_selection(&mut app, 2.0, 2.0));
         assert!(near(&thickness(&app), 8.0), "シンボル：拡大したあと {:?}", thickness(&app));
     }
 
@@ -44463,7 +44607,7 @@ mod strokes {
                             (QuadBez::new(a, a.lerp(b, rng.f64()), b), stroke),
                             (QuadBez::new(b, b.lerp(c, rng.f64()), c), stroke),
                         ];
-                        apply(&mut app, Action::DrawLines { segs });
+                        draw_lines(&mut app, segs);
                     }
                     0 | 1 => {
                         let stroke = EdgeStroke {
@@ -44571,7 +44715,7 @@ fn extreme_inputs_never_stop_a_computation() {
                 1 => { let q = p(&mut rng); apply(&mut app, Action::BucketFill { pt: q, color: Color32::BLUE }); }
                 2 => { let (a, b) = (p(&mut rng), p(&mut rng)); apply(&mut app, Action::SelectMarquee { p0: a, p1: b, additive: rng.coin() }); }
                 3 => { apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(rng.f64_range(-1.0, 1.0) * s, rng.f64_range(-1.0, 1.0) * s), alt_duplicate: rng.coin() }); }
-                4 => { apply(&mut app, Action::ScaleSelection { sx: rng.f64_range(-2.0, 2.0) * s, sy: rng.f64_range(-2.0, 2.0) * s }); }
+                4 => { scale_selection(&mut app, rng.f64_range(-2.0, 2.0) * s, rng.f64_range(-2.0, 2.0) * s); }
                 5 => { apply(&mut app, Action::RotateSelection { angle_rad: rng.f64_range(-1.0, 1.0) * s }); }
                 6 => { let q = p(&mut rng); apply(&mut app, Action::AddAnchor { pt: q }); }
                 7 => { let (a, b) = (p(&mut rng), p(&mut rng)); app.run_frame(|t| { crate::tool_select::start_reshape_drag(t, a, false, false); crate::tool_select::update_reshape_drag(t, b); crate::tool_select::finish_reshape_drag(t, Some(b)); }); if found.lock().unwrap().len() > before { *caught.entry("道具の入力".into()).or_default() += 1; } }
@@ -44609,3 +44753,385 @@ fn a_layer_number_is_never_given_twice_even_after_undo() {
     assert_ne!(new_first, new_again, "取り消したあとに足したレイヤーが、前と同じ番号をまた使った");
 }
 
+
+/// 作品の番号を使い切ったら、番号を配らずに計算を止め、入口の砦が操作の前に戻す（番号は決してぶつからない。数え札の決まりは
+/// `symbol::Counter` の1つ：設計審査 01e4283 の D-4。前はグループとシンボルの番号は上限で 1 に戻り、今ある番号とぶつかりえた）
+#[test]
+fn a_used_up_counter_never_gives_a_number_twice() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::SelectAll));
+    app.doc.next_group_id = crate::symbol::Counter::starting_at(u64::MAX);
+    let before = app.doc.root.layers[0].keyframes[0].cel.clone();
+    app.notices = Default::default();
+    assert!(!apply(&mut app, Action::Group), "番号を使い切ったのにグループにした");
+    assert!(std::sync::Arc::ptr_eq(app.doc.root.layers[0].keyframes[0].cel.maps(), before.maps()), "断ったのに作品が変わった");
+    assert_eq!(app.doc.next_group_id.next(), u64::MAX, "断ったのに数え札が進んだ");
+    assert_eq!(
+        app.notices.iter().last().map(|t| t.message.as_str()),
+        Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました")
+    );
+}
+
+/// 動かした塗りと線を別の塗り（青）の上へ重ね、線を1本ずつ選択から外してから確定しても、一度に確定したときと同じ絵（外した
+/// 線は、青のふちで切られて番号が変わる。上に重ねる線は形で覚えるので迷子にならない：`PieceGroup::lines_over`。設計審査
+/// 01e4283 の D-1。前は番号で覚えたので、切られた線が持っている間は塗りの下に隠れ、確定で消えた）
+#[test]
+fn a_remembered_line_cut_by_the_picture_below_keeps_its_place() {
+    use crate::doc_actions::{apply, Action};
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let setup = || {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                map_overlay::rect_shape(c.x - 100.0, c.y - 60.0, c.x + 100.0, c.y + 60.0, Color32::RED),
+                map_overlay::rect_shape(c.x + 150.0, c.y - 80.0, c.x + 350.0, c.y + 80.0, Color32::BLUE),
+            ],
+        );
+        assert!(apply(
+            &mut app,
+            Action::PencilStroke {
+                points: vec![Point::new(c.x - 80.0, c.y), Point::new(c.x, c.y + 10.0), Point::new(c.x + 80.0, c.y)],
+                stroke: crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 3 },
+            },
+        ));
+        assert!(apply(&mut app, Action::SelectAll));
+        // 青を選択から外す（赤と線だけを動かす）
+        let blue = app.scene().iter().position(|s| s.color() == Color32::BLUE && s.line.is_none()).expect("青");
+        assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: blue }));
+        assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(100.0, 0.0), alt_duplicate: false }));
+        app
+    };
+    let mut all = setup();
+    assert!(apply(&mut all, Action::Deselect));
+    let want = cel_picture(&all);
+    assert!(want.lines > 0, "線が無い");
+    // 線の辺を1本ずつ選択から外す
+    let mut part = setup();
+    loop {
+        let sel = part.session.selection().shapes.clone();
+        let Some(i) = part.scene().iter().position(|s| s.line.is_some() && sel.contains(&s.shape_id)) else {
+            break;
+        };
+        assert!(apply(&mut part, Action::ToggleSelectionAt { scene_idx: i }));
+    }
+    // 持っている間、線に沿った列で、いちばん上は線（塗りの下に隠れない）
+    let world = part.session.edit_path().world_xform();
+    let scope = part.session.editing_group_path().to_vec();
+    let scene = part.scene();
+    let hidden = (0..=32)
+        .map(|k| c.x + 30.0 + k as f64 * 4.0)
+        .filter(|&x| {
+            // 動かした線の上の点（線はおよそ c.y〜c.y+10 の間）
+            let y = c.y + 10.0 * (1.0 - ((x - c.x - 100.0) / 80.0).powi(2)).max(0.0);
+            scene
+                .topmost_shape_at(world * Point::new(x, y), &scope)
+                .and_then(|i| scene.get(i))
+                .is_some_and(|s| s.line.is_none())
+        })
+        .count();
+    assert_eq!(hidden, 0, "持っている間、外した線が塗りの下に隠れた");
+    assert!(apply(&mut part, Action::Deselect));
+    assert_eq!(cel_picture(&part), want, "線を外してから確定すると、一度に確定したときと違う絵になった");
+}
+
+/// 上に重ねる線の取り出し（`LayerBase::lines_along`）：中身の線の辺の一部だけが覚えた形に沿うとき、形は沿う所だけ（覚えた
+/// 形の曲線）で、番号はその中身の辺の番号。沿わない線からは何も取り出さない（確定・見た目・持ち上げは、この同じ答えを使う：
+/// 設計審査 01e4283 の D-1）
+#[test]
+fn lines_along_takes_only_the_part_on_the_remembered_shape() {
+    use crate::doc_actions::{apply, Action};
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let mut app = Is2dApp::default();
+    assert!(apply(
+        &mut app,
+        Action::PencilStroke {
+            points: vec![Point::new(c.x - 80.0, c.y), Point::new(c.x, c.y + 10.0), Point::new(c.x + 80.0, c.y)],
+            stroke: crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 3 },
+        },
+    ));
+    let base = app.doc.root.layers[0].keyframes[0].cel.scope_base(&[]);
+    let m = base.map().clone();
+    let e = (0..m.edges.len()).find(|&e| m.edges[e].stroke.is_some()).expect("線");
+    let q = m.quad(e);
+    let id = m.edges[e].line_id.expect("線の番号");
+    let line_map = |q: kurbo::QuadBez| crate::planar_map::PlanarMap {
+        nodes: vec![q.p0, q.p2],
+        edges: vec![crate::planar_map::MapEdge {
+            a: 0,
+            b: 1,
+            ctrl: q.p1,
+            left: None,
+            right: None,
+            left_src: None,
+            right_src: None,
+            stroke: m.edges[e].stroke,
+            line_id: None,
+        }],
+    };
+    // 前半だけを覚えた形にする
+    let half = q.subsegment(0.0..0.5);
+    let got = base.lines_along(&line_map(half));
+    assert_eq!(got.shape_ids, vec![id], "沿う中身の線の番号でない");
+    let s = got.shape.quad(0);
+    let ends = |a: Point, b: Point| (a - b).hypot() < 1e-6;
+    assert!(
+        got.shape.edges.len() == 1 && ((ends(s.p0, half.p0) && ends(s.p2, half.p2)) || (ends(s.p0, half.p2) && ends(s.p2, half.p0))),
+        "取り出した形が、覚えた形の沿う所でない：{:?}",
+        got.shape.edges.iter().enumerate().map(|(k, _)| got.shape.quad(k)).collect::<Vec<_>>()
+    );
+    // 離れた所の線は沿わない
+    let away = base.lines_along(&line_map(kurbo::QuadBez::new(Point::new(c.x - 80.0, c.y + 200.0), Point::new(c.x, c.y + 210.0), Point::new(c.x + 80.0, c.y + 200.0))));
+    assert!(away.shape.edges.is_empty() && away.shape_ids.is_empty(), "沿わない線から取り出した");
+}
+
+/// 動かしていない片を残りに戻しても（Shift で外す）、その塗りの内側を通っていた残りの線は消えない（同じレイヤーの絵では
+/// 線はいつも塗りの上なので、動かしていない塗りは元どおり線の下に戻る：`MapRule::Restore`。設計審査 01e4283 の D-2。前は
+/// 片を上に重ねる決まりで戻したので、線が覆われて消え、そのあと残りを動かして確定すると、線の右半分が消えた）
+#[test]
+fn returning_an_unmoved_face_keeps_the_line_over_it() {
+    use crate::doc_actions::{apply, Action};
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(c.x - 100.0, c.y - 60.0, c.x + 100.0, c.y + 60.0, Color32::RED)]);
+    assert!(apply(&mut app, Action::PencilStroke {
+        points: vec![Point::new(c.x - 80.0, c.y), Point::new(c.x, c.y + 10.0), Point::new(c.x + 80.0, c.y)],
+        stroke: crate::planar_map::EdgeStroke { color: Color32::BLACK, width: 3 },
+    }));
+    let line_len = |app: &Is2dApp| -> f64 {
+        use kurbo::ParamCurveArclen;
+        let doc = app.tab().committed_document_copy().unwrap();
+        let m = doc.root.layers[0].keyframes[0].cel.scope_base(&[]).map().clone();
+        (0..m.edges.len()).filter(|&e| m.edges[e].stroke.is_some()).map(|e| m.quad(e).arclen(1e-6)).sum()
+    };
+    let want = line_len(&app);
+    let world = app.session.edit_path().world_xform();
+    // 左半分を矩形で選ぶ（塗りと線を切って持ち上げる）
+    assert!(apply(&mut app, Action::SelectMarquee { p0: world * Point::new(c.x - 120.0, c.y - 80.0), p1: world * Point::new(c.x - 20.0, c.y + 80.0), additive: false }));
+    // 残りの塗り（右）を Shift で選び足し（線は選ばない）、Shift で外す（元の所に戻す）
+    let red_rest = app.scene().iter().position(|s| s.color() == Color32::RED && s.line.is_none() && !app.session.selection().contains_shape(s)).expect("残りの塗り");
+    assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: red_rest }));
+    let red_piece = app
+        .scene()
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.color() == Color32::RED && s.line.is_none() && app.session.selection().contains_shape(s))
+        .map(|(i, s)| (i, s.bounding_box().x1))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("右の片")
+        .0;
+    assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: red_piece }));
+    // 残りの片を動かして確定する
+    assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 30.0), alt_duplicate: false }));
+    assert!(apply(&mut app, Action::Deselect));
+    assert!((line_len(&app) - want).abs() < 0.05, "戻した塗りの上の線が消えた：{} のはずが {}", want, line_len(&app));
+}
+
+/// 絵を地図の精度の内で比べる関数（`same_picture_within_precision`）は、消えた線と、まとまったのでない太さの違いを見逃さない
+#[test]
+fn same_picture_within_precision_catches_a_lost_or_thinner_line() {
+    use crate::doc_actions::{apply, Action};
+    let c = crate::canvas_tool::View::DEFAULT_STAGE_CENTER;
+    let with = |width: u8| {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(c.x - 100.0, c.y - 60.0, c.x + 100.0, c.y + 60.0, Color32::RED)]);
+        assert!(apply(&mut app, Action::PencilStroke {
+            points: vec![Point::new(c.x - 80.0, c.y), Point::new(c.x + 80.0, c.y)],
+            stroke: crate::planar_map::EdgeStroke { color: Color32::BLACK, width },
+        }));
+        app.doc.clone()
+    };
+    let mut none = Is2dApp::default();
+    put_cel_shapes(&mut none, 0, 0, vec![map_overlay::rect_shape(c.x - 100.0, c.y - 60.0, c.x + 100.0, c.y + 60.0, Color32::RED)]);
+    assert!(same_picture_within_precision(&with(3), &with(3)).is_ok());
+    assert!(same_picture_within_precision(&with(3), &none.doc).is_err(), "消えた線を見逃した");
+    assert!(same_picture_within_precision(&with(3), &with(5)).is_err(), "太さの違いを見逃した");
+}
+
+/// 保存の形の見本の作品（`testdata/format_sample.json`。保存の型を名前で書いた形）を、本番の操作で組み立てて書き出す。見本は
+/// 保存の形の全部の項目と種類を使う（塗り・線・グループ・音のあるシンボル2つ・繰り返しの種類3つ・色効果・中心点・
+/// 最初のコマ・トゥイーンの回転3つ・隠した／ロックしたレイヤー。テスト `format_sample_uses_every_field` が確かめる）。保存の
+/// 型の形を変えて版を上げたら、これで見本を作り直し、指紋 `save_format::FORMAT_FINGERPRINT` を書き替える
+///
+/// 実行：`IS2D_WRITE_FORMAT_SAMPLE=1 cargo test --release write_format_sample -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn write_format_sample() {
+    use crate::symbol::{SymbolLoopMode, TweenRotate};
+    use doc_actions::{apply, Action};
+    if std::env::var("IS2D_WRITE_FORMAT_SAMPLE").is_err() {
+        eprintln!("IS2D_WRITE_FORMAT_SAMPLE=1 を入れて実行してください");
+        return;
+    }
+    let mut app = Is2dApp::default();
+    let run = |app: &mut Is2dApp, actions: Vec<Action>| {
+        for a in actions {
+            let name = format!("{a:?}");
+            assert!(apply(app, a), "見本の操作が通ること：{name}");
+        }
+    };
+    // レイヤー 1：塗り・線・グループ
+    run(
+        &mut app,
+        vec![
+            Action::PaintStroke { points: vec![Point::new(80.0, 80.0), Point::new(200.0, 120.0)], radius: 10.0, color: Color32::RED },
+            Action::PencilStroke {
+                points: vec![Point::new(60.0, 160.0), Point::new(140.0, 200.0), Point::new(220.0, 160.0)],
+                stroke: crate::planar_map::EdgeStroke { color: Color32::BLUE, width: 3 },
+            },
+            Action::PaintStroke { points: vec![Point::new(300.0, 100.0), Point::new(360.0, 100.0)], radius: 12.0, color: Color32::GREEN },
+            Action::SelectSingleAt { pt: Point::new(330.0, 100.0) },
+            Action::Group,
+            Action::Deselect,
+        ],
+    );
+    // 音のあるシンボルと、その写し（ライブラリに2つ）
+    run(
+        &mut app,
+        vec![
+            Action::PaintStroke { points: vec![Point::new(600.0, 100.0), Point::new(640.0, 100.0)], radius: 8.0, color: Color32::YELLOW },
+            Action::SelectSingleAt { pt: Point::new(620.0, 100.0) },
+            Action::ConvertToSymbol,
+        ],
+    );
+    let sym = app.doc.library().at(0).unwrap().id;
+    run(&mut app, vec![Action::Deselect, Action::EnterSymbolFromLibrary { sym_id: sym }, Action::AddLayer]);
+    let wav = wav_bytes(8000, 1, &(0..400).map(|i| ((i % 40) * 500 - 10000) as i16).collect::<Vec<_>>());
+    assert!(import_sound(&mut app, wav));
+    run(&mut app, vec![Action::ExitGroupSteps { steps: 1 }, Action::DuplicateSymbol { sym_id: sym }]);
+    // レイヤー 2〜4：1つずつインスタンス（繰り返しの種類3つ・最初のコマ。3つめに色効果と中心点）。トゥイーン（インスタンスが
+    // 1つのキーフレームだけに付けられる）の回転3つは、レイヤー 2 に
+    let mut tween_layer = None;
+    for (k, mode) in [SymbolLoopMode::Loop, SymbolLoopMode::PlayOnce, SymbolLoopMode::SingleFrame].into_iter().enumerate() {
+        run(
+            &mut app,
+            vec![
+                Action::Deselect,
+                Action::AddLayer,
+                Action::PlaceSymbol { sym_id: sym },
+                Action::NudgeSelection { delta: KVec2::new(100.0 * k as f64, 200.0) },
+            ],
+        );
+        let tl = &app.doc.root;
+        tween_layer.get_or_insert(tl.layers[tl.active_layer].id);
+        // 1つめは、置いたときの設定（繰り返し・最初のコマ 0）のまま
+        if k > 0 {
+            run(&mut app, vec![Action::SetSymbolPlayback { loop_mode: Some(mode), first_frame: Some(k) }]);
+        }
+    }
+    run(&mut app, vec![Action::SetSymbolColorEffect { effect: crate::symbol::ColorEffect { alpha: 0.6, brightness: -0.3 } }]);
+    assert!(set_pivot(&mut app, Some(Point::new(250.0, 330.0))));
+    run(&mut app, vec![Action::Deselect]);
+    let at = |app: &Is2dApp, frame: usize| Action::SwitchLayerAndFrame {
+        layer_idx: app.doc.root.layers.iter().position(|l| Some(l.id) == tween_layer).unwrap(),
+        frame,
+    };
+    let go = at(&app, 0);
+    run(&mut app, vec![go]);
+    run(&mut app, (0..12).map(|_| Action::ExtendFrame).collect());
+    for frame in [4, 8, 12] {
+        let go = at(&app, frame);
+        run(&mut app, vec![go, Action::InsertKeyframe { copy_prev: true }]);
+    }
+    for (frame, rotate) in [(0, TweenRotate::Auto), (4, TweenRotate::Clockwise), (8, TweenRotate::CounterClockwise)] {
+        let go = at(&app, frame);
+        run(&mut app, vec![go, Action::ToggleTween]);
+        if rotate != TweenRotate::Auto {
+            run(&mut app, vec![Action::SetTweenRotate { rotate }]);
+        }
+    }
+    // 隠したレイヤーと、ロックしたレイヤー
+    for hidden in [true, false] {
+        let active = app.doc.root.active_layer;
+        run(
+            &mut app,
+            vec![
+                Action::SwitchLayerAndFrame { layer_idx: active, frame: 0 },
+                Action::AddLayer,
+                Action::PaintStroke { points: vec![Point::new(500.0, 500.0), Point::new(560.0, 520.0)], radius: 6.0, color: Color32::BLACK },
+            ],
+        );
+        let layer_idx = app.doc.root.active_layer;
+        run(
+            &mut app,
+            vec![if hidden { Action::SetLayerVisible { layer_idx, visible: false } } else { Action::SetLayerLocked { layer_idx, locked: true } }],
+        );
+    }
+    let doc = app.tab().committed_document_copy().expect("置ける");
+    let saved: SavedProject = format_v11::read(&format_v11::bytes(&saved_of(&doc)).unwrap()[..]).unwrap();
+    format_sample_uses_every_field(&saved);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join("format_sample.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let json = serde_json::to_string_pretty(&saved).unwrap();
+    std::fs::write(&path, &json).unwrap();
+    eprintln!("見本：{}（{} バイト）。指紋 FORMAT_FINGERPRINT = {:#010x}", path.display(), json.len(), format_fingerprint(&json));
+}
+
+/// 保存の形の見本が、保存の形の全部の項目と種類を使う（無いこともある項目は有る形で、いくつかから選ぶ項目は全部の種類で。
+/// 指紋が項目の形・並び・種類の並びの変化に気づけるように）
+fn format_sample_uses_every_field(pd: &SavedProject) {
+    use crate::symbol::{SymbolLoopMode, TweenRotate};
+    let timelines: Vec<&save_format::SavedTimeline> =
+        std::iter::once(&pd.timeline).chain(pd.library.iter().map(|s| &s.timeline)).collect();
+    let layers: Vec<&save_format::SavedLayer> = timelines.iter().flat_map(|t| &t.layers).collect();
+    let keyframes: Vec<&save_format::SavedKeyframe> = layers.iter().flat_map(|l| &l.keyframes).collect();
+    let instances: Vec<&save_format::SavedSymbolInstance> = keyframes.iter().flat_map(|k| &k.instances).collect();
+    for mode in [SymbolLoopMode::Loop, SymbolLoopMode::PlayOnce, SymbolLoopMode::SingleFrame] {
+        assert!(instances.iter().any(|i| i.binding.loop_mode == mode), "見本に繰り返しの種類 {mode:?} が無い");
+    }
+    for rotate in [TweenRotate::Auto, TweenRotate::Clockwise, TweenRotate::CounterClockwise] {
+        assert!(keyframes.iter().any(|k| k.tween && k.tween_rotate == rotate), "見本にトゥイーンの回転 {rotate:?} が無い");
+    }
+    let checks = [
+        ("音の区間", keyframes.iter().any(|k| k.sound.is_some())),
+        ("隠したレイヤー", layers.iter().any(|l| !l.visible)),
+        ("ロックしたレイヤー", layers.iter().any(|l| l.locked)),
+        ("グループの中の地図", keyframes.iter().any(|k| k.maps.iter().any(|m| !m.group_path.is_empty()))),
+        ("色効果", instances.iter().any(|i| i.binding.color_effect != crate::symbol::ColorEffect::default())),
+        ("中心点", instances.iter().any(|i| i.binding.pivot != [0.0, 0.0])),
+        ("最初のコマ", instances.iter().any(|i| i.binding.first_frame > 0)),
+        ("線", !pd.map_tiles.strokes.is_empty()),
+        ("左右の図形の印", pd.map_tiles.tiles.iter().any(|t| t.edges.iter().any(|e| e.left_src != 0 && e.right_src != 0))),
+        ("シンボル2つ", pd.library.len() >= 2),
+        ("音", !pd.sounds.is_empty()),
+    ];
+    for (name, ok) in checks {
+        assert!(ok, "見本に{name}が無い");
+    }
+}
+
+/// 保存の形の指紋：見本の作品 `json`（`testdata/format_sample.json` の中身）を作品にし、本番の書き手で書いた作品ファイルと
+/// 復旧ファイル（元のファイルの場所つき・「保存した」の印つき）のバイト列の CRC32
+fn format_fingerprint(json: &str) -> u32 {
+    let pd: SavedProject = serde_json::from_str(json).expect("見本を読める");
+    format_sample_uses_every_field(&pd);
+    let doc = pd.into_document().expect("見本を作品にできる");
+    let dir = scratch_file_path("format_fingerprint");
+    std::fs::create_dir_all(&dir).unwrap();
+    let project = dir.join("sample.is2d");
+    save_format::write_project_file(&project, &doc).unwrap();
+    let journal = dir.join("sample.is2dj");
+    let mut j = crate::recovery_journal::Journal::create(&journal, &doc, Some(std::path::Path::new("sample.is2d"))).unwrap();
+    j.mark_saved().unwrap();
+    let mut bytes = std::fs::read(&project).unwrap();
+    bytes.extend(std::fs::read(&journal).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+    crc32fast::hash(&bytes)
+}
+
+/// 保存の型の形（項目を足す・消す・型を変える・並びを変える・種類の並びを変える）を変えたのに版を上げていなければ止まる：
+/// 見本の作品を今の書き手で書いたバイト列が、今の版の指紋と同じ。番号の配り方（アプリ全体の番号がどこまで進んでいるか）に
+/// よらない（2回目は、1回目が番号を配ったあと）
+#[test]
+fn the_format_fingerprint_matches_the_version() {
+    let advice = "保存の型の形が変わった：版 save_format::FORMAT_VERSION を上げ、前の版の変換をテスト（convert_work_files_to_current_format）に\
+                  足し、見本（write_format_sample）と指紋 FORMAT_FINGERPRINT を作り直す";
+    let json = include_str!("../testdata/format_sample.json");
+    let first = format_fingerprint(json);
+    assert_eq!(first, format_fingerprint(json), "指紋が書くたびに変わる");
+    assert_eq!(first, save_format::FORMAT_FINGERPRINT, "{advice}（今の指紋 {first:#010x}）");
+}

@@ -100,13 +100,19 @@ pub(crate) struct PieceGroup {
     fresh: Option<Arc<LayerBase>>,
     pub(crate) xform: Affine,
     /// 確定で置く組か（動かした・色を変えた・文書に無い）。置かない組（選んで持ち上げただけ）は、確定でセル画を変えない：
-    /// 元の所は、持ち上げる前の絵のまま（`Origin::kept`。設計 claude/約束を入口で守る設計_5616fcc.md の 13 の 2.）
-    pub(crate) placed: bool,
-    /// 上に重ねる線：この組の塗りより上に見えていた、一部の確定で先に書いた線の番号（番号の順。`Floating::split_off`）。形は
-    /// 覚えず、その時点の中身にある姿を使う：確定ではこの組を置いたあとに、確定で書く残りからその線を取り出してもう一度
-    /// 重ね（`FloatLayer::placed_on`）、持っている間はこの組の塗りの上に描く（`FloatingView::of`）。前は一部を確定すると、
-    /// 同じ組の線が塗りの下に入り、あとで塗りを確定すると線が覆われて消えた（設計審査 b7208d9 の 9. の「線が消える件」）
-    lines_over: Vec<ShapeId>,
+    /// 元の所は、持ち上げる前の絵のまま（`Origin::kept`。設計 claude/約束を入口で守る設計_5616fcc.md の 13 の 2.）。置かない組を
+    /// 置く組にするのは `Floating::place_all` だけ（書く残りから元の所を切り抜くのと一緒に行う。作り方は、置かない組 `new`・
+    /// 出どころの無い置く組 `new_placed`・地図だけ替える `replaced` で、どれも置かない組を置く組にしない：設計審査 01e4283 の
+    /// D-2。前は操作ごとに置く組の印を付けて `place_all` を呼び、呼び忘れると元の所の絵と片が二重に書かれえた）
+    placed: bool,
+    /// 上に重ねる線の形：この組の塗りより上に見えていた、一部の確定で先に書いた線の地図（線だけの地図。文書の座標。無ければ
+    /// 空。`Floating::split_off`）。使うときは、その時点の中身から、この形に沿う線を取り出す（`LayerBase::lines_along`）：
+    /// 確定ではこの組を置いたあとに、確定で書く残りからその線を取り出してもう一度重ね（`FloatLayer::placed_on`）、持っている
+    /// 間はこの組の塗りの上に描き（`FloatingView::of`）、持ち上げた線ならこの組のすぐ上に置く（`cut_layer`）。中身にもう無い
+    /// 所（動かした・消した・覆われた）は取り出されないので、幽霊の線は出ない。前は一部を確定すると、同じ組の線が塗りの下に
+    /// 入り、あとで塗りを確定すると線が覆われて消えた（設計審査 b7208d9 の 9.）。そのあと番号で覚えたので、線が切られて
+    /// 番号が変わると迷子になった（設計審査 01e4283 の D-1）
+    lines_over: StoredMap,
 }
 
 impl PieceGroup {
@@ -129,14 +135,22 @@ impl PieceGroup {
             fresh: Some(base),
             xform,
             placed: false,
-            lines_over: Vec::new(),
+            lines_over: StoredMap::from_dense(&PlanarMap::default(), None),
         }
     }
 
-    /// 確定で置く組にした写し
-    fn placed(mut self) -> Self {
-        self.placed = true;
-        self
+    /// 出どころの無い置く組（貼り付けた・複製した中身：書く残りに元の所が無いので、置く組にしてよい）
+    fn new_placed(map: CheckedMap, xform: Affine) -> Self {
+        Self { placed: true, ..Self::new(map, xform) }
+    }
+
+    /// 片の地図を `map` に替えた組（置く組か・変換・上に重ねる線は引き継ぐ）
+    fn replaced(&self, map: CheckedMap) -> Self {
+        Self {
+            placed: self.placed,
+            lines_over: self.lines_over.clone(),
+            ..Self::new(map, self.xform)
+        }
     }
 
     /// 片の地図の、計算に使う写し
@@ -203,11 +217,19 @@ impl PieceGroup {
         })
     }
 
-    /// 上に重ねる線を足す（番号の順。同じ番号はくり返さない）
-    fn add_lines_over(&mut self, ids: impl IntoIterator<Item = ShapeId>) {
-        self.lines_over.extend(ids);
-        self.lines_over.sort_unstable();
-        self.lines_over.dedup();
+    /// 上に重ねる線の形の地図（無ければ `None`）
+    fn lines_over_map(&self) -> Option<Arc<LayerBase>> {
+        (!self.lines_over.is_empty()).then(|| LayerBase::of_stored(&self.lines_over))
+    }
+
+    /// 上に重ねる線の形に、線だけの地図 `lines`（文書の座標）を足す（重ねる。同じ線は1本）。`None`：格子に置けない
+    fn add_lines_over(&mut self, lines: &[PlanarMap]) -> Option<()> {
+        let mut m = self.lines_over_map().map(|b| b.map().clone()).unwrap_or_default();
+        for l in lines {
+            m = m.overlay(MapInput::Map(l), MapRule::Overlay)?;
+        }
+        self.lines_over = StoredMap::from_dense(&m, Some(&self.lines_over));
+        Some(())
     }
 }
 
@@ -416,7 +438,7 @@ impl FloatLayer {
         if !self.still_on(place, cel) {
             return None;
         }
-        let next = self.committed_local(cel, scope)?;
+        let next = self.committed_local(cel)?;
         Some(cel.replace_local(&next, scope))
     }
 
@@ -426,23 +448,23 @@ impl FloatLayer {
     pub(crate) fn committed_local(
         &self,
         cel: &Arc<LayerBase>,
-        scope: &[u64],
     ) -> Option<crate::stored_map::StoredMap> {
-        self.placed_on(&self.kept_content(cel), scope)
+        self.placed_on(&self.kept_content(cel))
     }
 
-    /// 地図 `base`（階層 `scope`）に、置く組を下から順に重ねたしまう形（確定と、一部を確定したあとの残りの作り直しが使う
-    /// 重ね方はこれ1つ）。組ごとに、組を置いたあとに、その組の上に重ねる線（`PieceGroup::lines_over`）を `base` から取り出した
-    /// 線だけの地図を重ねる（色は両側とも前のまま、線の区間に線を乗せる：`MapRule::stroke`。`base` に無い線（持ち上げて
-    /// 動かした・消した）は重ねない。手間はその線の大きさの分：`LayerBase::only_faces_map`）
-    fn placed_on(&self, base: &Arc<LayerBase>, scope: &[u64]) -> Option<crate::stored_map::StoredMap> {
+    /// 地図 `base` に、置く組を下から順に重ねたしまう形（確定と、一部を確定したあとの残りの作り直しが使う重ね方はこれ1つ）。
+    /// 組ごとに、組を置いたあとに、その組の上に重ねる線の形（`PieceGroup::lines_over`）のうち、`base` に線がまだある所を
+    /// 重ね直す（`LayerBase::lines_along` の形：線だけの地図なので、色は両側とも前のまま、線の区間に線を乗せる。`base` に無い
+    /// 線（持ち上げて動かした・消した・覆われた）は重ねない。手間はその線の大きさの分）
+    fn placed_on(&self, base: &Arc<LayerBase>) -> Option<crate::stored_map::StoredMap> {
         base.stacked_local(self.groups.iter().filter(|g| g.placed).flat_map(|g| {
-            let lines = (!g.lines_over.is_empty())
-                .then(|| base.only_faces_map(&g.lines_over.iter().copied().collect(), scope))
+            let lines = g
+                .lines_over_map()
+                .map(|over| base.lines_along(over.map()).shape)
                 .filter(|m| !m.edges.is_empty())
                 .map(Some);
             std::iter::once(g.placed_map()).chain(lines)
-        }))
+        }), MapRule::Overlay)
     }
 }
 
@@ -511,21 +533,25 @@ impl FloatingView {
                     view.piece_groups.push(gi);
                 }
                 view.bases.push(base);
-                if !g.lines_over.is_empty() {
+                if let Some(over) = g.lines_over_map() {
                     let Some(content) = stage.cel(layer_id).map(|cel| l.content(&cel)) else {
                         continue;
                     };
-                    let lines = content.lines(scope);
-                    let at = Placement::AboveRaw(layer_id, scope.to_vec(), gi);
-                    for &id in &g.lines_over {
-                        if let Some(f) = lines.find_sorted(id, |s| s.shape_id) {
-                            let mut s = (**f).clone();
-                            s.layer_id = layer_id;
-                            s.place(world);
-                            view.lines_over.push((at.clone(), s));
-                        }
+                    // 見せる中身から取り出した上に重ねる線の形を、重なっている中身の線の番号で描く（確定で重ねる形と同じ）
+                    let along = content.lines_along(over.map());
+                    let mut m = along.shape;
+                    for (ed, &id) in m.edges.iter_mut().zip(&along.shape_ids) {
+                        ed.line_id = Some(id);
                     }
-                    view.bases.push(content);
+                    let base = LayerBase::of_stored(&StoredMap::from_dense(&m, None));
+                    let at = Placement::AboveRaw(layer_id, scope.to_vec(), gi);
+                    for f in base.drawn_shapes(scope).iter().filter(|f| f.line.is_some()) {
+                        let mut s = (**f).clone();
+                        s.layer_id = layer_id;
+                        s.place(world);
+                        view.lines_over.push((at.clone(), s));
+                    }
+                    view.bases.push(base);
                 }
             }
         }
@@ -589,7 +615,7 @@ impl Floating {
 
     /// 持っている組をみな置く組にする（動かす・色を変える・消す・グループやシンボルへ取り出す前）：組の元の所はみな切り
     /// 抜いたまま書く（確定で書く残りを、画面に見せる残りにそろえる）
-    pub(crate) fn place_all(&mut self) {
+    fn place_all(&mut self) {
         for l in &mut self.layers {
             if let Some(o) = &mut l.origin {
                 o.place_all();
@@ -670,7 +696,7 @@ impl Floating {
         };
         let same_group = |g: &PieceGroup, h: &PieceGroup| {
             let PieceGroup { map, fresh: _, xform, placed, lines_over } = g;
-            map.id() == h.map.id() && *xform == h.xform && *placed == h.placed && *lines_over == h.lines_over
+            map.id() == h.map.id() && *xform == h.xform && *placed == h.placed && lines_over.id() == h.lines_over.id()
         };
         let same_layer = |a: &FloatLayer, b: &FloatLayer| {
             let FloatLayer { layer_id, origin, groups } = a;
@@ -689,28 +715,44 @@ impl Floating {
 
     /// テスト用：見せる残りと確定で書く残りの関係の確かめ（浮いた片を書き換える入口が、テストでは毎回呼ぶ：
     /// `Session::put_floating`）：見せる残りに、置かない組を元の所に戻すと、書く残りと同じ塗りになる（2つの残りは別々の
-    /// 関数が書くので、どの操作で関係が崩れても、ここで止める：設計審査 4f8ef46 の D-1・D-2）。線は、戻すと切り口で辺が
-    /// 分かれたままになる（同じ線が2本の辺になる）ので比べない。塗りは、色ごとの塗った所（面積と外枠）で比べる（線で分かれた
+    /// 関数が書くので、どの操作で関係が崩れても、ここで止める：設計審査 4f8ef46 の D-1・D-2）。線は、色と太さごとの線の長さの
+    /// 合計と外枠で比べる（戻すと切り口で辺が分かれたままになる（同じ線が2本の辺になる）ので、線の図形の数や面積では比べない。
+    /// 前は線を比べなかったので、線だけが二重になる・消える食い違いを見逃しえた：設計審査 01e4283 の D-2）。塗りは、色ごとの
+    /// 塗った所（面積と外枠）で比べる（線で分かれた
     /// 同じ色の塗りは、戻すと1つにつながることがあるので、塗りの数では比べない。切り口の曲線は、戻すと地図の精度 `FLAT_TOL`
     /// の中でずれることがあるので、外枠は 1/20px、面積は 1px² まで同じとみなす）。`Err`：違う所
     #[cfg(test)]
     pub(crate) fn check_views(&self, scope: &[u64]) -> Result<(), String> {
-        type Painted = std::collections::BTreeMap<[u8; 4], (f64, [f64; 4])>;
+        // 塗り（色）と線（色と太さ）ごとの（面積か長さの合計, 外枠）
+        type Painted = std::collections::BTreeMap<([u8; 4], u8), (f64, [f64; 4])>;
         let painted = |m: &StoredMap| -> Painted {
+            use kurbo::ParamCurveArclen;
             let mut out = Painted::new();
-            for f in LayerBase::of_stored(m).drawn_shapes(scope).iter().filter(|f| f.line.is_none()) {
-                let area = f.exterior().signed_area().abs() - f.holes().iter().map(|h| h.signed_area().abs()).sum::<f64>();
-                let b = f.bounding_box();
-                let e = out.entry(f.color().to_array()).or_insert((0.0, [f64::MAX, f64::MAX, f64::MIN, f64::MIN]));
-                e.0 += area;
+            let mut add = |key: ([u8; 4], u8), amount: f64, b: kurbo::Rect| {
+                let e = out.entry(key).or_insert((0.0, [f64::MAX, f64::MAX, f64::MIN, f64::MIN]));
+                e.0 += amount;
                 e.1 = [e.1[0].min(b.x0), e.1[1].min(b.y0), e.1[2].max(b.x1), e.1[3].max(b.y1)];
+            };
+            let base = LayerBase::of_stored(m);
+            for f in base.drawn_shapes(scope).iter().filter(|f| f.line.is_none()) {
+                let area = f.exterior().signed_area().abs() - f.holes().iter().map(|h| h.signed_area().abs()).sum::<f64>();
+                add((f.color().to_array(), 0), area, f.bounding_box());
+            }
+            let map = base.map();
+            for (e, ed) in map.edges.iter().enumerate() {
+                if let Some(stroke) = ed.stroke {
+                    let q = map.quad(e);
+                    add((stroke.color.to_array(), stroke.width), q.arclen(1e-6), kurbo::Shape::bounding_box(&q));
+                }
             }
             out
         };
+        // 塗りの面積は 1px²、線の長さと外枠は 1/20px まで同じとみなす
         let same = |a: &Painted, b: &Painted| -> bool {
             a.len() == b.len()
-                && a.iter().zip(b).all(|((ca, (aa, ba)), (cb, (ab, bb)))| {
-                    ca == cb && (aa - ab).abs() <= 1.0 && ba.iter().zip(bb).all(|(x, y)| (x - y).abs() <= 0.05)
+                && a.iter().zip(b).all(|((ka, (aa, ba)), (kb, (ab, bb)))| {
+                    let tol = if ka.1 == 0 { 1.0 } else { 0.05 };
+                    ka == kb && (aa - ab).abs() <= tol && ba.iter().zip(bb).all(|(x, y)| (x - y).abs() <= 0.05)
                 })
         };
         for l in &self.layers {
@@ -719,12 +761,12 @@ impl Floating {
             };
             let back = crate::planar_map::uncounted(|| {
                 o.base()
-                    .stacked_local(l.groups.iter().filter(|g| !g.placed).map(|g| Some(g.base().map().clone())))
+                    .stacked_local(l.groups.iter().filter(|g| !g.placed).map(|g| Some(g.base().map().clone())), MapRule::Restore)
             })
             .ok_or("置かない組を戻せない")?;
             let (shown, kept) = crate::planar_map::uncounted(|| (painted(&back), painted(&o.kept)));
             if !same(&shown, &kept) {
-                return Err(format!("レイヤー {}：見せる残り＋置かない組 {shown:?} と書く残り {kept:?} の塗りが違う", l.layer_id));
+                return Err(format!("レイヤー {}：見せる残り＋置かない組 {shown:?} と書く残り {kept:?} の塗りか線が違う", l.layer_id));
             }
         }
         Ok(())
@@ -807,15 +849,14 @@ impl Floating {
         color: Color32,
         layers: &HashSet<LayerId>,
     ) -> Result<bool, Unplaceable> {
-        let mut next: Vec<(usize, usize, PieceGroup)> = Vec::new();
+        let mut next: Vec<(usize, usize, CheckedMap)> = Vec::new();
         for (li, l) in self.layers.iter().enumerate() {
             if !layers.contains(&l.layer_id) {
                 continue;
             }
             for (gi, g) in l.groups.iter().enumerate() {
                 if let Some(m) = g.base().map().recolored(ids, color) {
-                    let m = m.checked().ok_or(Unplaceable)?;
-                    next.push((li, gi, PieceGroup::new(m, g.xform).placed()));
+                    next.push((li, gi, m.checked().ok_or(Unplaceable)?));
                 }
             }
         }
@@ -823,8 +864,9 @@ impl Floating {
         if any {
             self.place_all();
         }
-        for (li, gi, g) in next {
-            self.layers[li].groups[gi] = g;
+        for (li, gi, m) in next {
+            let g = &mut self.layers[li].groups[gi];
+            *g = g.replaced(m);
         }
         Ok(any)
     }
@@ -849,7 +891,7 @@ impl Floating {
         let Some(next) = edit(g.base().map()).and_then(PlanarMap::checked) else {
             return false;
         };
-        *g = PieceGroup::new(next, g.xform).placed();
+        *g = g.replaced(next);
         true
     }
 
@@ -883,7 +925,7 @@ impl Floating {
             // （`replace_local`）。残りはセル画に対する答え
             let content = l.content(&cel);
             let Some(next) =
-                content.stacked_local(back.iter().map(|g| Some(g.base().map().clone())))
+                content.stacked_local(back.iter().map(|g| Some(g.base().map().clone())), MapRule::Restore)
             else {
                 return false;
             };
@@ -917,7 +959,7 @@ impl Floating {
                 // 残す塗りより上に見えているので、その下のいちばん近い残す組（同じ組の残す片か、無ければ下の組）に「上に
                 // 重ねる線」として覚える（`PieceGroup::lines_over`。上の組の残す塗りは、今までどおり線を覆う）
                 let (mut dropped, mut kept, mut cover) = (Vec::new(), Vec::new(), Vec::new());
-                let mut lines_above: Vec<ShapeId> = Vec::new();
+                let mut lines_above: Vec<PlanarMap> = Vec::new();
                 for g in l.groups.iter().rev() {
                     let k = match g.restricted(keep, scope) {
                         Some(k) => k.erased(&cover)?,
@@ -925,11 +967,17 @@ impl Floating {
                     };
                     if let Some(d) = g.restricted(&drop, scope) {
                         cover.push(d.placed_map().ok_or(Unplaceable)?);
-                        lines_above.extend(d.ids().into_iter().filter(|&id| is_line_id(id)));
+                        let line_ids: HashSet<ShapeId> = d.ids().into_iter().filter(|&id| is_line_id(id)).collect();
+                        if let Some(lines) = d.restricted(&line_ids, scope) {
+                            lines_above.push(lines.placed_map().ok_or(Unplaceable)?);
+                        }
                         dropped.push(d);
                     }
                     if let Some(mut k) = k {
-                        k.add_lines_over(lines_above.drain(..));
+                        if !lines_above.is_empty() {
+                            k.add_lines_over(&lines_above).ok_or(Unplaceable)?;
+                            lines_above.clear();
+                        }
                         kept.push(k);
                     }
                 }
@@ -977,7 +1025,7 @@ impl Floating {
             let (Some(cel), Some(place)) = (stage.cel(l.layer_id), stage.place(l.layer_id)) else {
                 return false;
             };
-            let Some(rest) = done.placed_on(&o.base(), stage.scope()) else {
+            let Some(rest) = done.placed_on(&o.base()) else {
                 return false;
             };
             l.origin = match cel.replace_local(&rest, stage.scope()) {
@@ -992,8 +1040,19 @@ impl Floating {
     /// 確かめた地図 `map`（文書の座標。面の番号が片の番号）を、変換 `xform` をかける片の組として、レイヤー `layer_id` の
     /// 一番上に足す（変換は、動かした片と同じく確定のときに地図にかける）
     pub(crate) fn add_map(&mut self, layer_id: LayerId, map: CheckedMap, xform: Affine) {
-        let group = PieceGroup::new(map, xform).placed();
+        let group = PieceGroup::new_placed(map, xform);
         self.layer_mut(layer_id).groups.push(group);
+    }
+
+    /// 番号が `keep` の片を、元の所から取り出す（シンボルの中身に入れる：元の所は切り抜いたまま書く。組をみな置く組にして
+    /// から `split_off`）。この浮いた片には取り出した片が残り、確定する分（残りと、ほかの片）を返す。`Err`：片の地図が
+    /// 正しい地図にならない（何も変えない：組を置く組にするのも、分けられると分かってから）
+    pub(crate) fn take_out(&mut self, keep: &HashSet<ShapeId>, scope: &[u64]) -> Result<Floating, Unplaceable> {
+        let mut next = self.clone();
+        next.place_all();
+        let rest = next.split_off(keep, scope)?;
+        *self = next;
+        Ok(rest)
     }
 
     /// 片を捨てる（削除：残りだけを確定する。持ち上げた所はみな切り抜いたまま書く）
@@ -1078,32 +1137,27 @@ fn cut_layer(
     // 上の組から順に、その組の上に重ねる線だった線を、その組のすぐ上に入れる（入れても下の組の番号は変わらない）
     let mut lifted = PieceGroup::new(inside, Affine::IDENTITY);
     for gi in (0..groups.len()).rev() {
-        if groups[gi].lines_over.is_empty() {
+        let Some(shape) = groups[gi].lines_over_map() else {
+            continue;
+        };
+        // 組の上に重ねる線（確定・見た目と同じ形：`LayerBase::lines_along`）を、その組のすぐ上の組にし、持ち上げた片から除く
+        let over = lifted.base().lines_along(shape.map()).shape;
+        if over.edges.is_empty() {
             continue;
         }
-        let over: HashSet<ShapeId> = lifted
-            .ids()
-            .into_iter()
-            .filter(|id| groups[gi].lines_over.binary_search(id).is_ok())
-            .collect();
-        if over.is_empty() {
-            continue;
+        let rest = lifted.base().map().overlay(MapInput::Map(&over), MapRule::Paint(None))?;
+        groups.insert(gi + 1, PieceGroup::new(over.checked()?, Affine::IDENTITY));
+        if rest.edges.is_empty() {
+            return Some(FloatLayer { layer_id, origin, groups });
         }
-        let rest: HashSet<ShapeId> = lifted.ids().into_iter().filter(|id| !over.contains(id)).collect();
-        if let Some(g) = lifted.restricted(&over, stage.scope()) {
-            groups.insert(gi + 1, g);
-        }
-        match lifted.restricted(&rest, stage.scope()) {
-            Some(g) => lifted = g,
-            None => return Some(FloatLayer { layer_id, origin, groups }),
-        }
+        lifted = PieceGroup::new(rest.checked()?, Affine::IDENTITY);
     }
     match groups.first_mut() {
         Some(g) if !g.placed => {
             let joined = g
                 .base()
                 .map()
-                .overlay(MapInput::Map(lifted.base().map()), MapRule::Overlay)?
+                .overlay(MapInput::Map(lifted.base().map()), MapRule::Restore)?
                 .checked()?;
             *g = PieceGroup {
                 lines_over: g.lines_over.clone(),

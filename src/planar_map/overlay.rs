@@ -36,12 +36,20 @@ pub(crate) enum MapRule {
     KeepInside,
     /// 重ねる地図の色のある所を、その色にする（何も無い所は前のまま）。持ち上げた片を置く・貼り付け
     Overlay,
+    /// 戻す：重ねる地図の色のある所を、その色にする（`Overlay` と同じ）が、前からある線は消さない（重ねる地図の線は乗せる）。
+    /// 動かしていない片を残りに戻す・動かしていない片どうしを1つにまとめる（同じレイヤーの絵では線はいつも塗りの上にあるので、
+    /// 動かしていない塗りは元どおり線の下に戻る。前は `Overlay` で戻したので、戻した塗りの内側を通っていた線が消えた：設計審査
+    /// 01e4283 の D-2）
+    Restore,
     /// 輪郭の変形（重ねるものは `MapInput::Sweep`）。前の色と、動かしたことによる色ごとの巻き数の変わり方で決める
     /// （`swept_color`）
     Sweep,
     /// 線を引く（鉛筆。重ねるものは `MapInput::Lines`）。色は両側とも前のまま、引いた線の区間に線を乗せる（設計：
     /// claude/線の設計_68a596e.md の 6.2 の (b)）
     Line,
+    /// 沿う線を取り出す（重ねるものは線の地図）：色はみな消し、重ねる線が通る区間だけ前の線を残す（ほかの線は消す）。
+    /// 浮いた片の上に重ねる線を、その時点の中身から形で取り出す（`LayerBase::lines_along`。設計審査 01e4283 の D-1）
+    Along,
 }
 
 /// 区間の片側（または中の辺）での、重ねるものの値
@@ -60,7 +68,7 @@ impl MapRule {
     pub(super) fn apply_label(self, over: &Over, over_src: Option<ShapeId>, old: Label) -> Label {
         let color = self.apply(over, old.0);
         let src = match (self, over) {
-            (MapRule::Overlay, Over::Color(Some(_))) => over_src,
+            (MapRule::Overlay | MapRule::Restore, Over::Color(Some(_))) => over_src,
             // 引いた線の区間の色の無い側は、引いた線のラベル
             (MapRule::Line, _) if old.0.is_none() => over_src.or(old.1),
             _ if color == old.0 => old.1,
@@ -86,9 +94,12 @@ impl MapRule {
         input: Option<Option<EdgeStroke>>,
         old: Option<EdgeStroke>,
     ) -> Option<EdgeStroke> {
+        if self == MapRule::Along {
+            return if matches!(input, Some(Some(_))) { old } else { None };
+        }
         let input = match (self, input) {
             (MapRule::Paint(_), Some(Some(_))) => return None,
-            (MapRule::Paint(_) | MapRule::Overlay, Some(None)) => None,
+            (MapRule::Paint(_) | MapRule::Overlay | MapRule::Restore, Some(None)) => None,
             (_, input) => input,
         };
         match input {
@@ -115,8 +126,9 @@ impl MapRule {
         match (self, over) {
             (MapRule::Paint(c), Over::Inside(true) | Over::Color(Some(_))) => c,
             (MapRule::KeepInside, Over::Inside(false) | Over::Color(None)) => None,
-            (MapRule::Overlay, Over::Color(Some(p))) => Some(*p),
+            (MapRule::Overlay | MapRule::Restore, Over::Color(Some(p))) => Some(*p),
             (MapRule::Sweep, Over::Swept(w)) => swept_color(old, w),
+            (MapRule::Along, _) => None,
             _ => old,
         }
     }
@@ -649,7 +661,7 @@ impl PlanarMap {
         if new_quads.is_empty() {
             // 重ねるものが無い：外は前のまま（中だけ残すなら、何も残らない）
             return Some(rules.map(|rule| match rule {
-                MapRule::KeepInside => PlanarMap::default(),
+                MapRule::KeepInside | MapRule::Along => PlanarMap::default(),
                 _ => self.clone(),
             }));
         }
@@ -1299,7 +1311,7 @@ impl PlanarMap {
         use i_overlay9::core::overlay::ShapeType;
         use i_overlay9::vector::edge::{CLIP_LEFT, CLIP_RIGHT};
         // 外が前のままの決まりのときだけ、重ねるものから離れた辺をそのまま残す
-        let copies_untouched = |rule: MapRule| rule != MapRule::KeepInside;
+        let copies_untouched = |rule: MapRule| !matches!(rule, MapRule::KeepInside | MapRule::Along);
         // 重ねる線ごとの乗せた線（下で `lines` の名前を区間の線の並びに使うので、先に取る）
         let new_strokes = &lines.lines.strokes;
         let copy_any = rules.iter().any(|&r| copies_untouched(r));

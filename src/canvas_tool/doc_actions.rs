@@ -99,11 +99,6 @@ pub(crate) enum Action {
         points: Vec<Point>,
         radius: f32,
     },
-    /// テスト用：閉じた折れ線 `raw`（NonZero で塗る）を、そのまま直線の輪郭の形にして、今のツールで塗る・消す
-    #[cfg(test)]
-    CommitRawOutline {
-        raw: Vec<Point>,
-    },
     BucketFill {
         pt: Point,
         color: Color32,
@@ -112,11 +107,6 @@ pub(crate) enum Action {
     PencilStroke {
         points: Vec<Point>,
         stroke: crate::planar_map::EdgeStroke,
-    },
-    /// テスト用：線の区間 `segs`（ステージの座標）を、作業中のレイヤーの編集中の階層に引く（鉛筆と同じ道）
-    #[cfg(test)]
-    DrawLines {
-        segs: Vec<crate::planar_map::LineSeg>,
     },
     /// インクボトル：点の線か、点を含む面の輪郭に、線 `stroke` を乗せる
     InkBottle {
@@ -139,15 +129,10 @@ pub(crate) enum Action {
         p1: Point,
         additive: bool,
     },
-    #[cfg(test)]
+    /// すべてを選択（編集メニュー・Cmd+A）：今の階層の、編集できるレイヤーの今のコマの図形をみな丸ごと選ぶ（Animate と同じ。
+    /// 持ち主が足すと決めた：2026-11-27。設計審査 01e4283 の直し 5.）
     SelectAll,
     Deselect,
-    #[cfg(test)]
-    CommitFloating,
-    #[cfg(test)]
-    MoveSelected {
-        delta: KVec2,
-    },
     NudgeSelection {
         delta: KVec2,
     },
@@ -195,16 +180,6 @@ pub(crate) enum Action {
         /// まわりがついてくる引っぱりか（`ReshapeEdit::vertex`）
         follow: bool,
     },
-    #[cfg(test)]
-    PullEdgeFromTo {
-        from: Point,
-        to: Point,
-    },
-    #[cfg(test)]
-    MoveVertexFromTo {
-        from: Point,
-        to: Point,
-    },
     AddAnchor {
         pt: Point,
     },
@@ -213,21 +188,12 @@ pub(crate) enum Action {
     },
 
     // 自由変形・ピボット
-    #[cfg(test)]
-    ScaleSelection {
-        sx: f64,
-        sy: f64,
-    },
     FlipSelection {
         flip_x: bool,
         flip_y: bool,
     },
     RotateSelection {
         angle_rad: f64,
-    },
-    #[cfg(test)]
-    SetTransformPivot {
-        world_pivot: Option<Point>,
     },
     ResetTransformPivot,
     CommitTransformDrag {
@@ -261,12 +227,6 @@ pub(crate) enum Action {
     },
     EnterSymbolFromLibrary {
         sym_id: u64,
-    },
-    #[cfg(test)]
-    ExitSymbolTimeline,
-    #[cfg(test)]
-    ExitSymbolToDepth {
-        depth: usize,
     },
     RenameSymbol {
         sym_id: u64,
@@ -412,8 +372,6 @@ impl Action {
                 step(CommitFirst).canvas()
             }
             Self::InkBottle { .. } => step(CommitFirst),
-            #[cfg(test)]
-            Self::CommitRawOutline { .. } | Self::DrawLines { .. } => step(CommitFirst).canvas(),
             // 選んでいれば持ち上げた絵の色を変え、選んでいなければセル画を塗る（持ち上げた絵がある間は選択がある）
             Self::BucketFill { .. } => step(Handles).canvas(),
             // 選ぶ・外す（持ち上げた絵の扱いは操作が決める。取り消しの1手にしない）
@@ -424,21 +382,14 @@ impl Action {
             Self::SelectMarquee { additive, .. } | Self::SelectConnectedAt { add: additive, .. } => {
                 none(if *additive { Handles } else { CommitFirst }).canvas()
             }
-            #[cfg(test)]
             Self::SelectAll => none(CommitFirst).canvas(),
-            #[cfg(test)]
-            Self::CommitFloating => none(CommitFirst),
             // 選んだものを動かす・変形する（持ち上げた絵を動かす）
             Self::NudgeSelection { .. } => coalesce(Handles, CoalesceKey::NudgeSelection),
-            #[cfg(test)]
-            Self::MoveSelected { .. } | Self::ScaleSelection { .. } => step(Handles),
             Self::FlipSelection { .. } | Self::RotateSelection { .. } => step(Handles),
             Self::FinishMoveSelectionDrag { .. } | Self::CommitTransformDrag { .. } => step(Handles).finishing(),
             // 中心点（インスタンスの中心点を書く。持ち上げた絵は使わない）
             Self::ResetTransformPivot => step(Handles),
             Self::CommitPivotDrag { .. } => step(Handles).finishing(),
-            #[cfg(test)]
-            Self::SetTransformPivot { .. } => step(Handles),
             // 選んだものを消す・まとめる・解く・重ね順（持ち上げた絵を自分で扱う。重ね順は貼り戻してから並べる）
             Self::DeleteSelection | Self::Cut | Self::Group | Self::Ungroup => step(Handles),
             Self::ConvertToSymbol => step(Handles).canvas(),
@@ -448,10 +399,6 @@ impl Action {
             Self::Paste { .. } | Self::PlaceSymbol { .. } => step(CommitFirst).canvas(),
             // 輪郭の変形・アンカー（アンカーは、持ち上げた絵の上なら、その地図を編集する）
             Self::ReshapeEdge { .. } | Self::MoveVertex { .. } => step(CommitFirst).finishing().canvas(),
-            #[cfg(test)]
-            Self::PullEdgeFromTo { .. } | Self::MoveVertexFromTo { .. } => {
-                step(CommitFirst).finishing().canvas()
-            }
             Self::AddAnchor { .. } | Self::DeleteAnchor { .. } => step(Handles).canvas(),
             // 見る場所を変える（グループ・シンボル・コマ）。見る場所を変える入口（`Tab::move_view`・`Tab::set_active_frame`）
             // が先に貼り戻す（入口は1つ：設計 claude/約束を入口で守る設計_5616fcc.md の 3.）
@@ -460,8 +407,6 @@ impl Action {
                 none(Handles)
             }
             Self::SwitchLayerAndFrame { .. } | Self::SelectTimelineCells { .. } => none(Handles).timeline(),
-            #[cfg(test)]
-            Self::ExitSymbolTimeline | Self::ExitSymbolToDepth { .. } => none(Handles),
             Self::ClearTimelineCells => none(Untouched),
             // シンボル
             Self::RenameSymbol { sym_id, .. } => coalesce(Untouched, CoalesceKey::RenameSymbol(*sym_id)),
@@ -990,15 +935,8 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             let shapes = stroke_shapes_in_view(tab, &points, radius, tool.brush_color);
             apply_stroke_shapes(tab, Tool::Eraser, shapes)
         }
-        #[cfg(test)]
-        Action::CommitRawOutline { raw } => {
-            let shapes = crate::vector_stroke::polygon_shapes(&raw, tool.brush_color);
-            apply_stroke_shapes(tab, tool.tool, shapes)
-        }
         Action::BucketFill { pt, color } => apply_bucket_fill(tab, color, pt),
         Action::InkBottle { pt, stroke } => apply_ink_bottle(tab, stroke, pt),
-        #[cfg(test)]
-        Action::DrawLines { segs } => apply_draw_lines(tab, segs),
         Action::PencilStroke { points, stroke } => {
             if !stroke_fits_grid(tab, &points, f64::from(stroke.width)) {
                 return false;
@@ -1025,7 +963,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             apply_marquee_selection(tab, p0, p1, additive);
             !tab.session.selection().is_empty()
         }
-        #[cfg(test)]
         Action::SelectAll => {
             if !clear_selection(tab) {
                 return false;
@@ -1036,10 +973,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             !tab.session.selection().is_empty()
         }
         Action::Deselect => clear_selection(tab),
-        #[cfg(test)]
-        Action::CommitFloating => commit_floating(tab),
-        #[cfg(test)]
-        Action::MoveSelected { delta } => apply_move_selected(tab, delta),
         Action::NudgeSelection { delta } => apply_move_selected(tab, delta),
         Action::FinishMoveSelectionDrag {
             total_delta,
@@ -1095,20 +1028,9 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             (orig_vertex, target_pos),
             ReshapeEdit::vertex(orig_vertex, target_pos, follow),
         ),
-        #[cfg(test)]
-        Action::PullEdgeFromTo { from, to } => apply_pull_edge_from_to(tab, from, to),
-        #[cfg(test)]
-        Action::MoveVertexFromTo { from, to } => apply_move_vertex_from_to(tab, from, to),
         Action::AddAnchor { pt } => apply_anchor_edit_at(tab, pt, true),
         Action::DeleteAnchor { pt } => apply_anchor_edit_at(tab, pt, false),
 
-        #[cfg(test)]
-        Action::ScaleSelection { sx, sy } => {
-            let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
-                return false;
-            };
-            apply_affine_to_selected_inner(tab, affine_scale_around(pivot, sx, sy))
-        }
         Action::FlipSelection { flip_x, flip_y } => {
             let Some((_, pivot)) = tab.session.selection_bbox_and_pivot(tab.view.zoom()) else {
                 return false;
@@ -1123,16 +1045,13 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             };
             apply_affine_to_selected_inner(tab, affine_rotate_around(pivot, angle_rad))
         }
-        #[cfg(test)]
-        Action::SetTransformPivot { world_pivot } => {
-            apply_set_selected_symbol_world_pivot(tab, world_pivot)
-        }
         Action::ResetTransformPivot => {
-            let mut changed = tab.session.transform_pivot.take().is_some();
-            if apply_set_selected_symbol_world_pivot(tab, None) {
-                changed = true;
+            let had_custom = tab.session.transform_pivot.take().is_some();
+            match apply_set_selected_symbol_world_pivot(tab, None) {
+                PivotWrite::Done => true,
+                PivotWrite::NoSymbol => had_custom,
+                PivotWrite::Refused => false,
             }
-            changed
         }
         Action::CommitTransformDrag {
             affine,
@@ -1159,12 +1078,17 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             changed,
         } => {
             if changed {
-                if apply_set_selected_symbol_world_pivot(tab, Some(new_pivot)) {
-                    tab.session.transform_pivot = None;
-                } else {
-                    tab.session.transform_pivot = Some(new_pivot);
+                match apply_set_selected_symbol_world_pivot(tab, Some(new_pivot)) {
+                    PivotWrite::Done => {
+                        tab.session.transform_pivot = None;
+                        true
+                    }
+                    PivotWrite::NoSymbol => {
+                        tab.session.transform_pivot = Some(new_pivot);
+                        true
+                    }
+                    PivotWrite::Refused => false,
                 }
-                true
             } else {
                 tab.session.transform_pivot = had_custom_pivot.then_some(orig_pivot);
                 false
@@ -1205,19 +1129,6 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
         }
         Action::EnterSymbolTimeline { instance_gid } => enter_symbol_timeline(tab, instance_gid),
         Action::EnterSymbolFromLibrary { sym_id } => enter_symbol_from_library(tab, sym_id),
-        #[cfg(test)]
-        Action::ExitSymbolTimeline => crate::symbol_ops::exit_symbol_timeline(tab),
-        #[cfg(test)]
-        Action::ExitSymbolToDepth { depth } => {
-            let mut exited = false;
-            while tab.session.edit_path().len() > depth {
-                if !crate::symbol_ops::exit_symbol_timeline(tab) {
-                    break;
-                }
-                exited = true;
-            }
-            exited
-        }
         Action::RenameSymbol { sym_id, new_name } => {
             tab.doc.rename_symbol(sym_id, new_name)
         }
@@ -1639,8 +1550,10 @@ fn transform_selected_shapes(tab: &mut Tab, affine: Affine, pivot_to_instance: b
     }
     if pivot_to_instance {
         if let Some(piv) = tab.session.transform_pivot {
-            if apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
-                tab.session.transform_pivot = None;
+            match apply_set_selected_symbol_world_pivot(tab, Some(piv)) {
+                PivotWrite::Done => tab.session.transform_pivot = None,
+                PivotWrite::NoSymbol => {}
+                PivotWrite::Refused => return false,
             }
         }
     }
@@ -1789,71 +1702,6 @@ fn apply_map_edit(
     changed
 }
 
-#[cfg(test)]
-fn apply_pull_edge_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
-    if !clear_selection(tab) {
-        return false;
-    }
-    let target = compute_hover_target(
-        tab.scene(),
-        &tab.session,
-        from,
-        tab.view.zoom(),
-        SelectSubMode::Reshape,
-    );
-    let HoverTarget::Edge {
-        t,
-        map_edge: Some((MapOwner::Layer(layer_id), orig_seg)),
-        ..
-    } = target
-    else {
-        return false;
-    };
-    let grab_t = crate::planar_map::grab_t(t);
-    let target = tab.session.edit_path().world_xform().inverse() * to;
-    let follow = crate::tool_select::drag_follows(tab);
-    apply_map_reshape(
-        tab,
-        layer_id,
-        (orig_seg.eval(grab_t), target),
-        ReshapeEdit::PullEdge {
-            orig_seg,
-            grab_t,
-            target,
-            follow,
-        },
-    )
-}
-
-#[cfg(test)]
-fn apply_move_vertex_from_to(tab: &mut Tab, from: Point, to: Point) -> bool {
-    if !clear_selection(tab) {
-        return false;
-    }
-    let target = compute_hover_target(
-        tab.scene(),
-        &tab.session,
-        from,
-        tab.view.zoom(),
-        SelectSubMode::Reshape,
-    );
-    let HoverTarget::Vertex {
-        map_node: Some((MapOwner::Layer(layer_id), orig_vertex)),
-        ..
-    } = target
-    else {
-        return false;
-    };
-    let target = tab.session.edit_path().world_xform().inverse() * to;
-    let follow = crate::tool_select::drag_follows(tab);
-    apply_map_reshape(
-        tab,
-        layer_id,
-        (orig_vertex, target),
-        ReshapeEdit::vertex(orig_vertex, target, follow),
-    )
-}
-
 fn apply_anchor_edit_at(tab: &mut Tab, pt: Point, is_add: bool) -> bool {
     let zoom = tab.view.zoom();
     let sub_mode = if is_add {
@@ -1912,34 +1760,48 @@ fn edit_floating_anchor(tab: &mut Tab, layer_id: LayerId, group: usize, edit: An
     true
 }
 
-fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> bool {
+/// 選んでいるシンボル1つの中心点を書いた答え（`apply_set_selected_symbol_world_pivot`）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PivotWrite {
+    /// シンボルを1つ選んでいない（中心点は選んでいるものの仮の中心点：`Session::transform_pivot`）
+    NoSymbol,
+    /// 書いた（同じ所なら書かずに済んだ）
+    Done,
+    /// 書けない（置けない座標・逆に写せない変換・書く入口が断った。知らせは `Session::refusal`）
+    Refused,
+}
+
+/// 選んでいるシンボル1つの中心点を、ステージの点 `world_pivot`（`None` ならシンボルの原点）にする。書けなければ断る
+/// （操作ごと断る：呼ぶ側は `Refused` で `false` を返す。前は書けないのとシンボルを選んでいないのを同じ `false` で返したので、
+/// 中心点のドラッグが書けなかった点を仮の中心点にして、成功と返した：設計審査 01e4283 の直し 5. で見つかった）
+fn apply_set_selected_symbol_world_pivot(tab: &mut Tab, world_pivot: Option<Point>) -> PivotWrite {
     let Some(binding) = tab
         .scene()
         .selected_single_symbol_binding(tab.session.selection())
     else {
-        return false;
+        return PivotWrite::NoSymbol;
     };
     let new_local_pivot = match world_pivot {
         Some(pt) => {
             if !crate::vector_engine::invertible(binding.xform) {
-                return false;
+                tab.session.refusal = Some(crate::canvas_tool::Refusal::OffGrid);
+                return PivotWrite::Refused;
             }
             binding.xform.inverse() * pt
         }
         None => Point::ZERO,
     };
     if crate::vector_engine::same_pivot(new_local_pivot, binding.pivot) {
-        return true;
+        return PivotWrite::Done;
     }
     // 変形の確定（apply_affine_to_selected_inner）から呼ぶときは、もう控えがあるので何もしない
     let inst_gid = binding.instance_gid;
     let layer_ids = editable_layer_ids(tab);
-    update_instances(
-        tab,
-        &layer_ids,
-        |gid| gid == inst_gid,
-        |b| b.pivot = new_local_pivot,
-    )
+    if update_instances(tab, &layer_ids, |gid| gid == inst_gid, |b| b.pivot = new_local_pivot) {
+        PivotWrite::Done
+    } else {
+        PivotWrite::Refused
+    }
 }
 
 fn apply_affine_to_selected_inner(tab: &mut Tab, affine: Affine) -> bool {
@@ -2374,11 +2236,6 @@ fn apply_set_fps(tab: &mut Tab, next_fps: u32) -> bool {
 // ============================================================================
 
 #[cfg(test)]
-pub(in crate::canvas_tool) fn commit_raw_outline(host: &mut impl ActionHost, raw: &[Point]) {
-    apply(host, Action::CommitRawOutline { raw: raw.to_vec() });
-}
-
-#[cfg(test)]
 pub(in crate::canvas_tool) fn bucket_fill_at(host: &mut impl ActionHost, pt: Point) -> bool {
     let color = host.tool().brush_color;
     apply(host, Action::BucketFill { pt, color })
@@ -2445,19 +2302,6 @@ pub(in crate::canvas_tool) fn cut_selected_shapes(host: &mut impl ActionHost) ->
 #[cfg(test)]
 pub(in crate::canvas_tool) fn paste_clipboard(host: &mut impl ActionHost, in_place: bool) -> bool {
     apply(host, Action::Paste { in_place })
-}
-
-#[cfg(test)]
-pub(in crate::canvas_tool) fn set_selected_symbol_world_pivot(
-    host: &mut impl ActionHost,
-    world_pivot: Option<Point>,
-) -> bool {
-    apply(host, Action::SetTransformPivot { world_pivot })
-}
-
-#[cfg(test)]
-pub(in crate::canvas_tool) fn scale_selected_shapes(host: &mut impl ActionHost, sx: f64, sy: f64) -> bool {
-    apply(host, Action::ScaleSelection { sx, sy })
 }
 
 #[cfg(test)]

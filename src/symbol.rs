@@ -666,6 +666,37 @@ pub(crate) fn stage_size_of(size: Vec2) -> Option<Vec2> {
         .then(|| size.clamp(Vec2::splat(STAGE_MIN), STAGE_MAX))
 }
 
+/// 作品の番号の数え札（シンボル・グループ・音・レイヤー。番号の配り方の決まりはこの型の1つ：設計審査 01e4283 の D-4。前は
+/// 音は足すだけ・レイヤーは上限で止める・グループとシンボルは上限で 1 に戻る、の3通りで、上限で止める・1 に戻るは、今ある
+/// 番号とぶつかりえた）。0 は配らない。取り消しでは戻さない（`Document::counters`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Counter(u64);
+
+impl Counter {
+    /// 次に配る番号が `next` の数え札（0 なら 1 から）
+    pub(crate) fn starting_at(next: u64) -> Self {
+        Self(next.max(1))
+    }
+
+    /// 次に配る番号（保存する値）
+    pub(crate) fn next(self) -> u64 {
+        self.0
+    }
+
+    /// 番号を1つ配る。使い切ったら（次の番号が数の上限を超えたら）計算を止める：止まった操作は入口の砦が操作の前に戻す
+    /// ので、番号は決してぶつからない（2^64 個で、1秒に10億個配っても約580年。持ち主の了解：2026-11-27）
+    pub(crate) fn take(&mut self) -> u64 {
+        let id = self.0;
+        self.0 = id.checked_add(1).expect("作品の番号を使い切った");
+        id
+    }
+
+    /// 番号 `id` より先へ進める（よそから持ち込んだ番号を、これから配らない）
+    pub(crate) fn advance_past(&mut self, id: u64) {
+        self.0 = self.0.max(id.checked_add(1).expect("作品の番号を使い切った"));
+    }
+}
+
 /// 保存対象の文書状態（唯一の正解データ：ルートタイムライン・シンボルライブラリ・ステージサイズ・ID採番・リビジョン）
 #[derive(Clone, Debug)]
 pub(crate) struct Document {
@@ -680,13 +711,13 @@ pub(crate) struct Document {
     /// いつも `stage_size_of` で決めた大きさ
     pub(crate) stage_size: Vec2,
     pub(crate) fps: u32,
-    pub(crate) next_symbol_id: u64,
-    pub(crate) next_group_id: u64,
+    pub(crate) next_symbol_id: Counter,
+    pub(crate) next_group_id: Counter,
     /// 次に読み込む音の番号
-    pub(crate) next_sound_id: u64,
+    pub(crate) next_sound_id: Counter,
     /// 次に足すレイヤーの番号（ルートとシンボルのどのタイムラインのレイヤーの番号よりも後。取り消しで戻さない：設計審査
     /// b7208d9 の 7.。前はタイムラインの数え札で、取り消すと戻り、同じ番号をまた使った）
-    pub(crate) next_layer_id: u64,
+    pub(crate) next_layer_id: Counter,
     /// `library` の内容変更世代番号（シンボルのプレビューの一時キャッシュの鍵）
     pub(crate) revision: u64,
     /// ファイルから読んだ地図のうち、使うときに確かめて壊れていたものの場所（画面が取り出して知らせる）
@@ -698,9 +729,9 @@ pub(crate) struct Document {
 /// 音を足す・グループの番号を取る決まりはここの1つ（文書の同じ名前の関数は、これを呼ぶだけ）
 pub(crate) struct DocParts<'a> {
     sounds: &'a mut crate::sound::SoundLibrary,
-    next_sound_id: &'a mut u64,
-    next_group_id: &'a mut u64,
-    next_layer_id: &'a mut u64,
+    next_sound_id: &'a mut Counter,
+    next_group_id: &'a mut Counter,
+    next_layer_id: &'a mut Counter,
     pub(crate) fps: u32,
 }
 
@@ -712,8 +743,7 @@ impl DocParts<'_> {
 
     /// 音 `sound` を、新しい番号を付けて音のライブラリの終わりに足し、その番号を返す
     pub(crate) fn add_sound(&mut self, mut sound: crate::sound::Sound) -> u64 {
-        let id = *self.next_sound_id;
-        *self.next_sound_id += 1;
+        let id = self.next_sound_id.take();
         sound.id = id;
         self.sounds.push_new(Arc::new(sound));
         id
@@ -721,16 +751,12 @@ impl DocParts<'_> {
 
     /// 新しいレイヤーの番号（作品の数え札から：どのタイムラインのレイヤーの番号とも重ならない）
     pub(crate) fn alloc_layer_id(&mut self) -> u64 {
-        let id = (*self.next_layer_id).max(1);
-        *self.next_layer_id = id.saturating_add(1);
-        id
+        self.next_layer_id.take()
     }
 
     /// 新しいグループ / シンボルインスタンス用の一意な `group_id`
     pub(crate) fn alloc_group_id(&mut self) -> u64 {
-        let id = (*self.next_group_id).max(1);
-        *self.next_group_id = if id < u64::MAX { id + 1 } else { 1 };
-        id
+        self.next_group_id.take()
     }
 }
 
@@ -751,12 +777,12 @@ impl Document {
     #[allow(clippy::too_many_arguments)]
     /// 作品の番号の数え札（シンボル・グループ・音・レイヤー）。断った操作は、入口 `apply` がこれで操作の前に戻す（戻す決まり
     /// はこれ1つ：設計審査 b7208d9 の 7.。前はシンボルとグループだけを戻していた）。取り消しでは戻さない
-    pub(crate) fn counters(&self) -> [u64; 4] {
+    pub(crate) fn counters(&self) -> [Counter; 4] {
         [self.next_symbol_id, self.next_group_id, self.next_sound_id, self.next_layer_id]
     }
 
     /// 番号の数え札を `counters` にする（`counters` で写したもの）
-    pub(crate) fn set_counters(&mut self, counters: [u64; 4]) {
+    pub(crate) fn set_counters(&mut self, counters: [Counter; 4]) {
         [self.next_symbol_id, self.next_group_id, self.next_sound_id, self.next_layer_id] = counters;
     }
 
@@ -766,7 +792,7 @@ impl Document {
         sounds: crate::sound::SoundLibrary,
         stage_size: Vec2,
         fps: u32,
-        counters: [u64; 4],
+        counters: [Counter; 4],
     ) -> Self {
         // 数え札の並びは `counters` と同じ（シンボル・グループ・音・レイヤー）
         let [next_symbol_id, next_group_id, next_sound_id, next_layer_id] = counters;
@@ -874,10 +900,10 @@ impl Default for Document {
             sounds: Default::default(),
             stage_size: Vec2::new(1920.0, 1080.0),
             fps: 24,
-            next_symbol_id: 1,
-            next_group_id: 1,
-            next_sound_id: 1,
-            next_layer_id: 2,
+            next_symbol_id: Counter::starting_at(1),
+            next_group_id: Counter::starting_at(1),
+            next_sound_id: Counter::starting_at(1),
+            next_layer_id: Counter::starting_at(2),
             revision: 0,
             load_notices: Default::default(),
         }
@@ -941,9 +967,7 @@ impl Document {
 
     /// 新しいシンボル定義用の一意な `symbol_id` を採番して返す
     pub(crate) fn alloc_symbol_id(&mut self) -> u64 {
-        let id = self.next_symbol_id.max(1);
-        self.next_symbol_id = if id < u64::MAX { id + 1 } else { 1 };
-        id
+        self.next_symbol_id.take()
     }
 
     /// 新しいシンボル定義 `sym_def`（`SymbolDef::from_cel`）をライブラリへ登録する。名前はここで付ける

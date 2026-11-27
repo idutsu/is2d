@@ -83,6 +83,25 @@ pub(crate) struct MapEdge {
     pub(crate) line_id: Option<ShapeId>,
 }
 
+/// 浮いた片の上に重ねる線（`LayerBase::lines_along`）：形（覚えた形のうち、中身にまだ線がある所。線だけの地図で、線の
+/// 番号は持たない）と、形の辺ごとの、重なっている中身の線の番号（`shape.edges` と同じ並び。見た目で描く線の番号）
+#[derive(Default)]
+pub(crate) struct LinesAlong {
+    pub(crate) shape: PlanarMap,
+    pub(crate) shape_ids: Vec<ShapeId>,
+}
+
+/// 線の区間 `segs` だけの地図（色と番号の無い線の辺。区間どうしが端のほかで交わらないこと）
+fn line_only_map(segs: impl IntoIterator<Item = (QuadBez, EdgeStroke)>) -> PlanarMap {
+    let mut m = PlanarMap::default();
+    for (q, stroke) in segs {
+        m.nodes.extend([q.p0, q.p2]);
+        let n = m.nodes.len();
+        m.edges.push(MapEdge { a: n - 2, b: n - 1, ctrl: q.p1, left: None, right: None, left_src: None, right_src: None, stroke: Some(stroke), line_id: None });
+    }
+    m
+}
+
 /// 辺を残すか（辺を残す決まりはこれ1つ）：左右の色が違うか、線が付いている（設計：claude/線の設計_68a596e.md の 6.2 の (a)）
 pub(crate) fn edge_needed(left: Option<Color32>, right: Option<Color32>, stroke: Option<EdgeStroke>) -> bool {
     left != right || stroke.is_some()
@@ -281,6 +300,25 @@ impl PlanarMap {
     pub(crate) fn quad(&self, e: usize) -> QuadBez {
         let ed = &self.edges[e];
         QuadBez::new(self.nodes[ed.a], ed.ctrl, self.nodes[ed.b])
+    }
+
+    /// 辺 `edges`（番号）だけの地図（頂点は使うものだけ。辺の中身はそのまま）。正しい地図の辺の一部で、面を持たない（線
+    /// だけの地図の辺の一部）なら、正しい地図のまま
+    fn sub_map(&self, edges: &[usize]) -> PlanarMap {
+        let mut m = PlanarMap::default();
+        let mut at: HashMap<usize, usize> = HashMap::new();
+        for &e in edges {
+            let ed = self.edges[e];
+            let mut node = |v: usize| {
+                *at.entry(v).or_insert_with(|| {
+                    m.nodes.push(self.nodes[v]);
+                    m.nodes.len() - 1
+                })
+            };
+            let (a, b) = (node(ed.a), node(ed.b));
+            m.edges.push(MapEdge { a, b, ..ed });
+        }
+        m
     }
 
     /// 生の図形の並びから作る。境目の2本の線を1本の辺にする。地図の面から書き出した図形は、境目の線を両側の図形で
@@ -1983,21 +2021,23 @@ impl LayerBase {
         Some((inside, rest))
     }
 
-    /// 道具の側（片を置く・貼り付け）：地図 `p` を重ねる（`MapRule::Overlay`）とき、重ね合わせに渡すもの
-    pub(crate) fn map_change<'a>(&self, p: &'a PlanarMap) -> LocalChange<'a> {
+    /// 道具の側（片を置く・貼り付け・動かしていない片を戻す）：地図 `p` を決まり `rule`（`MapRule::Overlay`・`Restore`）で
+    /// 重ねるとき、重ね合わせに渡すもの
+    pub(crate) fn map_change<'a>(&self, p: &'a PlanarMap, rule: MapRule) -> LocalChange<'a> {
         LocalChange {
             input: ChangeInput::Map(p),
             lines: MapInput::Map(p).lines(|e| self.old_edge(e)),
-            rule: MapRule::Overlay,
+            rule,
         }
     }
 
-    /// この写しの地図に、地図 `maps` を下から順に重ねた地図のしまう形（`stacked` と同じ答え。1枚ずつ窓で重ね、差分を
-    /// しまう形に当て、升目の索引も変わった所だけ作り直して次を重ねる）。地図が空なら、重ねる地図をそのまま使う
-    /// （`stacked` と同じ）。`None`：格子に置けない・重ねる地図が無い（`maps` の中の `None`）
+    /// この写しの地図に、地図 `maps` を下から順に決まり `rule`（`MapRule::Overlay`・`Restore`）で重ねた地図のしまう形（1枚
+    /// ずつ窓で重ね、差分をしまう形に当て、升目の索引も変わった所だけ作り直して次を重ねる）。地図が空なら、重ねる地図を
+    /// そのまま使う。`None`：格子に置けない・重ねる地図が無い（`maps` の中の `None`）
     pub(crate) fn stacked_local(
         self: &Arc<Self>,
         maps: impl IntoIterator<Item = Option<PlanarMap>>,
+        rule: MapRule,
     ) -> Option<StoredMap> {
         // 重ねる写し（次の1枚を重ねるときに作る。最後の1枚のあとは、しまう形だけでよい）。1枚ずつの答えは、テストでは毎回
         // 地図全体で重ねた答えと比べる（`overlay_diff`）
@@ -2011,7 +2051,7 @@ impl LayerBase {
             stored = if stored.edge_count() == 0 {
                 StoredMap::from_dense(m, Some(&stored))
             } else {
-                match cur.overlay_diff(&cur.map_change(m)) {
+                match cur.overlay_diff(&cur.map_change(m, rule)) {
                     Ok(None) => continue,
                     Ok(Some((w, removed, added))) => cur
                         .stored
@@ -2636,6 +2676,91 @@ impl LayerBase {
         }
         out.sort_unstable();
         out.dedup();
+        out
+    }
+
+    /// 線の地図 `lines`（文書の座標。浮いた片の上に重ねる線の覚えた形）に沿う、この写しの地図の線（`LinesAlong`）。浮いた
+    /// 片の上に重ねる線を、その時点の中身から取り出す決まりはこれ1つ（確定・見た目・持ち上げが同じ答えを使う：
+    /// `floating::PieceGroup::lines_over`。設計審査 01e4283 の D-1）。重なりは重ね合わせで決める（沿う線を取り出す決まり
+    /// `MapRule::Along`）：中身の線の辺を1本ずつ、その近くの `lines` の辺と重ね、線が残れば、その辺は沿う。形は、`lines` の
+    /// 線のうち、沿う中身の線が通る所（`lines` の曲線のまま：中身の線がほかの絵のふちで切られて入った点は持ち込まない）。
+    /// 形の辺の番号は、沿う中身の線の辺のうち、その辺の真ん中にいちばん近いもの。調べるのは `lines` のまわりの辺だけ（升目の
+    /// 索引で引く。手間は `lines` の大きさの分）
+    pub(crate) fn lines_along(&self, lines: &PlanarMap) -> LinesAlong {
+        if lines.edges.is_empty() {
+            return LinesAlong::default();
+        }
+        let mut region = CellSet::default();
+        region.add_rects((0..lines.edges.len()).map(|e| window_rect(hull_of(lines.quad(e)))));
+        let got = self.lines_along_among(lines, region_edges(self.map_index(), &region));
+        // お手本：地図の全部の辺を調べた答えと同じ
+        #[cfg(test)]
+        if test_checks() {
+            let whole = uncounted(|| self.lines_along_among(lines, 0..self.stored.edge_count()));
+            let mut a = whole.shape_ids.clone();
+            let mut b = got.shape_ids.clone();
+            a.sort_unstable();
+            b.sort_unstable();
+            assert!(
+                a == b
+                    && whole.shape.edges.len() == got.shape.edges.len()
+                    && whole.shape.nodes.len() == got.shape.nodes.len(),
+                "沿う線が、地図の全部の辺で調べた答え（お手本）と違う"
+            );
+        }
+        got
+    }
+
+    /// `lines_along` の答え：この写しの地図の辺 `candidates`（しまう形の番号）のうちの線の辺から調べる
+    fn lines_along_among(&self, lines: &PlanarMap, candidates: impl IntoIterator<Item = usize>) -> LinesAlong {
+        let mut out = LinesAlong::default();
+        let rects: Vec<KRect> = (0..lines.edges.len()).map(|e| hull_of(lines.quad(e))).collect();
+        // 沿う中身の線の辺だけの地図（色と番号を外す。正しい地図の辺の一部なので、正しい地図のまま）
+        let mut along = PlanarMap::default();
+        let mut along_ids: Vec<ShapeId> = Vec::new();
+        let mut along_nodes: HashMap<(u64, u64), usize> = HashMap::new();
+        for e in candidates {
+            let te = self.stored.edge_at(e);
+            let (Some(id), Some(stroke)) = (line_id_of(&te), te.stroke) else {
+                continue;
+            };
+            let q = te.quad();
+            let near = hull_of(q).inflate(WINDOW_PAD, WINDOW_PAD);
+            let ks: Vec<usize> = (0..lines.edges.len()).filter(|&k| rects_overlap(rects[k], near)).collect();
+            if ks.is_empty() || !line_only_map([(q, stroke)]).overlay(MapInput::Map(&lines.sub_map(&ks)), MapRule::Along).is_some_and(|m| m.edges.iter().any(|x| x.stroke.is_some())) {
+                continue;
+            }
+            along_ids.push(id);
+            let mut node = |p: Point| {
+                *along_nodes.entry((p.x.to_bits(), p.y.to_bits())).or_insert_with(|| {
+                    along.nodes.push(p);
+                    along.nodes.len() - 1
+                })
+            };
+            let (a, b) = (node(q.p0), node(q.p2));
+            along.edges.push(MapEdge { a, b, ctrl: q.p1, left: None, right: None, left_src: None, right_src: None, stroke: Some(stroke), line_id: None });
+        }
+        if !along.edges.is_empty() {
+            if let Some(mut shape) = lines.overlay(MapInput::Map(&along), MapRule::Along) {
+                for ed in &mut shape.edges {
+                    ed.line_id = None;
+                }
+                out.shape_ids = (0..shape.edges.len())
+                    .map(|k| {
+                        let mid = shape.quad(k).eval(0.5);
+                        let near = (0..along.edges.len())
+                            .min_by(|&i, &j| {
+                                let di = crate::vector_engine::nearest_on_quad(&along.quad(i), mid).1;
+                                let dj = crate::vector_engine::nearest_on_quad(&along.quad(j), mid).1;
+                                di.total_cmp(&dj)
+                            })
+                            .expect("沿う中身の線がある");
+                        along_ids[near]
+                    })
+                    .collect();
+                out.shape = shape;
+            }
+        }
         out
     }
 

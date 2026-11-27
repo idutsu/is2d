@@ -169,6 +169,8 @@ pub(crate) enum TextOp {
     Paste,
     /// 選んだ文字（無ければカーソルの前の1文字）を消す
     Delete,
+    /// 入力欄の文字をみな選ぶ
+    SelectAll,
 }
 
 impl TextOp {
@@ -189,6 +191,7 @@ impl TextOp {
             Self::Copy => egui::Event::Copy,
             Self::Paste => egui::Event::Paste(pasted()),
             Self::Delete => key(Key::Backspace, egui::Modifiers::NONE),
+            Self::SelectAll => key(Key::A, egui::Modifiers::COMMAND),
         }
     }
 }
@@ -306,7 +309,7 @@ const fn tool_key(label: &'static str, key: Key, tool: Tool) -> MenuCommand {
 }
 
 /// 項目の数
-pub(crate) const COMMAND_COUNT: usize = 60;
+pub(crate) const COMMAND_COUNT: usize = 61;
 
 /// メニューの項目の表（メニューバーの順・メニューの中の上からの順）。番号（並びの位置）で項目を指す
 pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
@@ -475,6 +478,17 @@ pub(crate) static COMMANDS: [MenuCommand; COMMAND_COUNT] = [
     MenuCommand {
         menu: Some(Menu::Edit),
         separator_before: true,
+        label: "すべてを選択",
+        shortcut: Some(Shortcut::command(Key::A)),
+        aliases: &[],
+        repeats: false,
+        enabled: always,
+        text_op: Some(TextOp::SelectAll),
+        action: UiAction::Doc(Action::SelectAll),
+    },
+    MenuCommand {
+        menu: Some(Menu::Edit),
+        separator_before: false,
         label: "選択削除",
         shortcut: Some(Shortcut::plain(Key::Backspace)),
         aliases: &[Shortcut::plain(Key::Delete), Shortcut::plain(Key::G)],
