@@ -690,6 +690,39 @@ pub(crate) struct Document {
     pub(crate) load_notices: crate::timeline::LoadNotices,
 }
 
+/// 編集中のタイムラインを書く間に渡す、文書のほかの部分：音のライブラリ（読む・足す）・番号の数え札・fps。シンボルの
+/// ライブラリには触れない（シンボルの目次は、ライブラリを書く入口だけが作り直す：設計審査 392e9af の D-3）。
+/// 音を足す・グループの番号を取る決まりはここの1つ（文書の同じ名前の関数は、これを呼ぶだけ）
+pub(crate) struct DocParts<'a> {
+    sounds: &'a mut crate::sound::SoundLibrary,
+    next_sound_id: &'a mut u64,
+    next_group_id: &'a mut u64,
+    pub(crate) fps: u32,
+}
+
+impl DocParts<'_> {
+    /// 音のライブラリ
+    pub(crate) fn sounds(&self) -> &crate::sound::SoundLibrary {
+        self.sounds
+    }
+
+    /// 音 `sound` を、新しい番号を付けて音のライブラリの終わりに足し、その番号を返す
+    pub(crate) fn add_sound(&mut self, mut sound: crate::sound::Sound) -> u64 {
+        let id = *self.next_sound_id;
+        *self.next_sound_id += 1;
+        sound.id = id;
+        self.sounds.push_new(Arc::new(sound));
+        id
+    }
+
+    /// 新しいグループ / シンボルインスタンス用の一意な `group_id`
+    pub(crate) fn alloc_group_id(&mut self) -> u64 {
+        let id = (*self.next_group_id).max(1);
+        *self.next_group_id = if id < u64::MAX { id + 1 } else { 1 };
+        id
+    }
+}
+
 /// 取り消しの控えにする文書の中身（`Document::content`・`replace_content`）。番号の数え札（取り消しても戻さない：番号を
 /// 使い回すと、別の中身と番号がぶつかる）と、壊れていた地図の知らせ先は入れない
 #[derive(Clone)]
@@ -789,10 +822,21 @@ impl Document {
         self.bump_revision();
     }
 
-    /// 番号 `id` のシンボルの、見ているコマ・選んでいるレイヤーなど中身でない状態を書くためのタイムライン（版は上げない。
-    /// 中身を書くのは `write_symbol_timeline`）。無い番号なら `None`
-    pub(crate) fn symbol_view_mut(&mut self, id: u64) -> Option<&mut Timeline> {
+    /// 番号 `id` のシンボルの、見ているコマ・選んでいるレイヤーなど中身でない状態だけを書く窓（版は上げない。中身を書くのは
+    /// `write_symbol_timeline`）。無い番号なら `None`
+    pub(crate) fn symbol_view_mut(&mut self, id: u64) -> Option<crate::timeline::TimelineView<'_>> {
         self.library.view_mut(id)
+    }
+
+    /// ルートのタイムラインと、それを書く間に渡す文書のほかの部分（`DocParts`）
+    pub(crate) fn root_and_parts(&mut self) -> (&mut Timeline, DocParts<'_>) {
+        let parts = DocParts {
+            sounds: &mut self.sounds,
+            next_sound_id: &mut self.next_sound_id,
+            next_group_id: &mut self.next_group_id,
+            fps: self.fps,
+        };
+        (&mut self.root, parts)
     }
 }
 
@@ -866,11 +910,9 @@ impl Document {
         self.revision = crate::vector_engine::next_mesh_revision();
     }
 
-    /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す
+    /// 新しいグループ / シンボルインスタンス用の一意な `group_id` を採番して返す（決まりは `DocParts::alloc_group_id` の1つ）
     pub(crate) fn alloc_group_id(&mut self) -> u64 {
-        let id = self.next_group_id.max(1);
-        self.next_group_id = if id < u64::MAX { id + 1 } else { 1 };
-        id
+        self.root_and_parts().1.alloc_group_id()
     }
 
     /// 新しいシンボル定義用の一意な `symbol_id` を採番して返す
@@ -912,11 +954,17 @@ impl Document {
     pub(crate) fn write_symbol_timeline<R>(
         &mut self,
         id: u64,
-        f: impl FnOnce(&mut Timeline, &mut Document) -> R,
+        f: impl FnOnce(&mut Timeline, &mut DocParts<'_>) -> R,
     ) -> R {
-        let mut tl = self.library.take_timeline(id).expect("書くシンボルはライブラリにある");
-        let before = tl.clone();
-        let res = f(&mut tl, self);
+        // 写し（塊を分け合うので、写すのはレイヤーの数だけ）に書いてから置く。書いている間もライブラリは元のままで、`f` に
+        // 渡すのはライブラリを書けない部分だけ（`DocParts`：目次を通らずにライブラリを書く道を作れない。設計審査 392e9af
+        // の D-3。前はタイムラインを抜き取って空にし、その間 `f` に文書ごと渡した）
+        let before = self.library.get(id).expect("書くシンボルはライブラリにある").timeline.clone();
+        let mut tl = before.clone();
+        let res = {
+            let mut parts = self.root_and_parts().1;
+            f(&mut tl, &mut parts)
+        };
         if self.library.put_timeline(id, tl, &before) {
             self.bump_revision();
         }
@@ -983,12 +1031,8 @@ impl Document {
 
     /// 音 `sound` を、新しい番号を付けて音のライブラリの終わりに足し、その番号を返す（音を足す所はこれ1つ：読み込み・
     /// 別の文書から持ち込む `adopt_sound`）
-    pub(crate) fn add_sound(&mut self, mut sound: crate::sound::Sound) -> u64 {
-        let id = self.next_sound_id;
-        self.next_sound_id += 1;
-        sound.id = id;
-        self.sounds.push_new(Arc::new(sound));
-        id
+    pub(crate) fn add_sound(&mut self, sound: crate::sound::Sound) -> u64 {
+        self.root_and_parts().1.add_sound(sound)
     }
 
     /// 音 `sound`（別の文書の音でもよい）を指すのに使う、この文書の音のライブラリの番号：同じバイトを共有する音があれば
@@ -1084,12 +1128,8 @@ impl Document {
             *editing_group_path = popped.parent_group_path;
             if let Some(last) = edit_path.last() {
                 if let Some(tl) = self.library.view_mut(last.symbol_id) {
-                    tl.active_layer = popped
-                        .parent_active_layer
-                        .min(tl.layers.len().saturating_sub(1));
-                    tl.current_frame = popped
-                        .parent_frame
-                        .min(tl.total_frames.saturating_sub(1));
+                    *tl.active_layer = popped.parent_active_layer.min(tl.layer_count.saturating_sub(1));
+                    *tl.current_frame = popped.parent_frame.min(tl.total_frames.saturating_sub(1));
                 }
             } else {
                 self.root.active_layer = popped

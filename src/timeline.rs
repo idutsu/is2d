@@ -371,6 +371,8 @@ pub(crate) enum LoadNotice {
     Blank(String),
     /// 波形にできなかった音（名前）
     UnreadableSound(String),
+    /// 付けた区間より短く読めた音（名前。区間はそのまま残し、足りない所は鳴らさない）
+    ShortSound(String),
 }
 
 /// ファイルから読んだものの知らせ（地図は使うときに確かめるので、あとから増える）。文書ごとに1つ（`Document::load_notices`）
@@ -1572,6 +1574,17 @@ pub(crate) struct Keyframe {
     pub(crate) sound: Option<crate::sound::SoundClip>,
 }
 
+/// タイムラインの、中身でない状態（見ているコマ・選んでいるレイヤー・コマの範囲選択）だけを書く窓。中身（レイヤー・
+/// キーフレーム）は書けず、数だけを読める。見ている所を書く道はこれだけを渡す（シンボルの中身を書く道は、目次を作り直す
+/// 入口 `Document::write_symbol_timeline` だけ：設計審査 392e9af の D-3。前はタイムラインを丸ごと書ける形で渡した）
+pub(crate) struct TimelineView<'a> {
+    pub(crate) current_frame: &'a mut usize,
+    pub(crate) active_layer: &'a mut usize,
+    pub(crate) cell_selection: &'a mut Option<TimelineCellSelection>,
+    pub(crate) layer_count: usize,
+    pub(crate) total_frames: usize,
+}
+
 /// キーフレームの塊の要約：塊のキーフレームが使うシンボルの番号（インスタンス）と音の番号、インスタンスの（番号,
 /// シンボルの番号）（それぞれ小さい順に1つずつ）
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2204,8 +2217,9 @@ impl Layer {
         let shown = self.sounding_frames(k, fps)?;
         let span_end = self.span_end_for_keyframe(k) + 1;
         Some(match edge {
+            // 始まりから先に残っている音の長さ（始まりが音の終わり以降なら 0：開くときに音が区間より短く読めたとき）
             SoundEdge::End => {
-                shown.start + 1..=span_end.min(shown.start + frames_to_reach(len - clip.start, fps))
+                shown.start + 1..=span_end.min(shown.start + frames_to_reach(len.saturating_sub(clip.start), fps))
             }
             SoundEdge::Start => {
                 let back = frames_to_reach(clip.start + 1, fps) - 1;
@@ -2417,6 +2431,17 @@ impl Timeline {
             .iter()
             .flat_map(|l| l.keyframes.iter())
             .flat_map(|kf| kf.cel.instances.iter())
+    }
+
+    /// 中身でない状態（見ているコマ・選んでいるレイヤー・コマの範囲選択）だけを書く窓（`TimelineView`）
+    pub(crate) fn view_mut(&mut self) -> TimelineView<'_> {
+        TimelineView {
+            current_frame: &mut self.current_frame,
+            active_layer: &mut self.active_layer,
+            cell_selection: &mut self.cell_selection,
+            layer_count: self.layers.len(),
+            total_frames: self.total_frames,
+        }
     }
 
     /// このタイムラインのキーフレームが使うシンボルの番号と音の番号（それぞれ小さい順に1つずつ）。レイヤーのキーフレームの

@@ -4,7 +4,7 @@ use kurbo::{Affine, Point, Rect as KRect};
 use crate::canvas_tool::{ActiveCanvasDrag, MarqueeDrag, Scene, Session, Tab, View};
 pub(crate) use crate::canvas_tool::{ScaleHandle, TransformDragState, TransformHoverTarget};
 use crate::clipboard_ops::begin_move_selection_drag;
-use crate::doc_actions::{apply, Action, ActionHost};
+use crate::doc_actions::{apply, Action, ActionHost, ToolInput};
 use crate::select_ops::{
     apply_click_selection, finish_selection_drag, handle_canvas_double_click, update_selection_drag,
 };
@@ -16,7 +16,7 @@ use crate::vector_engine::{affine_rotate_around, affine_scale_around};
 
 /// 自由変形ツール（`Tool::Transform` / `Q`）のマウス入力処理
 pub(crate) fn handle_transform_tool_input(
-    host: &mut impl ActionHost,
+    host: &mut ToolInput<'_, impl ActionHost>,
     ui: &egui::Ui,
     response: &egui::Response,
     mouse_pt: Option<Point>,
@@ -43,13 +43,13 @@ pub(crate) fn handle_transform_tool_input(
             start_transform_drag(host, start_pt, shift_held, alt_held);
             if let Some(curr_pt) = mouse_pt {
                 if crate::canvas_tool::View::moved_since_press(start_pt, curr_pt) {
-                    update_transform_drag(host.tab_mut(), curr_pt, shift_held, alt_held);
+                    update_transform_drag(host, curr_pt, shift_held, alt_held);
                 }
             }
         }
     } else if response.dragged_by(PointerButton::Primary) {
         if let Some(pt) = mouse_pt {
-            update_transform_drag(host.tab_mut(), pt, shift_held, alt_held);
+            update_transform_drag(host, pt, shift_held, alt_held);
         }
     }
     if response.drag_stopped_by(PointerButton::Primary) {
@@ -70,11 +70,12 @@ pub(crate) fn handle_transform_tool_input(
 }
 
 pub(crate) fn start_transform_drag(
-    host: &mut impl ActionHost,
+    host: &mut ToolInput<'_, impl ActionHost>,
     pt: Point,
     shift_held: bool,
     alt_held: bool,
 ) {
+    let proof = host.proof();
     let sub_mode = host.tool().select_sub_mode;
     let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
@@ -100,7 +101,7 @@ pub(crate) fn start_transform_drag(
             let tab = host.tab_mut();
             if let Some((orig_bbox, orig_pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot().is_some();
-                let orig_shapes = tab.session.begin_transform_overlay();
+                let orig_shapes = tab.session.begin_transform_overlay(proof);
                 // `Alt` の間は基準点を中心に拡大する（ドラッグの途中で押す・離すのに合わせて、毎回選ぶ）
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Scale {
                     handle,
@@ -121,7 +122,7 @@ pub(crate) fn start_transform_drag(
             let tab = host.tab_mut();
             if let Some((orig_bbox, pivot)) = tab.session.selection_bbox_and_pivot(zoom) {
                 let had_custom_pivot = tab.session.transform_pivot().is_some();
-                let orig_shapes = tab.session.begin_transform_overlay();
+                let orig_shapes = tab.session.begin_transform_overlay(proof);
                 tab.session.drag = ActiveCanvasDrag::Transform(TransformDragState::Rotate {
                     orig_bbox,
                     pivot,
@@ -135,9 +136,8 @@ pub(crate) fn start_transform_drag(
             }
         }
         TransformHoverTarget::Move => {
-            let tab = host.tab_mut();
-            let move_drag = begin_move_selection_drag(tab, pt, alt_held);
-            tab.session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
+            let move_drag = begin_move_selection_drag(host, pt, alt_held);
+            host.tab_mut().session.drag = ActiveCanvasDrag::MoveSelection(move_drag);
         }
         TransformHoverTarget::None => {
             let scene = host.tab().scene();
@@ -153,10 +153,12 @@ pub(crate) fn start_transform_drag(
     }
 }
 
-pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, alt_held: bool) {
-    if update_selection_drag(tab, pt) {
+pub(crate) fn update_transform_drag(host: &mut ToolInput<'_, impl ActionHost>, pt: Point, shift_held: bool, alt_held: bool) {
+    let proof = host.proof();
+    if update_selection_drag(host, pt) {
         return;
     }
+    let tab = host.tab_mut();
     let mut drag_state = std::mem::take(&mut tab.session.drag);
     if let ActiveCanvasDrag::Transform(transform_drag) = &mut drag_state {
         match transform_drag {
@@ -170,7 +172,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     *changed = true;
                 }
                 *last_pivot = pt;
-                tab.session.drag_pivot_to(pt);
+                tab.session.drag_pivot_to(proof, pt);
             }
             TransformDragState::Scale {
                 handle,
@@ -211,8 +213,8 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                 *last_affine = affine;
                 *changed = transform_moves(&tab.view, affine, *orig_bbox);
                 *fits = fit.fits(affine);
-                tab.session.update_transform_overlay(orig_shapes, affine);
-                tab.session.carry_pivot(affine, *orig_pivot);
+                tab.session.update_transform_overlay(proof, orig_shapes, affine);
+                tab.session.carry_pivot(proof, affine, *orig_pivot);
             }
             TransformDragState::Rotate {
                 pivot,
@@ -234,7 +236,7 @@ pub(crate) fn update_transform_drag(tab: &mut Tab, pt: Point, shift_held: bool, 
                     *current_angle = delta_angle;
                     let affine = affine_rotate_around(*pivot, delta_angle);
                     *fits = fit.fits(affine);
-                    tab.session.update_transform_overlay(orig_shapes, affine);
+                    tab.session.update_transform_overlay(proof, orig_shapes, affine);
                 }
             }
         }
@@ -256,7 +258,7 @@ fn transform_moves(view: &View, affine: Affine, bbox: KRect) -> bool {
     .any(|p| view.moves_on_screen((affine * p - p).hypot()))
 }
 
-pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option<Point>) {
+pub(crate) fn finish_transform_drag(host: &mut ToolInput<'_, impl ActionHost>, mouse_pt: Option<Point>) {
     if finish_selection_drag(host, mouse_pt) {
         return;
     }
@@ -321,7 +323,7 @@ pub(crate) fn finish_transform_drag(host: &mut impl ActionHost, mouse_pt: Option
     }
 }
 
-fn handle_transform_click(host: &mut impl ActionHost, pt: Point, shift_held: bool) {
+fn handle_transform_click(host: &mut ToolInput<'_, impl ActionHost>, pt: Point, shift_held: bool) {
     let zoom = host.tab().view.zoom();
     let hover = compute_transform_hover(host.tab().scene(), &host.tab().session, pt, zoom);
     // ピボットのクリックでは選択を変えない。変形枠の中の空白では選択を外さない

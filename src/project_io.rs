@@ -77,7 +77,7 @@ pub(crate) trait ProjectWorkspace: crate::doc_actions::ActionHost {
     fn tabs_mut(&mut self) -> &mut Vec<Tab>;
     fn active_index(&self) -> usize;
     fn set_active_index(&mut self, index: usize);
-    fn alloc_doc_id(&mut self) -> u64;
+    fn alloc_doc_id(&mut self) -> crate::canvas_tool::FreshTabId;
     fn alloc_untitled_number(&mut self) -> usize;
     fn set_next_untitled_number(&mut self, num: usize);
     fn last_window_title(&self) -> &str;
@@ -121,7 +121,9 @@ fn activate_tab_index(ws: &mut impl ProjectWorkspace, target_index: usize) {
 /// 入力欄の的を初めに戻す（前は道ごとに後片付けが違い、まっさらなタブに開いたときと最後のタブを閉じたときは貼り付けの
 /// ずらしが前の作品の続きになった：約束の棚卸し 5616fcc の C の B2・D2）
 fn install_document(ws: &mut impl ProjectWorkspace, doc: Document, ctx: Option<&egui::Context>) {
-    ws.tab_mut().install(doc);
+    // 作品を入れたら、タブの番号はいつも新しくする（「どの作品か」の見分けを、入れる所の1か所で替える）
+    let id = ws.alloc_doc_id();
+    ws.tab_mut().install(id, doc);
     ws.clipboard_mut().paste_count = 0;
     ws.clipboard_mut().paste_offset = kurbo::Vec2::ZERO;
     ws.tool_mut().select_sub_mode = SelectSubMode::Reshape;
@@ -182,7 +184,7 @@ fn advance_viewport_close_confirm(
 ) {
     let tab_count = ws.tabs().len();
     let next_idx = (0..tab_count)
-        .find(|&i| is_tab_dirty(ws, i) && !discarded_doc_ids.contains(&ws.tabs()[i].id));
+        .find(|&i| is_tab_dirty(ws, i) && !discarded_doc_ids.contains(&ws.tabs()[i].id()));
     if let Some(next_idx) = next_idx {
         switch_to_tab(ws, next_idx, Some(ctx));
         *ws.pending_close_confirm_mut() = Some(PendingCloseConfirm::ViewportClose {
@@ -238,7 +240,7 @@ pub(crate) fn confirm_pending_close_discard(ws: &mut impl ProjectWorkspace, ctx:
             mut discarded_doc_ids,
         } => {
             if let Some(tab) = ws.tabs().get(tab_index) {
-                discarded_doc_ids.insert(tab.id);
+                discarded_doc_ids.insert(tab.id());
             }
             advance_viewport_close_confirm(ws, orig_active, discarded_doc_ids, ctx);
         }
@@ -311,11 +313,9 @@ fn close_tab_immediately(
         // 最後の1タブを閉じた場合は連番をリセットし、白紙の「無題-1」へ初期化する
         prepare_active_tab_for_switch_or_save(ws);
         ws.set_next_untitled_number(1);
-        let doc_id = ws.alloc_doc_id();
         let untitled_num = ws.alloc_untitled_number();
 
         ws.set_active_index(0);
-        ws.tab_mut().id = doc_id;
         ws.tab_mut().untitled_number = untitled_num;
         ws.tab_mut().file = None;
         install_document(ws, Document::default(), ctx);
@@ -898,10 +898,10 @@ impl<T: Serialize> ProjectDocument<T> {
         read_project::<ReadTiles>(&project_file_bytes(&self)?[..])?.into_document()
     }
 
-    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ適用し、作業キャンバスや履歴を初期化する
-    pub(crate) fn apply_to_app(self, tab: &mut Tab) {
+    /// 読み込んだ `ProjectDocument` を現在のアクティブタブへ入れる（アプリと同じ、作品を入れる道 `install_document`）
+    pub(crate) fn apply_to_app(self, ws: &mut impl ProjectWorkspace) {
         let doc = self.into_document().expect("正しい地図の文書");
-        tab.install(doc);
+        install_document(ws, doc, None);
     }
 }
 
@@ -1064,15 +1064,20 @@ impl ProjectDocument<ReadTiles> {
         // 数が有限なことは、読み込みの初めに確かめてある（`only_finite_numbers`。ステージの大きさも同じ `stage_size_of`）
         let stage_size = crate::symbol::stage_size_of(Vec2::from(self.stage_size))
             .expect("読み込みの初めに有限か確かめてある");
-        // キーフレームの音の区間は、どれも音のライブラリの音を指し、その音の長さに収まること（`SoundClip::fits`）
+        // キーフレームの音の区間は、どれも音のライブラリの音を指し、始まりが終わりより前であること（`is_well_formed`）。
+        // 音の長さを越える区間は残し、その音を知らせる（`exceeds`）
         let sounds = crate::sound::SoundLibrary::from(sounds);
-        let clips_fit = std::iter::once(&timeline)
-            .chain(library.iter().map(|s| &s.timeline))
-            .flat_map(|tl| tl.sound_clips())
-            .all(|c| c.fits(&sounds));
-        if !clips_fit {
-            return Err("プロジェクトファイルの音が壊れています".to_owned());
+        let mut short_sounds: Vec<u64> = Vec::new();
+        for c in std::iter::once(&timeline).chain(library.iter().map(|s| &s.timeline)).flat_map(|tl| tl.sound_clips()) {
+            if !c.is_well_formed(&sounds) {
+                return Err("プロジェクトファイルの音が壊れています".to_owned());
+            }
+            if sounds.get(c.sound).is_some_and(|s| c.exceeds(s)) {
+                short_sounds.push(c.sound);
+            }
         }
+        short_sounds.sort_unstable();
+        short_sounds.dedup();
         let fresh_sound_ids = FreshIds::after(sounds.iter().map(|s| s.id));
         let doc = Document::loaded(
             timeline,
@@ -1087,6 +1092,9 @@ impl ProjectDocument<ReadTiles> {
         doc.watch_broken_maps();
         for s in doc.sounds.iter().filter(|s| !s.readable()) {
             doc.load_notices.push(crate::timeline::LoadNotice::UnreadableSound(s.name.clone()));
+        }
+        for s in short_sounds.iter().filter_map(|&id| doc.sounds.get(id)) {
+            doc.load_notices.push(crate::timeline::LoadNotice::ShortSound(s.name.clone()));
         }
         Ok(doc)
     }
@@ -1484,8 +1492,6 @@ pub(crate) fn open_document_in_new_tab(
         ws.tabs_mut().insert(insert_idx, Tab::new_empty(doc_id, 0));
         activate_tab_index(ws, insert_idx);
     } else {
-        let new_doc_id = ws.alloc_doc_id();
-        ws.tab_mut().id = new_doc_id;
         ws.tab_mut().untitled_number = 0;
         let max_untitled = ws
             .tabs()

@@ -277,13 +277,7 @@ impl Library {
         Some(def)
     }
 
-    /// シンボル `id` のタイムラインを外して返す（書く間：`put_timeline` で戻す）
-    pub(super) fn take_timeline(&mut self, id: u64) -> Option<Timeline> {
-        let i = self.defs.position_sorted(id, |s| s.id)?;
-        Some(std::mem::take(&mut Arc::make_mut(&mut self.defs[i]).timeline))
-    }
-
-    /// シンボル `id` にタイムライン `tl` を戻す。書く前の写し `before` と中身が違えば、子・音・高さ・動くかを作り直し、
+    /// シンボル `id` のタイムラインを `tl` にする（書いた写しを置く）。書く前の写し `before` と中身が違えば、子・音・高さ・動くかを作り直し、
     /// 自分と先祖の版を上げる。中身が変わったら `true`
     pub(super) fn put_timeline(&mut self, id: u64, tl: Timeline, before: &Timeline) -> bool {
         let Some(i) = self.defs.position_sorted(id, |s| s.id) else {
@@ -304,10 +298,11 @@ impl Library {
         true
     }
 
-    /// シンボル `id` の、見ているコマ・選んでいるレイヤーなど中身でない状態を書くためのタイムライン（何も作り直さない）
-    pub(super) fn view_mut(&mut self, id: u64) -> Option<&mut Timeline> {
+    /// シンボル `id` の、見ているコマ・選んでいるレイヤーなど中身でない状態だけを書く窓（中身は書けないので、何も作り直さ
+    /// ない：`TimelineView`）
+    pub(super) fn view_mut(&mut self, id: u64) -> Option<crate::timeline::TimelineView<'_>> {
         let i = self.defs.position_sorted(id, |s| s.id)?;
-        Some(&mut Arc::make_mut(&mut self.defs[i]).timeline)
+        Some(Arc::make_mut(&mut self.defs[i]).timeline.view_mut())
     }
 
     /// シンボル `id` の名前を `name` にする（名前の表も直す）。変わったら `true`

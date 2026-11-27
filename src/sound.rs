@@ -310,12 +310,17 @@ impl SoundClip {
         })
     }
 
-    /// 音のライブラリ `sounds` に照らして、正しい区間か（番号の音があり、`start < end ≤ 音の長さ`。読めない音は長さが
-    /// 分からないので、長さは見ない）。区間を受け入れる判定はこれ1つ（読み込み・付ける所）
-    pub(crate) fn fits(&self, sounds: &SoundLibrary) -> bool {
-        sounds
-            .get(self.sound)
-            .is_some_and(|s| self.start < self.end && (!s.readable || self.end <= s.len()))
+    /// 音のライブラリ `sounds` に照らして、区間の形が正しいか（番号の音があり、`start < end`）。読み込みで区間を受け入れる
+    /// 判定はこれ1つ。音の長さは見ない：長さは開くたびに音のバイトを読み直して数える値で、音を読む部品・読み方で変わるので、
+    /// 保存したデータを拒む理由にしない（長さを越える区間は残して知らせる：`exceeds`。設計審査 392e9af の D-2。前は長さを
+    /// 越えると作品全体を断った）
+    pub(crate) fn is_well_formed(&self, sounds: &SoundLibrary) -> bool {
+        sounds.get(self.sound).is_some() && self.start < self.end
+    }
+
+    /// 音 `s` の長さを越えるか（読めない音は長さが分からないので、越えないとする）。越えた所は鳴らさない（`sample_at`）
+    pub(crate) fn exceeds(&self, s: &Sound) -> bool {
+        s.readable && self.end > s.len()
     }
 }
 

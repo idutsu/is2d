@@ -151,7 +151,7 @@ impl SceneBaseCache {
     }
 
     #[inline]
-    pub(crate) fn layer_order_ids(&self) -> &[LayerId] {
+    pub(in crate::canvas_tool) fn layer_order_ids(&self) -> &[LayerId] {
         &self.layer_order_ids
     }
 
@@ -174,7 +174,7 @@ impl SceneBaseCache {
     /// 次に作り直すとき（`rebuild`）に使い回してよい画面の写しを渡す：画面への変換 `world` で置いた、（レイヤー, 元の地図の
     /// 図形, 画面の写し）の `placed` と、その地図の図形を持つ地図の写し `bases`（書き戻しが同じ写しを使うまで生かす）。
     /// 複製のドラッグ中に、離したときと同じ計算で作った確定した絵（`Session::take_ahead_commit`）。1回の作り直しで捨てる
-    pub(crate) fn offer(
+    pub(in crate::canvas_tool) fn offer(
         &mut self,
         world: Affine,
         bases: Vec<Arc<LayerBase>>,
@@ -188,7 +188,7 @@ impl SceneBaseCache {
     }
 
     /// レイヤー `layer_id` を、次の `rebuild` で作り直す（セル画を書き換えたあと）
-    pub(crate) fn invalidate_layer(&mut self, layer_id: LayerId) {
+    pub(in crate::canvas_tool) fn invalidate_layer(&mut self, layer_id: LayerId) {
         if let Some(l) = self.layers.iter_mut().find(|l| l.layer_id == layer_id) {
             l.cel_sig = None;
         }
@@ -197,7 +197,7 @@ impl SceneBaseCache {
     /// キー `(layer_id, cel_revision, eval_frame, world_xform, 参照シンボルの revision)` が変わったレイヤーだけ作り直し、
     /// `shape_id` と `mesh_revision` が同じ図形は描画キャッシュを `HashMap` で引き継ぐ
     /// タイムライン `tl` の今のコマ（変換 `world_xform`）を、作り直さずにそのまま見せてよいか（どのレイヤーの鍵も同じ）
-    pub(crate) fn is_fresh(&self, tl: &Timeline, library: &Library, world_xform: Affine) -> bool {
+    pub(in crate::canvas_tool) fn is_fresh(&self, tl: &Timeline, library: &Library, world_xform: Affine) -> bool {
         let frame = tl.current_frame;
         let xform_bits = world_xform.as_coeffs().map(f64::to_bits);
         self.layers.len() == tl.layers.len()
@@ -473,7 +473,7 @@ impl CelMeshCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn entry_count(&self) -> usize {
+    pub(in crate::canvas_tool) fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
@@ -530,7 +530,7 @@ impl CelMeshCache {
     /// `pt`（ステージの座標）で見えているもの（色と、線ならその線）：描くのと同じ写し（`screen_mesh`。無ければ作る）の
     /// 図形を、上に描くものから順に、点の内外の判定 `FillShape::contains_point` でたどる
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn seen_at(
+    pub(in crate::canvas_tool) fn seen_at(
         &mut self,
         tl: &Timeline,
         scope: CelScope,

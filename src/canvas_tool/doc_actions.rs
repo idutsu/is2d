@@ -23,7 +23,7 @@ use crate::select_ops::{
     retain_selection_and_flush_deselected, select_single_shape_at, toggle_shape_selection,
     ArrangeMode,
 };
-use crate::symbol::{ColorEffect, Document, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
+use crate::symbol::{ColorEffect, SymbolInstanceBinding, SymbolLoopMode, TweenRotate};
 use crate::symbol_ops::{
     enter_symbol_from_library, enter_symbol_timeline,
     prepare_convert_selection_to_symbol, prepare_place_symbol_instance,
@@ -753,7 +753,7 @@ fn apply_set_keyframe_sound(tab: &mut Tab, sound: Option<u64>) -> bool {
 /// 無い・変わらないなら断る
 fn set_active_keyframe_sound(
     tab: &mut Tab,
-    clip: impl FnOnce(&mut Document) -> Option<crate::sound::SoundClip>,
+    clip: impl FnOnce(&mut crate::symbol::DocParts<'_>) -> Option<crate::sound::SoundClip>,
 ) -> bool {
     mutate_timeline_with_undo(tab, |tl, doc| {
         let Some((l, k)) = tl.active_sound_slot() else {
@@ -769,7 +769,7 @@ fn set_active_keyframe_sound(
 
 fn mutate_timeline_with_undo(
     tab: &mut Tab,
-    mutate: impl FnOnce(&mut Timeline, &mut Document),
+    mutate: impl FnOnce(&mut Timeline, &mut crate::symbol::DocParts<'_>),
 ) -> bool {
     // 中身が変わったかは、書き換えの前と後の中身を比べて決める（決めるのはこの1か所：`Timeline::same_content` と音の
     // ライブラリ。書き換える関数ごとには答えない：空のキーフレームを空のキーフレームの上に写すなど、書いても同じ中身に
@@ -838,21 +838,18 @@ pub(crate) fn apply(host: &mut impl ActionHost, action: Action) -> bool {
     // 入口が先に貼り戻したか（操作が断った・何もしなかったときは、この貼り戻しも戻す）
     let commits_first =
         policy.floating == FloatingUse::CommitFirst && host.tab().session.floating().is_some();
-    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let run = guarded(|| {
         if commits_first && !commit_floating(host.tab_mut()) {
             return (false, false);
         }
         let mark = ContentMark::of(host.tab());
         let res = dispatch(host, action);
         (res, !mark.same_as(host.tab()))
-    }));
-    let (mut res, changed) = match run {
-        Ok(r) => r,
-        Err(_) => {
-            restore_after_panic(host);
-            (false, false)
-        }
-    };
+    });
+    let (mut res, changed) = run.unwrap_or_else(|| {
+        recover_from_panic(host);
+        (false, false)
+    });
     let (tab, _, clipboard, toast) = host.parts_mut();
     // 断った操作は、何も変えない（全部か無しか）：途中まで書いていても、操作の前に戻す（`restore_state_before_action`。
     // 地図にできない形を作る編集は、ふつう文書を変える前に断ってあり、そのときは戻しても同じ）。前は、断る所が先に書いた
@@ -943,20 +940,93 @@ fn restore_state_before_action(tab: &mut Tab) {
     tab.session.refusal = None;
 }
 
-/// 操作の途中で止まった（panic：計算の前提が破れた）ときの最後の砦（設計審査 de92ceb の D-2）：途中まで作り直したかも
-/// しれない画面の土台を捨て、操作の前の状態に戻し（`restore_state_before_action`）、知らせる。別のやり方へ逃げるのでは
-/// なく、その操作を無かったことにするだけ。文書は
-/// 共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は操作の前のまま。前は止まるとアプリが落ち、全部の
-/// タブの保存していない作業が消えた
-fn restore_after_panic(host: &mut impl ActionHost) {
+/// 計算の途中で止まったら（panic：計算の前提が破れた）受け止めて `None` を返す（最後の砦。操作を無かったことにする受け止めは
+/// この1つ。画面の処理の受け止め `Is2dApp::update` は、控えを書き終えてから落ちる別の役目）。使うのは、部屋の外に出す
+/// 入口のうち作品に触る計算を走らせるもの：入口 `apply`・道具の入力 `with_tool_input`・持ち上げた絵を置いた写しを作る
+/// `committed_document`・復旧の書き手のタブ1つ分の書き込み（設計審査 de92ceb の D-2・392e9af の D-1。
+/// 前は `apply` にしか無く、同じ計算が入口の外で止まるとアプリごと落ちた）。別のやり方へ逃げるのではなく、受け取った
+/// 所が「その操作を無かったことにする」（`recover_from_panic`、置けないのと同じ答え、そのタブを飛ばす）。何も止まらない
+/// ときの手間は無い
+pub(crate) fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// 止まった操作を無かったことにする（戻し方はこの1つ。入口 `apply` と道具の入力 `with_tool_input` が使う）：途中まで
+/// 作り直したかもしれない画面の土台を捨て、ドラッグを取り消し、操作の前の状態に戻し（操作の前の写しがあれば：
+/// `restore_state_before_action`）、知らせる。文書は共有の写しで、操作は書き終えた値を置き換えるだけなので、戻した文書は
+/// 操作の前のまま。前は止まるとアプリが落ち、全部のタブの保存していない作業が消えた
+fn recover_from_panic(host: &mut impl ActionHost) {
     let (tab, _, _, toast) = host.parts_mut();
     tab.session.drop_scene_base();
+    cancel_active_drag(tab);
     restore_state_before_action(tab);
     show_notice(
         toast,
         NoticeKind::Error,
         "内部の不具合でこの操作を続けられなかったので、操作の前に戻しました",
     );
+}
+
+/// 道具の入力（ブラシ・選択・変形のドラッグとクリック・スポイト）を受ける関数が受け取る通行証。作るのは砦の入口
+/// `with_tool_input` だけなので、砦を通らずに道具の計算（ドラッグ中の仮表示は、離したときと同じ地図の計算をする）を走らせる
+/// 道は、型で作れない（設計審査 392e9af の D-1）。作業の相手 `ActionHost` と同じに使える（中は包んだ相手そのもの）
+pub(crate) struct ToolInput<'a, H> {
+    host: &'a mut H,
+}
+
+/// 道具の入力の中にいる証し（通行証 `ToolInput::proof` からしか取れない）。道具の入力のためだけにある作業状態の関数
+/// （ドラッグ中の仮表示を作る・中心点を動かす）は、これを受け取るので、砦の外からは呼べない（設計審査 392e9af の D-1）
+#[derive(Clone, Copy)]
+pub(crate) struct ToolProof(());
+
+impl<H> ToolInput<'_, H> {
+    /// 道具の入力の中にいる証し
+    pub(crate) fn proof(&self) -> ToolProof {
+        ToolProof(())
+    }
+}
+
+impl<H: ActionHost> ActionHost for ToolInput<'_, H> {
+    fn tab(&self) -> &Tab {
+        self.host.tab()
+    }
+    fn tab_mut(&mut self) -> &mut Tab {
+        self.host.tab_mut()
+    }
+    fn tool(&self) -> &ToolSettings {
+        self.host.tool()
+    }
+    fn tool_mut(&mut self) -> &mut ToolSettings {
+        self.host.tool_mut()
+    }
+    fn clipboard_mut(&mut self) -> &mut Clipboard {
+        self.host.clipboard_mut()
+    }
+    fn toast_mut(&mut self) -> &mut Option<StatusToast> {
+        self.host.toast_mut()
+    }
+    fn parts_mut(&mut self) -> (&mut Tab, &mut ToolSettings, &mut Clipboard, &mut Option<StatusToast>) {
+        self.host.parts_mut()
+    }
+    fn stop_playback(&mut self) {
+        self.host.stop_playback();
+    }
+    fn restart_playback(&mut self) {
+        self.host.restart_playback();
+    }
+    fn dialog_shown(&self) -> bool {
+        self.host.dialog_shown()
+    }
+}
+
+/// 道具の入力を、砦の中で `f(通行証)` として受ける（部屋の外から道具の入力を受ける入口はこれ1つ）。途中で止まったら、
+/// その入力を無かったことにして（ドラッグを取り消す：`recover_from_panic`）`None`
+pub(crate) fn with_tool_input<H: ActionHost, R>(host: &mut H, f: impl FnOnce(&mut ToolInput<'_, H>) -> R) -> Option<R> {
+    let out = guarded(|| f(&mut ToolInput { host: &mut *host }));
+    if out.is_none() {
+        recover_from_panic(host);
+    }
+    out
 }
 
 fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
@@ -1255,7 +1325,7 @@ fn dispatch(host: &mut impl ActionHost, action: Action) -> bool {
             let Some(k) = l.keyframe_index_starting_at(kf_start) else {
                 return;
             };
-            l.trim_sound(k, edge, frame, &doc.sounds, doc.fps);
+            l.trim_sound(k, edge, frame, doc.sounds(), doc.fps);
         }),
         Action::InsertKeyframe { copy_prev } => apply_timeline_insert_keyframe(tab, copy_prev),
         Action::DeleteKeyframe => apply_timeline_delete_keyframe(tab),

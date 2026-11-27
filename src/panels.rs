@@ -1268,7 +1268,7 @@ fn draw_keyframe_sound_properties(tab: &Tab, actions: &mut Vec<UiAction>, ui: &m
     draw_panel_separator(ui);
     draw_panel_section_label(ui, "サウンド", 4.0);
     let mut chosen = current;
-    egui::ComboBox::from_id_salt(("keyframe_sound", tab.id))
+    egui::ComboBox::from_id_salt(("keyframe_sound", tab.id()))
         .width(ui.available_width())
         .selected_text(name_of(current))
         .show_ui(ui, |ui| {
@@ -1629,7 +1629,7 @@ fn draw_library_symbol_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egu
     let mut rename_req: Option<(u64, String)> = None;
     let mut clear_renaming_id: Option<u64> = None;
 
-    let active_doc_id = tab.id;
+    let active_doc_id = tab.id();
     // 下に音の一覧があるときは、残りの高さを2つの一覧で半分ずつ分ける（シンボルが少なければ、詰めた残りを音の一覧に回す）
     let max_height = if tab.doc().sounds.is_empty() {
         f32::INFINITY
@@ -1726,7 +1726,7 @@ fn draw_library_sound_list(tab: &Tab, actions: &mut Vec<UiAction>, ui: &mut egui
                 return;
             };
             {
-                ui.push_id((tab.id, "sound", s.id), |ui| {
+                ui.push_id((tab.id(), "sound", s.id), |ui| {
                     egui::Frame::NONE
                         .fill(Color32::from_rgb(252, 253, 255))
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(218, 222, 230)))

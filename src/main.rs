@@ -206,8 +206,8 @@ pub(crate) struct Is2dApp {
     pub(crate) timeline_ui: TimelineUiState,
     /// 次回新規作成される無題タブの連番（「無題-N」）
     pub(crate) next_untitled_number: usize,
-    /// 次回新規作成されるドキュメントタブの一意ID
-    pub(crate) next_doc_id: u64,
+    /// タブの番号を配る係（`canvas_tool::TabIds`）
+    pub(crate) tab_ids: canvas_tool::TabIds,
     /// 直近にOSウィンドウへ送信したタイトル文字列（重複送信防止用キャッシュ）
     pub(crate) last_window_title: String,
     /// 未保存変更確認モーダル（egui ウィンドウ）の表示待機状態
@@ -234,8 +234,10 @@ pub(crate) struct Is2dApp {
 
 impl Default for Is2dApp {
     fn default() -> Self {
+        let mut tab_ids = canvas_tool::TabIds::default();
+        let first = tab_ids.fresh();
         Self {
-            tabs: vec![Tab::new_empty(1, 1)],
+            tabs: vec![Tab::new_empty(first, 1)],
             active: 0,
             tool: ToolSettings::default(),
             clipboard: Clipboard::default(),
@@ -243,7 +245,7 @@ impl Default for Is2dApp {
             right_panel_tab: RightPanelTab::default(),
             timeline_ui: TimelineUiState::default(),
             next_untitled_number: 2,
-            next_doc_id: 2,
+            tab_ids,
             last_window_title: String::new(),
             pending_close_confirm: None,
             allow_viewport_close: false,
@@ -338,10 +340,8 @@ impl ProjectWorkspace for Is2dApp {
         self.active = index;
     }
 
-    fn alloc_doc_id(&mut self) -> u64 {
-        let id = self.next_doc_id;
-        self.next_doc_id = self.next_doc_id.saturating_add(1);
-        id
+    fn alloc_doc_id(&mut self) -> canvas_tool::FreshTabId {
+        self.tab_ids.fresh()
     }
 
     fn alloc_untitled_number(&mut self) -> usize {
@@ -746,49 +746,54 @@ impl Is2dApp {
                 return;
             }
         }
-        if self.tool.tool == Tool::Eyedropper {
-            let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
-                || response.dragged_by(egui::PointerButton::Primary)
-                || response.clicked_by(egui::PointerButton::Primary);
-            if sampling {
-                if let Some(pt) = mouse_pt {
-                    tool_paint::pick_color_at(self, pt);
+        // 道具の入力は、砦の中で受ける（途中で止まったら、その入力を無かったことにする：`with_tool_input`）
+        let tool = self.tool.tool;
+        doc_actions::with_tool_input(self, |input| {
+            if tool == Tool::Eyedropper {
+                let sampling = (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))
+                    || response.dragged_by(egui::PointerButton::Primary)
+                    || response.clicked_by(egui::PointerButton::Primary);
+                if sampling {
+                    if let Some(pt) = mouse_pt {
+                        tool_paint::pick_color_at(input, pt);
+                    }
                 }
+                return;
             }
-        } else if tool_allowed {
-            match self.tool.tool {
+            if !tool_allowed {
+                return;
+            }
+            match tool {
                 Tool::Brush | Tool::Pencil | Tool::Eraser => {
-                    tool_paint::handle_brush_or_eraser_input(self, response, mouse_pt);
+                    tool_paint::handle_brush_or_eraser_input(input, response, mouse_pt);
                 }
                 Tool::Bucket => {
-                    let just_pressed =
-                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            let color = self.tool.brush_color;
-                            apply(self, Action::BucketFill { pt, color });
+                            let color = input.tool().brush_color;
+                            apply(input, Action::BucketFill { pt, color });
                         }
                     }
                 }
                 Tool::InkBottle => {
-                    let just_pressed =
-                        response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+                    let just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
                     if just_pressed {
                         if let Some(pt) = mouse_pt {
-                            let stroke = self.tool.stroke;
-                            apply(self, Action::InkBottle { pt, stroke });
+                            let stroke = input.tool().stroke;
+                            apply(input, Action::InkBottle { pt, stroke });
                         }
                     }
                 }
                 Tool::Eyedropper => {}
                 Tool::Select => {
-                    tool_select::handle_select_tool_input(self, ui, response, mouse_pt);
+                    tool_select::handle_select_tool_input(input, ui, response, mouse_pt);
                 }
                 Tool::Transform => {
-                    tool_transform::handle_transform_tool_input(self, ui, response, mouse_pt);
+                    tool_transform::handle_transform_tool_input(input, ui, response, mouse_pt);
                 }
             }
-        }
+        });
     }
 
     /// 現在のレイヤー・フレーム状態から常時表示すべき状態連動メッセージを判定する
@@ -1064,6 +1069,14 @@ impl Is2dApp {
                 w.submit(self.tab_copies.get());
             }
         }
+        // 裏の書き手が、書く途中で止まったタブ（内部の不具合）を知らせる
+        let failed = self.recovery_writer.as_ref().map(recovery::RecoveryWriter::take_failures).unwrap_or_default();
+        if !failed.is_empty() {
+            self.notify_warning(format!(
+                "内部の不具合で、タブ「{}」の作業の控え（復旧ファイル）を書けませんでした。保存しておいてください",
+                failed.join("」「")
+            ));
+        }
     }
 
     /// 今のタブを、復旧ファイルに書き終えるまで待つ（確認なしに終わるとき・画面の処理で止まったとき）
@@ -1148,7 +1161,17 @@ fn load_notice_text(notices: &[timeline::LoadNotice]) -> Option<String> {
         .collect();
     let sound = (!sounds.is_empty())
         .then(|| format!("音「{}」を読めなかったので、鳴らさずに開きました（保存すると元のまま書きます）", sounds.join("」「")));
-    let lines: Vec<String> = [repaired, blank, sound].into_iter().flatten().collect();
+    let short: Vec<&str> = notices
+        .iter()
+        .filter_map(|n| match n {
+            LoadNotice::ShortSound(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let short = (!short.is_empty()).then(|| {
+        format!("音「{}」が、付けた区間より短く読めたので、足りない所は鳴らさずに開きました（保存すると区間は元のまま書きます）", short.join("」「"))
+    });
+    let lines: Vec<String> = [repaired, blank, sound, short].into_iter().flatten().collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 

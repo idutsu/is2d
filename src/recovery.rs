@@ -60,7 +60,7 @@ impl TabCopy {
     /// タブ `tab` の控え
     pub(crate) fn of(tab: &Tab) -> Self {
         Self {
-            id: tab.id,
+            id: tab.id(),
             untitled_number: tab.untitled_number,
             dirty: tab.history().is_dirty(),
             file: tab.file.clone(),
@@ -106,7 +106,7 @@ impl TabCopies {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let now = tabs
             .iter()
-            .map(|t| (t.id, t.history().content_gen, t.file.as_deref(), t.untitled_number, t.history().is_dirty()));
+            .map(|t| (t.id(), t.history().content_gen, t.file.as_deref(), t.untitled_number, t.history().is_dirty()));
         if now.eq(held.iter().map(|u| (u.id, u.content_gen, u.file.as_deref(), u.untitled_number, u.dirty))) {
             return false;
         }
@@ -136,6 +136,9 @@ struct WriterShared {
     queued: Condvar,
     /// 書く係（書くのは同時に1つだけ）
     core: Mutex<WriterCore>,
+    /// 書く途中で止まった（内部の不具合）タブの名前（画面が毎コマ取り出して知らせる：`take_failures`。書いている間も待たず
+    /// に取り出せるよう、書く係とは別に持つ）
+    failed: Mutex<Vec<String>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -181,6 +184,7 @@ impl RecoveryWriter {
             queue: Mutex::new(WriterQueue::default()),
             queued: Condvar::new(),
             core: Mutex::new(WriterCore { dir, token, lock, written: 0, journals: HashMap::new() }),
+            failed: Mutex::new(Vec::new()),
             thread: Mutex::new(None),
         });
         let worker = shared.clone();
@@ -215,8 +219,14 @@ impl RecoveryWriter {
         let mut core = self.0.core.lock().unwrap_or_else(PoisonError::into_inner);
         // 裏のスレッドが先に取って書いていれば、書き終わっている（`core.written` が進んでいる）
         if let Some((m, items)) = job.filter(|(m, _)| *m == n) {
-            core.write(m, &items);
+            let failed = core.write(m, &items);
+            self.0.note_failures(failed);
         }
+    }
+
+    /// 書く途中で止まった（内部の不具合）タブの名前を取り出す（画面が毎コマ取り出して知らせる）
+    pub(crate) fn take_failures(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.failed.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// 書き手を止める（いま書いている分を書き終えてから）。`discard` なら、書いた復旧ファイルをみな消す（確認ありで終わる
@@ -233,10 +243,20 @@ impl RecoveryWriter {
         }
         let mut core = self.0.core.lock().unwrap_or_else(PoisonError::into_inner);
         if discard {
-            core.write(u64::MAX, &[]);
+            let failed = core.write(u64::MAX, &[]);
+            self.0.note_failures(failed);
         }
         if core.lock.take().is_some() {
             let _ = std::fs::remove_file(core.dir.join(format!("{}.lock", core.token)));
+        }
+    }
+}
+
+impl WriterShared {
+    /// 書く途中で止まったタブの名前 `failed` を、画面が取り出す所に足す
+    fn note_failures(&self, failed: Vec<String>) {
+        if !failed.is_empty() {
+            self.failed.lock().unwrap_or_else(PoisonError::into_inner).extend(failed);
         }
     }
 }
@@ -259,7 +279,8 @@ fn run_writer(shared: &WriterShared) {
         let Some((n, items)) = job else {
             break;
         };
-        shared.core.lock().unwrap_or_else(PoisonError::into_inner).write(n, &items);
+        let failed = shared.core.lock().unwrap_or_else(PoisonError::into_inner).write(n, &items);
+        shared.note_failures(failed);
     }
 }
 
@@ -268,9 +289,10 @@ impl WriterCore {
     /// 変わった所だけを書き足す。名前が変わった（名前を付けて保存した）タブは、前のファイルを消して新しく作る。保存した
     /// タブは「保存した」の印を書き足す。控えに無いタブ（閉じた）の復旧ファイルは消す。書けなかったタブは忘れて、次の
     /// 控えで作り直す
-    fn write(&mut self, n: u64, items: &[TabCopy]) {
+    fn write(&mut self, n: u64, items: &[TabCopy]) -> Vec<String> {
+        let mut failed = Vec::new();
         if n <= self.written {
-            return;
+            return failed;
         }
         self.written = n;
         let gone: Vec<u64> = self.journals.keys().copied().filter(|id| !items.iter().any(|i| i.id == *id)).collect();
@@ -280,58 +302,70 @@ impl WriterCore {
             }
         }
         if items.is_empty() || std::fs::create_dir_all(&self.dir).is_err() {
-            return;
+            return failed;
         }
         for item in items {
-            if !item.dirty {
-                if let Some(j) = self.journals.get_mut(&item.id) {
-                    if j.journal.mark_saved().is_err() {
-                        if let Some(j) = self.journals.remove(&item.id) {
-                            self.remove(item.id, &j.journal);
-                        }
+            // タブ1つ分を砦の中で書く（途中で止まったら、そのタブだけを飛ばし（前に書けた控えは残る）、書き足すファイルは
+            // 次の控えで作り直す。ほかのタブは続けて書き、止まったことは画面に知らせる：設計審査 392e9af の D-1。前は止まると
+            // 書き手ごと黙っていなくなり、以後どのタブの控えも書かれなかった）
+            if crate::doc_actions::guarded(|| self.write_tab(item)).is_none() {
+                self.journals.remove(&item.id);
+                failed.push(item.name());
+            }
+        }
+        failed
+    }
+
+    /// タブ `item` を書く（`write` のタブ1つ分）
+    fn write_tab(&mut self, item: &TabCopy) {
+        if !item.dirty {
+            if let Some(j) = self.journals.get_mut(&item.id) {
+                if j.journal.mark_saved().is_err() {
+                    if let Some(j) = self.journals.remove(&item.id) {
+                        self.remove(item.id, &j.journal);
                     }
                 }
-                continue;
             }
-            let name = format!("{}-{}-{RECOVER_MARK}{}.is2dj", self.token, item.id, item.name());
-            let path = self.dir.join(&name);
-            let tmp = self.dir.join(format!(".{name}.tmp"));
-            let source = item.file.as_deref();
-            match self.journals.get_mut(&item.id) {
-                // 前に書いたときから変わっていない（中身の世代も保存先も同じ）：書かない
-                Some(j) if j.journal.path() == path && j.content_gen == item.content_gen && j.file == item.file => {
-                    continue;
-                }
-                // 同じ名前のファイルに、変わった所を書き足す
-                Some(j) if j.journal.path() == path => {
-                    if j.journal.write(&tmp, &item.document(), source).is_ok() {
-                        j.content_gen = item.content_gen;
-                        j.file.clone_from(&item.file);
-                    } else {
-                        self.journals.remove(&item.id);
-                    }
-                    continue;
-                }
-                // 名前が変わった：前のファイルを消して、新しく作る
-                Some(_) => {
-                    if let Some(old) = self.journals.remove(&item.id) {
-                        self.remove(item.id, &old.journal);
-                    }
-                }
-                None => {}
+            return;
+        }
+        let name = format!("{}-{}-{RECOVER_MARK}{}.is2dj", self.token, item.id, item.name());
+        let path = self.dir.join(&name);
+        let tmp = self.dir.join(format!(".{name}.tmp"));
+        let source = item.file.as_deref();
+        match self.journals.get_mut(&item.id) {
+            // 前に書いたときから変わっていない（中身の世代も保存先も同じ）：書かない
+            Some(j) if j.journal.path() == path && j.content_gen == item.content_gen && j.file == item.file => {
+                return;
             }
-            // 一覧を先に書き、それから復旧ファイルを作る（間で止まっても、指す先の無い一覧は起動したときに消える）
-            let entry = self.entry_path(item.id);
-            if std::fs::write(&entry, path.to_string_lossy().as_bytes()).is_err() {
-                continue;
+            // 同じ名前のファイルに、変わった所を書き足す
+            Some(j) if j.journal.path() == path => {
+                if j.journal.write(&tmp, &item.document(), source).is_ok() {
+                    j.content_gen = item.content_gen;
+                    j.file.clone_from(&item.file);
+                } else {
+                    self.journals.remove(&item.id);
+                }
+                return;
             }
-            match Journal::create(&path, &tmp, &item.document(), source) {
-                Ok(journal) => {
-                    self.journals.insert(item.id, TabJournal { journal, content_gen: item.content_gen, file: item.file.clone() });
+            // 名前が変わった：前のファイルを消して、新しく作る
+            Some(_) => {
+                if let Some(old) = self.journals.remove(&item.id) {
+                    self.remove(item.id, &old.journal);
                 }
-                Err(_) => {
-                    let _ = std::fs::remove_file(&entry);
-                }
+            }
+            None => {}
+        }
+        // 一覧を先に書き、それから復旧ファイルを作る（間で止まっても、指す先の無い一覧は起動したときに消える）
+        let entry = self.entry_path(item.id);
+        if std::fs::write(&entry, path.to_string_lossy().as_bytes()).is_err() {
+            return;
+        }
+        match Journal::create(&path, &tmp, &item.document(), source) {
+            Ok(journal) => {
+                self.journals.insert(item.id, TabJournal { journal, content_gen: item.content_gen, file: item.file.clone() });
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&entry);
             }
         }
     }

@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, PointerButton, Pos2, Stroke, Vec2};
 use kurbo::Point;
 
 use crate::canvas_tool::{ActiveCanvasDrag, Tab, Tool};
-use crate::doc_actions::{apply, topmost_visible_at, Action, ActionHost};
+use crate::doc_actions::{apply, topmost_visible_at, Action, ActionHost, ToolInput};
 use crate::vector_engine::{append_mesh, tessellate_raw_polygon, transform_mesh_to_screen};
 use crate::vector_stroke::{input_step, stroke_preview_outline, CenterlineBuilder};
 
@@ -11,7 +11,7 @@ use crate::vector_stroke::{input_step, stroke_preview_outline, CenterlineBuilder
 // ============================================================================
 
 pub(crate) fn handle_brush_or_eraser_input(
-    host: &mut impl ActionHost,
+    host: &mut ToolInput<'_, impl ActionHost>,
     response: &egui::Response,
     mouse_pt: Option<Point>,
 ) {
@@ -123,7 +123,7 @@ pub(crate) fn topmost_visible_color_at(tab: &Tab, pt: Point) -> Option<Color32> 
 
 /// スポイトツール（色抽出）：指定位置 `pt` でいちばん手前に見えているもの（`topmost_visible_at`）が線なら、その線の色と
 /// 太さをインクボトルの線に、塗りならその色を `host.tool_mut().brush_color` に設定する
-pub(crate) fn pick_color_at(host: &mut impl ActionHost, pt: Point) -> Option<Color32> {
+pub(crate) fn pick_color_at(host: &mut ToolInput<'_, impl ActionHost>, pt: Point) -> Option<Color32> {
     let seen = topmost_visible_at(host.tab(), pt)?;
     match seen.line {
         Some(stroke) => host.tool_mut().stroke = stroke,

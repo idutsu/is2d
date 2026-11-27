@@ -165,7 +165,7 @@ type TimelineKey = (u64, usize, Option<u64>);
 /// タブ `tab` の今のタイムラインの識別キー（タブの切り替え・シンボルの出入りで変わる）
 fn timeline_key(tab: &Tab) -> TimelineKey {
     (
-        tab.id,
+        tab.id(),
         tab.session.edit_path().len(),
         tab.session.edit_path().last().map(|s| s.symbol_id),
     )

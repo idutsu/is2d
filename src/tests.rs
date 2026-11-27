@@ -1656,14 +1656,14 @@ fn test_eyedropper_picks_topmost_shape_color() {
 
     // 1. 空白部分をクリックしても色は変わらないこと
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(20.0, 20.0)),
+        tool(&mut app, |t| tool_paint::pick_color_at(t, Point::new(20.0, 20.0))),
         None
     );
     assert_eq!(app.tool.brush_color, green);
 
     // 2. 背面の赤シェイプ単独部分 (120, 200) をクリックすると赤になること
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(120.0, 200.0)),
+        tool(&mut app, |t| tool_paint::pick_color_at(t, Point::new(120.0, 200.0))),
         Some(red)
     );
     assert_eq!(app.tool.brush_color, red);
@@ -1673,7 +1673,7 @@ fn test_eyedropper_picks_topmost_shape_color() {
     assert!(s.shapes[0].contains_point(Point::new(200.0, 200.0)));
     assert!(s.shapes[1].contains_point(Point::new(200.0, 200.0)));
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(200.0, 200.0)),
+        tool(&mut app, |t| tool_paint::pick_color_at(t, Point::new(200.0, 200.0))),
         Some(blue),
         "同一座標で2つの図形が重なっている場合、最前面の図形色が優先されること"
     );
@@ -2015,7 +2015,7 @@ fn test_copy_paste_group_assigns_new_gid_and_alt_drag_symbol_undo() {
     let count_before = scene_summary(&app).shapes.len();
 
     let move_drag =
-        clipboard_ops::begin_move_selection_drag(&mut app, Point::new(136.0, 116.0), true);
+        tool(&mut app, |t| clipboard_ops::begin_move_selection_drag(t, Point::new(136.0, 116.0), true));
     assert_eq!(app.scene().len(), count_before + 1);
     app.session.translate_move_overlay(KVec2::new(60.0, 40.0));
     doc_actions::finish_move_selection_drag(
@@ -2128,7 +2128,7 @@ fn test_multilayer_isolation_cross_layer_marquee_and_lock_protection() {
     assert_eq!(scene_summary(&app).shapes.len(), 1);
     app.tool.brush_color = blue;
     assert_eq!(
-        tool_paint::pick_color_at(&mut app, Point::new(125.0, 100.0)),
+        tool(&mut app, |t| tool_paint::pick_color_at(t, Point::new(125.0, 100.0))),
         Some(red)
     );
 
@@ -3302,7 +3302,7 @@ fn test_active_canvas_drag_state_machine_and_symbol_inplace_roundtrip_cache() {
 
     let clean_bbox = scene_summary(&app).shapes[0].bounding_box();
     app.session.set_selected_indices(vec![0]);
-    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, Point::ZERO, false);
+    let move_drag = tool(&mut app, |t| clipboard_ops::begin_move_selection_drag(t, Point::ZERO, false));
     app.session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
     app.session.translate_move_overlay(KVec2::new(500.0, 500.0));
     assert!(canvas_tool::clear_selection(&mut app));
@@ -4291,24 +4291,23 @@ fn collapsing_scale_drag_shows_unplaceable_and_commit_refuses() {
     let before = app.doc.root.layers[0].keyframes[0].cel.shapes();
     // 右の辺のつまみを、左の辺（拡大の基準）まで引く：横の倍率が 0
     let handle = Point::new(bbox.x1, bbox.center().y);
-    tool_transform::start_transform_drag(&mut app, handle, false, false);
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, handle, false, false));
     assert!(matches!(
         app.session.drag,
         canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Scale { .. })
     ));
     let collapsed = Point::new(bbox.x0, bbox.center().y);
-    tool_transform::update_transform_drag(app.tab_mut(), collapsed, false, false);
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, collapsed, false, false));
     assert!(app.session.drag.unplaceable(), "0 倍は置けない");
-    tool_transform::update_transform_drag(
-        app.tab_mut(),
+    tool(&mut app, |t| tool_transform::update_transform_drag(t,
         Point::new(bbox.x1 + 20.0, bbox.center().y),
         false,
         false,
-    );
+    ));
     assert!(!app.session.drag.unplaceable(), "ふつうの拡大は置ける");
-    tool_transform::update_transform_drag(app.tab_mut(), collapsed, false, false);
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, collapsed, false, false));
     app.toast = None;
-    tool_transform::finish_transform_drag(&mut app, Some(collapsed));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(collapsed)));
     let after = app.doc.root.layers[0].keyframes[0].cel.shapes();
     assert_eq!(after.len(), before.len());
     assert!(after
@@ -5568,7 +5567,7 @@ fn test_corrupt_and_truncated_file_returns_error_without_modifying_app() {
     let mut app = Is2dApp::default();
     app.doc.stage_size = Vec2::new(960.0, 540.0);
     let good = project_io::project_file_bytes(
-        &project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(9, 9)).unwrap(),
+        &project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 9)).unwrap(),
     )
     .unwrap();
 
@@ -6037,7 +6036,7 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
 
     // グループ内部の生シェイプ上の座標 (150, 100) をダブルクリックしても exit_current_group が呼ばれずグループ編集スコープに留まること
     let pt_on_raw = Point::new(150.0, 100.0);
-    tool_select::handle_canvas_double_click(&mut app, pt_on_raw, false);
+    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, pt_on_raw, false));
     assert_eq!(
         app.session.editing_group_path(),
         vec![gid],
@@ -6045,7 +6044,7 @@ fn test_double_click_raw_shape_does_not_exit_group_or_symbol() {
     );
     // 空白背景 (400, 400) をダブルクリックすると exit_current_group で親階層へ戻れること
     let pt_empty = Point::new(400.0, 400.0);
-    tool_select::handle_canvas_double_click(&mut app, pt_empty, false);
+    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, pt_empty, false));
     assert!(app.session.editing_group_path().is_empty());
 }
 
@@ -7513,9 +7512,9 @@ fn small_scale_and_rotate_drags_at_high_zoom_are_committed() {
     let undo_len = app.history.undo_stack.len();
     let start = Point::new(bbox.x1, bbox.center().y);
     let end = start + KVec2::new(4.0, 0.0);
-    tool_transform::start_transform_drag(&mut app, start, false, false);
-    tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(end));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, start, false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, end, false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(end)));
     assert_eq!(app.history.undo_stack.len(), undo_len + 1, "拡大を確定する");
     assert!((bounds(&app).width() - before.width() - 4.0).abs() < 0.5);
     // 角の外側の回転のつまみを、基準点のまわりに 0.001rad（角は画面で約 2px 動く）
@@ -7523,9 +7522,9 @@ fn small_scale_and_rotate_drags_at_high_zoom_are_committed() {
     let (bbox, pivot) = app.session.selection_bbox_and_pivot(zoom).unwrap();
     let start = Point::new(bbox.x1 + 15.0 / zoom as f64, bbox.y0 - 15.0 / zoom as f64);
     let end = kurbo::Affine::rotate_about(0.001, pivot) * start;
-    tool_transform::start_transform_drag(&mut app, start, false, false);
-    tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(end));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, start, false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, end, false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(end)));
     assert_eq!(app.history.undo_stack.len(), undo_len + 1, "回転を確定する");
 }
 
@@ -7892,7 +7891,7 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     let orig_seg = scene_summary(&app).shapes[0].exterior().segments[seg_idx];
     let pt_near_end = orig_seg.eval(0.10) + kurbo::Vec2::new(0.0, 2.0);
 
-    tool_select::start_reshape_drag(&mut app, pt_near_end, false, false);
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, pt_near_end, false, false));
     assert!(
         matches!(
             app.session.drag,
@@ -7900,7 +7899,7 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
         ),
         "エッジ端点付近のドラッグ開始で PullEdge 状態に入ること"
     );
-    tool_select::update_reshape_drag(&mut app, pt_near_end);
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, pt_near_end));
     let after_zero_move = app.scene().get(0).unwrap().exterior().segments[seg_idx];
     assert!(
         (after_zero_move.p1 - orig_seg.p1).hypot() < 1e-6,
@@ -7912,7 +7911,7 @@ fn test_pull_edge_near_endpoint_and_off_center_does_not_jump_on_drag_start() {
     // 微小移動 (dy = +2.0) でも跳びなく滑らかに移動すること（ドラッグ中は Scene の Overlay に反映され、セルは不変）
     let grab_t = 0.18_f64;
     let grab_before = orig_seg.eval(grab_t);
-    tool_select::update_reshape_drag(&mut app, pt_near_end + kurbo::Vec2::new(0.0, 2.0));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, pt_near_end + kurbo::Vec2::new(0.0, 2.0)));
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes()[0]
             .exterior()
@@ -7951,9 +7950,9 @@ fn dragging_an_anchor_near_another_anchor_does_not_snap() {
         let near = |p: Point| *before.iter().min_by(|a, b| (**a - p).hypot().total_cmp(&(**b - p).hypot())).expect("頂点がある");
         let (v, u) = (near(Point::new(230.0, 300.0)), near(Point::new(290.0, 300.0)));
         let to = u + KVec2::new(-5.0, 0.0);
-        tool_select::start_reshape_drag(&mut app, v, false, false);
-        tool_select::update_reshape_drag(&mut app, to);
-        tool_select::finish_reshape_drag(&mut app, Some(to));
+        tool(&mut app, |t| tool_select::start_reshape_drag(t, v, false, false));
+        tool(&mut app, |t| tool_select::update_reshape_drag(t, to));
+        tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(to)));
         let after = nodes(&app);
         assert!(after.iter().any(|p| (*p - to).hypot() < 1e-3), "アンカーの表示 {show_anchors}：カーソルの所に無い（吸い付いた）");
         assert!(after.contains(&u), "吸い付かれた側のアンカーが変わった");
@@ -7985,10 +7984,10 @@ fn pulling_an_edge_moves_only_that_edge_while_anchors_are_shown() {
             .min_by(|a, b| (a.eval(0.5) - outer_mid).hypot().total_cmp(&(b.eval(0.5) - outer_mid).hypot()))
             .expect("区間がある");
         let from = q.eval(0.5);
-        tool_select::start_reshape_drag(&mut app, from, false, false);
+        tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
         let to = from + KVec2::new(0.0, -15.0);
-        tool_select::update_reshape_drag(&mut app, to);
-        tool_select::finish_reshape_drag(&mut app, Some(to));
+        tool(&mut app, |t| tool_select::update_reshape_drag(t, to));
+        tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(to)));
         let after: Vec<Point> = scene_summary(&app).shapes[0].exterior().segments.iter().map(|q| q.p0).collect();
         let kept = anchors.iter().filter(|p| after.contains(p)).count();
         if show_anchors {
@@ -8021,10 +8020,10 @@ fn pulling_a_wave_crest_does_not_drag_the_whole_wavy_line() {
     // 真ん中あたりの、上の縁の波の頂点（x = 525 の山。y が小さい方が上）
     let crest = Point::new(525.0, 300.0 - 8.0 - 4.0);
     let v = *before.iter().min_by(|a, b| (**a - crest).hypot().total_cmp(&(**b - crest).hypot())).expect("頂点がある");
-    tool_select::start_reshape_drag(&mut app, v, false, false);
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, v, false, false));
     let to = v + KVec2::new(0.0, -20.0);
-    tool_select::update_reshape_drag(&mut app, to);
-    tool_select::finish_reshape_drag(&mut app, Some(to));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, to));
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(to)));
     let after: Vec<Point> = scene_summary(&app).shapes.iter().flat_map(|s| s.exterior().segments.iter().map(|q| q.p0)).collect();
     let far_moved: Vec<&Point> = before.iter().filter(|p| (p.x - v.x).abs() > 150.0 && !after.contains(p)).collect();
     assert!(far_moved.is_empty(), "つかんだ所から 150px より遠い頂点が動いた：{} 個", far_moved.len());
@@ -8060,7 +8059,7 @@ fn dragging_an_anchor_pulls_its_neighbours_only_while_anchors_are_hidden() {
             .iter()
             .min_by(|a, b| (**a - outer_mid).hypot().total_cmp(&(**b - outer_mid).hypot()))
             .expect("頂点がある");
-        tool_select::start_reshape_drag(&mut app, v, false, false);
+        tool(&mut app, |t| tool_select::start_reshape_drag(t, v, false, false));
         assert!(
             matches!(
                 app.session.drag,
@@ -8070,8 +8069,8 @@ fn dragging_an_anchor_pulls_its_neighbours_only_while_anchors_are_hidden() {
             "アンカーの表示 {show_anchors}：引っぱりかアンカーだけかが違う"
         );
         let to = v + KVec2::new(0.0, -20.0);
-        tool_select::update_reshape_drag(&mut app, to);
-        tool_select::finish_reshape_drag(&mut app, Some(to));
+        tool(&mut app, |t| tool_select::update_reshape_drag(t, to));
+        tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(to)));
         let after: Vec<Point> = scene_summary(&app).shapes[0].exterior().segments.iter().map(|q| q.p0).collect();
         assert!(after.iter().any(|p| (*p - to).hypot() < 1e-3), "つかんだアンカーがカーソルの所に無い");
         let kept = before.iter().filter(|p| **p != v && after.contains(p)).count();
@@ -8216,9 +8215,9 @@ fn test_pivot_commit_restores_marquee_slice_and_persists() {
         app.session.transform_pivot,
         bbox,
     );
-    tool_transform::start_transform_drag(&mut app, current_pivot, false, false);
-    tool_transform::update_transform_drag(&mut app, Point::new(130.0, 110.0), false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(Point::new(130.0, 110.0)));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, current_pivot, false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, Point::new(130.0, 110.0), false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(Point::new(130.0, 110.0))));
 
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes().len(),
@@ -8502,7 +8501,7 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
 
     // 1. 選択移動ドラッグを開始して微小移動未満で終了（noop リストア）してもキャッシュが失われないこと
     let move_drag =
-        clipboard_ops::begin_move_selection_drag(&mut app, Point::new(150.0, 100.0), false);
+        tool(&mut app, |t| clipboard_ops::begin_move_selection_drag(t, Point::new(150.0, 100.0), false));
     doc_actions::finish_move_selection_drag(
         &mut app,
         move_drag.total_delta,
@@ -8520,12 +8519,11 @@ fn test_cancel_drag_and_noop_drag_preserve_tessellated_mesh_caches() {
         .scene()
         .selection_bounding_box(app.session.selection(), app.view.zoom())
         .unwrap();
-    tool_transform::start_transform_drag(
-        &mut app,
+    tool(&mut app, |t| tool_transform::start_transform_drag(t,
         Point::new(bbox.x0 + 15.0, bbox.center().y),
         false,
         false,
-    );
+    ));
     canvas_tool::cancel_active_drag(&mut app);
     assert!(
         app.scene().get(0).unwrap().has_cached_fill_mesh()
@@ -9354,13 +9352,18 @@ fn test_scale_commit_and_repeated_transform_rebuild_mesh_cache() {
     // 1. 自由変形の拡大ドラッグ (update_transform_overlay) 中は既存頂点数を再利用し、
     //    CommitTransformDrag 確定時に rebuild_cache() されて曲線分割頂点数が増加すること (#5)
     app.session.set_selected_indices(vec![0]);
-    let orig_shapes = app.session.begin_transform_overlay();
+    let orig_shapes = tool(&mut app, |t| {
+        let p = t.proof();
+        t.tab_mut().session.begin_transform_overlay(p)
+    });
     let pivot = scene_summary(&app).shapes[0].bounding_box().center();
     let scale_xform = kurbo::Affine::translate(pivot.to_vec2())
         * kurbo::Affine::scale(4.0)
         * kurbo::Affine::translate(-pivot.to_vec2());
-    app.session
-        .update_transform_overlay(&orig_shapes, scale_xform);
+    tool(&mut app, |t| {
+        let p = t.proof();
+        t.tab_mut().session.update_transform_overlay(p, &orig_shapes, scale_xform);
+    });
     assert_eq!(
         app.scene().get(0).unwrap().fill_mesh().vertices.len(),
         initial_verts,
@@ -11380,9 +11383,9 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     assert_eq!(app.session.selection().shapes.len(), 1);
     let moved_shape_id = *app.session.selection().shapes.iter().next().unwrap();
 
-    let move_drag = clipboard_ops::begin_move_selection_drag(&mut app, target_pt, false);
+    let move_drag = tool(&mut app, |t| clipboard_ops::begin_move_selection_drag(t, target_pt, false));
     app.session.drag = canvas_tool::ActiveCanvasDrag::MoveSelection(move_drag);
-    tool_select::update_reshape_drag(&mut app, Point::new(28.0, 22.0));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(28.0, 22.0)));
 
     // ドラッグ中（マウス移動1回目直後）に Scene から fill_mesh() を読んだとき、
     // 動かしていない残り1999個の図形がすべてドラッグ前と同一の Arc<Mesh> を保持していること
@@ -11402,7 +11405,7 @@ fn test_stage4_drag_2000_shapes_preserves_unmoved_mesh_caches() {
     assert_eq!(unmoved_during_drag, 1999);
 
     // さらにマウス移動してドラッグ確定（Action::MoveSelected 相当のタイムライン同期含む）
-    tool_select::update_reshape_drag(&mut app, Point::new(32.0, 25.0));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(32.0, 25.0)));
     run(
         &mut app,
         &[Action::MoveSelected {
@@ -12072,8 +12075,8 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         let s0 = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
         { let mut sel = app.session.selection().clone(); sel.insert_shape(&s0); app.session.replace_selection(sel); }
     }
-    tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, false);
-    tool_select::update_reshape_drag(&mut app, Point::new(120.0, 140.0));
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, Point::new(120.0, 100.0), false, false));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(120.0, 140.0)));
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes()[0].bounding_box(),
         orig_red_bbox,
@@ -12083,7 +12086,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
     let scene_last = app.scene().get(1).unwrap();
     assert_eq!(scene_last.shape_id, red_id);
     assert!((scene_last.bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5);
-    tool_select::finish_reshape_drag(&mut app, Some(Point::new(120.0, 140.0)));
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(Point::new(120.0, 140.0))));
     assert!(
         (app.scene().get(1).unwrap().bounding_box().y0 - (orig_red_bbox.y0 + 40.0)).abs() < 1e-5
     );
@@ -12096,8 +12099,8 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         let s0 = app.doc.root.layers[0].keyframes[0].cel.shapes()[0].clone();
         { let mut sel = app.session.selection().clone(); sel.insert_shape(&s0); app.session.replace_selection(sel); }
     }
-    tool_select::start_reshape_drag(&mut app, Point::new(120.0, 100.0), false, true);
-    tool_select::update_reshape_drag(&mut app, Point::new(120.0, 150.0));
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, Point::new(120.0, 100.0), false, true));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(120.0, 150.0)));
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes().len(),
         2,
@@ -12108,7 +12111,7 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         3,
         "Alt 複製ドラッグ中は Scene に元の2個 + 複製プレビュー1個の計3個が見えること"
     );
-    tool_select::finish_reshape_drag(&mut app, Some(Point::new(120.0, 150.0)));
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, Some(Point::new(120.0, 150.0))));
     run(&mut app, &[Action::Deselect]);
     run(&mut app, &[Action::Undo]);
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 2);
@@ -12123,13 +12126,12 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         .selection_bounding_box(app.session.selection(), 1.0)
         .unwrap();
     let tr_corner = Point::new(bbox.x1, bbox.y0);
-    tool_transform::start_transform_drag(&mut app, tr_corner, false, false);
-    tool_transform::update_transform_drag(
-        &mut app,
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, tr_corner, false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t,
         Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0),
         false,
         false,
-    );
+    ));
     assert_eq!(
         app.doc.root.layers[0].keyframes[0].cel.shapes()[0].bounding_box(),
         orig_red_bbox,
@@ -12140,10 +12142,9 @@ fn test_stage7a_drag_preview_uses_overlay_without_mutating_working_copy() {
         .selection_bounding_box(app.session.selection(), 1.0)
         .unwrap();
     assert!(preview_bbox.width() > orig_red_bbox.width() + 20.0);
-    tool_transform::finish_transform_drag(
-        &mut app,
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t,
         Some(Point::new(bbox.x1 + 30.0, bbox.y0 - 10.0)),
-    );
+    ));
     let committed_red = app.scene().iter().find(|s| s.shape_id == red_id).unwrap();
     assert!(committed_red.bounding_box().width() > orig_red_bbox.width() + 20.0);
     run(&mut app, &[Action::Undo]);
@@ -14112,7 +14113,7 @@ fn test_g1_3_locked_layer_eyedropper_nested_20x5_fast() {
     app.refresh_scene_base();
 
     let t0 = Instant::now();
-    let picked = tool_paint::pick_color_at(&mut app, Point::new(110.0, 100.0));
+    let picked = tool(&mut app, |t| tool_paint::pick_color_at(t, Point::new(110.0, 100.0)));
     let elapsed = t0.elapsed();
     println!(
         "[G1-3] locked layer 20^5 nested symbol eyedropper = {:.3} ms",
@@ -16158,7 +16159,7 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
         },
     );
     assert_eq!(
-        tool_paint::pick_color_at(&mut app_brush_loop, Point::new(200.0, 200.0)),
+        tool(&mut app_brush_loop, |t| tool_paint::pick_color_at(t, Point::new(200.0, 200.0))),
         Some(red),
         "ブラシで赤い塗りの上に青い円を描いて離れた緑に触れさせたとき、円の内側が赤のままであること"
     );
@@ -16194,7 +16195,7 @@ fn test_m2_7_disjoint_floating_commit_matches_full_merge_on_lift_slice_alt_dup()
     );
     let _ = apply(&mut app_fl_loop, Action::Deselect);
     assert_eq!(
-        tool_paint::pick_color_at(&mut app_fl_loop, Point::new(200.0, 200.0)),
+        tool(&mut app_fl_loop, |t| tool_paint::pick_color_at(t, Point::new(200.0, 200.0))),
         Some(red),
         "円の形の片を Alt 複製して赤い塗りと緑の図形の上に重ねて確定したとき、円の内側が赤のままであること"
     );
@@ -16639,7 +16640,7 @@ fn test_m2_10_prepared_clip_and_selective_flatten_1050_random_cases() {
 
 #[test]
 fn test_m3_1_write_project_reports_write_error() {
-    let tab = crate::canvas_tool::Tab::new_empty(1, 1);
+    let tab = crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1);
     let doc = crate::project_io::ProjectDocument::from_app(&tab).unwrap();
 
     let tmp = std::env::temp_dir().join(format!("is2d_m3_1_ro_{}.tmp", std::process::id()));
@@ -18808,14 +18809,14 @@ fn test_transform_move_drag_translates_custom_pivot_once() {
         .session
         .selection_bbox_and_pivot(app.view.zoom())
         .expect("selection bbox and pivot should exist");
-    tool_transform::start_transform_drag(&mut app, init_pivot, false, false);
-    tool_transform::update_transform_drag(app.tab_mut(), Point::new(20.0, 60.0), false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(Point::new(20.0, 60.0)));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, init_pivot, false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, Point::new(20.0, 60.0), false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(Point::new(20.0, 60.0))));
     assert_eq!(app.session.transform_pivot, Some(Point::new(20.0, 60.0)));
 
-    tool_transform::start_transform_drag(&mut app, Point::new(40.0, 50.0), false, false);
-    tool_transform::update_transform_drag(app.tab_mut(), Point::new(90.0, 50.0), false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(Point::new(90.0, 50.0)));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, Point::new(40.0, 50.0), false, false));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, Point::new(90.0, 50.0), false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(Point::new(90.0, 50.0))));
     assert_eq!(app.session.transform_pivot, Some(Point::new(70.0, 60.0)));
 }
 
@@ -20348,7 +20349,6 @@ fn test_merge_self_overlapping_batch_never_produces_duplicate_shape_ids() {
 
 #[test]
 fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
-    use crate::canvas_tool::ActiveCanvasDrag;
     use crate::doc_actions::{apply, Action};
 
     let mut app = Is2dApp::default();
@@ -20358,7 +20358,7 @@ fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
     app.session.drag = paint_drag(&[Point::new(50.0, 50.0), Point::new(150.0, 50.0)], 8.0);
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
-    assert!(matches!(app.session.drag, ActiveCanvasDrag::None));
+    assert!(matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None));
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 0);
     timeline_ui::toggle_playback(&mut app);
     assert!(!app.timeline_ui.is_playing);
@@ -20377,7 +20377,7 @@ fn test_toggle_playback_cancels_in_progress_brush_and_eraser_stroke() {
     app.session.drag = paint_drag(&[Point::new(40.0, 40.0), Point::new(160.0, 40.0)], 8.0);
     timeline_ui::toggle_playback(&mut app);
     assert!(app.timeline_ui.is_playing);
-    assert!(matches!(app.session.drag, ActiveCanvasDrag::None));
+    assert!(matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None));
     assert_eq!(app.doc.root.layers[0].keyframes[0].cel.shapes().len(), 1);
 }
 
@@ -20718,7 +20718,7 @@ fn test_alt_duplicate_and_paste_raw_shape_with_group_keeps_both_selected() {
     assert_eq!(app.session.selected_indices().len(), 2);
 
     let mut drag =
-        crate::clipboard_ops::begin_move_selection_drag(&mut app, Point::new(130.0, 100.0), true);
+        tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, Point::new(130.0, 100.0), true));
     drag.total_delta = kurbo::Vec2::new(0.0, 100.0);
     crate::doc_actions::finish_move_selection_drag(&mut app, drag.total_delta, drag.alt_duplicate);
 
@@ -21023,7 +21023,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     ];
     for (grab, alt) in grabs {
         app.toast = None;
-        tool_select::start_reshape_drag(&mut app, grab, false, alt);
+        tool(&mut app, |t| tool_select::start_reshape_drag(t, grab, false, alt));
         assert!(app.toast.is_some(), "{grab:?}：置けないことを知らせない");
         assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "{grab:?}（Alt {alt}）：断られたのにドラッグを始めた");
         assert!(app.session.floating().is_some());
@@ -21032,7 +21032,7 @@ fn grabbing_an_outline_after_a_refused_placement_starts_nothing() {
     // 自由変形ツールで、選んでいない図形をつかむ（N-3003）
     doc_actions::apply(&mut app, doc_actions::Action::SetTool { tool: Tool::Transform });
     app.toast = None;
-    tool_transform::start_transform_drag(&mut app, Point::new(550.0, 550.0), false, false);
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, Point::new(550.0, 550.0), false, false));
     assert!(app.toast.is_some(), "自由変形：置けないことを知らせない");
     assert!(matches!(app.session.drag, canvas_tool::ActiveCanvasDrag::None), "自由変形：断られたのにドラッグを始めた");
     assert_eq!(app.session.selection(), &before);
@@ -21076,7 +21076,7 @@ fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
     for lock_top in [false, true] {
         let (mut app, top) = setup();
         app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = lock_top);
-        assert_eq!(tool_paint::pick_color_at(&mut app, on_line_under_fill), Some(red), "上をロック {lock_top}");
+        assert_eq!(tool(&mut app, |t| tool_paint::pick_color_at(t, on_line_under_fill)), Some(red), "上をロック {lock_top}");
         assert_eq!(app.tool.brush_color, red, "上をロック {lock_top}：見えている赤い塗りを吸わない");
         assert_eq!(app.tool.stroke, default_stroke, "上をロック {lock_top}：隠れている線を吸った");
     }
@@ -21095,7 +21095,7 @@ fn the_eyedropper_picks_what_is_seen_even_with_locked_layers() {
             app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[top].locked = false);
         }
         app.tab_mut().with_active_timeline_mut(|tl, _| tl.layers[0].locked = true);
-        assert_eq!(tool_paint::pick_color_at(&mut app, on_line_alone), Some(green.color), "{wrap:?}");
+        assert_eq!(tool(&mut app, |t| tool_paint::pick_color_at(t, on_line_alone)), Some(green.color), "{wrap:?}");
         assert_eq!(app.tool.stroke, green, "{wrap:?}：ロックしたレイヤーの線の色と太さを吸わない");
         assert_eq!(app.tool.brush_color, white, "{wrap:?}：ロックしたレイヤーの線の色を塗りの色に入れた");
     }
@@ -21177,7 +21177,7 @@ fn the_wireframe_draws_each_edge_and_anchor_once() {
     assert_eq!(dots.len(), 4, "アンカーの数");
     // 全部を選んで動かし始める：輪郭とアンカーも、動かした所に描かれる
     assert!(apply(&mut app, Action::SelectAll));
-    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(300.0, 300.0), false);
+    let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, Point::new(300.0, 300.0), false));
     app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
     app.tab_mut().session.translate_move_overlay(KVec2::new(100.0, 0.0));
     let (moved_paths, moved_dots) = drawn(&mut app);
@@ -21316,12 +21316,12 @@ fn shift_double_click_adds_connected_lines() {
     assert!(a.len() >= 2 && b.len() >= 2, "つなぎ目のある線にならなかった");
     let on = |y: f64| Point::new(400.0, y + 40.0 * (400.0f64 / 50.0).sin());
     let selected = |app: &Is2dApp, ids: &[u64]| ids.iter().filter(|id| app.session.selection().shapes.contains(id)).count();
-    tool_select::handle_canvas_double_click(&mut app, on(200.0), false);
+    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, on(200.0), false));
     assert_eq!(selected(&app, &a), a.len(), "1本目がまとめて選ばれていない");
-    tool_select::handle_canvas_double_click(&mut app, on(500.0), true);
+    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, on(500.0), true));
     assert_eq!(selected(&app, &a), a.len(), "Shift のダブルクリックで、前の線が選択から外れた");
     assert_eq!(selected(&app, &b), b.len(), "Shift のダブルクリックで、2本目がまとめて選ばれていない");
-    tool_select::handle_canvas_double_click(&mut app, on(500.0), false);
+    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, on(500.0), false));
     assert_eq!(selected(&app, &a), 0, "Shift を押さないダブルクリックは選び直す");
     assert_eq!(selected(&app, &b), b.len());
 }
@@ -21352,7 +21352,7 @@ fn grouping_moved_duplicates_selects_the_whole_group() {
     assert_eq!(group.iter().filter(|g| g.0).count(), 4, "新しいグループに線が4本ある");
     assert!(group.iter().all(|g| g.1), "新しいグループの中に、選ばれていない図形がある：{group:?}");
     // 続けてドラッグすると、線も一緒に動く
-    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(550.0, 250.0), false);
+    let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, Point::new(550.0, 250.0), false));
     app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
     app.tab_mut().session.translate_move_overlay(KVec2::new(0.0, 100.0));
     for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
@@ -21376,9 +21376,9 @@ fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
     assert!(apply(&mut app, Action::Group));
     // Alt で複製しながら右へ（画面の操作と同じ道：つかんで、動かして、離す）
     let grab = Point::new(250.0, 250.0);
-    crate::select_ops::grab_and_move(&mut app, grab, true, true);
-    crate::select_ops::update_selection_drag(app.tab_mut(), grab + KVec2::new(300.0, 0.0));
-    crate::select_ops::finish_selection_drag(&mut app, None);
+    tool(&mut app, |t| crate::select_ops::grab_and_move(t, grab, true, true));
+    tool(&mut app, |t| crate::select_ops::update_selection_drag(t, grab + KVec2::new(300.0, 0.0)));
+    tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
     let scope = app.session.editing_group_path().to_vec();
     let dup: Vec<(bool, bool)> = app
         .scene()
@@ -21391,12 +21391,12 @@ fn dragging_an_alt_duplicated_group_moves_its_lines_too() {
     assert!(app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0).all(|s| s.active_group_id_at_scope(&scope).is_some()));
     // 続けてそのままドラッグ（つかむのは複製の上）
     let grab = Point::new(550.0, 250.0);
-    crate::select_ops::grab_and_move(&mut app, grab, true, false);
-    crate::select_ops::update_selection_drag(app.tab_mut(), grab + KVec2::new(0.0, 150.0));
+    tool(&mut app, |t| crate::select_ops::grab_and_move(t, grab, true, false));
+    tool(&mut app, |t| crate::select_ops::update_selection_drag(t, grab + KVec2::new(0.0, 150.0)));
     for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
         assert!(s.bounding_box().y0 > 330.0, "ドラッグ中に置いていかれた図形がある（線 {}）", s.line.is_some());
     }
-    crate::select_ops::finish_selection_drag(&mut app, None);
+    tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
     for s in app.scene().iter().filter(|s| s.bounding_box().x0 > 400.0) {
         assert!(s.bounding_box().y0 > 330.0, "離した後に置いていかれた図形がある（線 {}）", s.line.is_some());
     }
@@ -21470,11 +21470,11 @@ fn undo_and_redo_keep_the_lines_of_selected_groups_selected() {
     assert!(apply(&mut app, Action::Undo));
     assert!(all_selected(&app), "取り消した後に、グループの一部（線）が選ばれていない");
     // すぐドラッグすると、線も一緒に動く
-    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(200.0, 250.0), false);
+    let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, Point::new(200.0, 250.0), false));
     app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-    crate::select_ops::update_selection_drag(app.tab_mut(), Point::new(200.0, 400.0));
+    tool(&mut app, |t| crate::select_ops::update_selection_drag(t, Point::new(200.0, 400.0)));
     assert!(app.scene().iter().all(|s| s.bounding_box().y0 > 320.0), "ドラッグ中に置いていかれた図形がある");
-    crate::select_ops::finish_selection_drag(&mut app, None);
+    tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
     assert!(app.scene().iter().all(|s| s.bounding_box().y0 > 320.0), "離した後に置いていかれた図形がある");
     // 取り消して、やり直しても
     assert!(apply(&mut app, Action::Undo));
@@ -21508,11 +21508,11 @@ fn selected_raw_art_stays_under_groups() {
     assert!(app.scene().iter().any(|s| s.color() == skin && app.session.selection().contains_shape(s)));
     assert_eq!(top_at(&app, on_brow), Some(brow), "選ぶと、眉が顔の塗りに隠れた");
     // 選んだまま動かしている間も、離した後も
-    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), Point::new(260.0, 300.0), false);
+    let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, Point::new(260.0, 300.0), false));
     app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-    crate::select_ops::update_selection_drag(app.tab_mut(), Point::new(270.0, 310.0));
+    tool(&mut app, |t| crate::select_ops::update_selection_drag(t, Point::new(270.0, 310.0)));
     assert_eq!(top_at(&app, on_brow + KVec2::new(10.0, 10.0)), Some(brow), "動かしている間に、眉が顔の塗りに隠れた");
-    crate::select_ops::finish_selection_drag(&mut app, None);
+    tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
     assert_eq!(top_at(&app, on_brow + KVec2::new(10.0, 10.0)), Some(brow), "離した後に、眉が顔の塗りに隠れた");
 }
 
@@ -21596,7 +21596,7 @@ fn floating_pieces_stay_selected_after_deselecting_a_dividing_line() {
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(350.0, 350.0), additive: false }));
     assert!(app.session.floating().is_some(), "矩形で選ぶと浮いた片になる");
     // 塗りを分ける線を Shift クリックで外す
-    crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 200.0), true, true);
+    tool(&mut app, |t| crate::select_ops::apply_click_selection(t, Point::new(200.0, 200.0), true, true));
     app.session.floating().expect("塗りは浮いたまま");
     let unselected: Vec<u64> = app.session.floating_view().pieces().iter().filter(|p| !app.session.selection().contains_shape(p)).map(|p| p.shape_id).collect();
     assert!(unselected.is_empty(), "浮いているのに選ばれていない片がある: {unselected:?}");
@@ -21618,7 +21618,7 @@ fn group_transforms_go_through_the_one_map_entry() {
     apply(&mut app, Action::SetTool { tool: Tool::Select });
     // 2つのレイヤーの絵を、それぞれグループにして、両方を選ぶ
     for (i, pt) in [Point::new(150.0, 150.0), Point::new(350.0, 150.0)].into_iter().enumerate() {
-        crate::select_ops::apply_click_selection(&mut app, pt, false, true);
+        tool(&mut app, |t| crate::select_ops::apply_click_selection(t, pt, false, true));
         assert!(apply(&mut app, Action::Group), "グループ {i}");
     }
     assert!(apply(&mut app, Action::SelectAll));
@@ -21667,6 +21667,91 @@ fn growing_list_matches_a_plain_vec() {
     }
 }
 
+/// 作品をタブに入れる道（最後のタブを閉じる・まっさらなタブに開く・新規）のどれでも、タブの番号（「どの作品か」の見分け）
+/// は新しくなり、前の作品でコピーしたシンボルを、入れ直した作品の同じ番号の別のシンボルと取り違えない（番号を替えるのは、
+/// 作品を入れる道 `install_document` の1か所：設計審査 392e9af の D-4）
+#[test]
+fn installing_a_work_always_gives_the_tab_a_new_identity() {
+    use crate::doc_actions::{apply, Action};
+    let ctx = egui::Context::default();
+    let symbol_of = |app: &mut Is2dApp, color: Color32| -> u64 {
+        assert!(apply(app, Action::PaintStroke { points: vec![Point::new(100.0, 100.0), Point::new(200.0, 120.0)], radius: 8.0, color }));
+        assert!(apply(app, Action::SelectAll));
+        assert!(apply(app, Action::ConvertToSymbol));
+        app.tab().doc().library().iter_in_order().last().unwrap().id
+    };
+    // 赤い絵のシンボルをコピーする
+    let mut app = Is2dApp::default();
+    let red = symbol_of(&mut app, Color32::RED);
+    assert!(apply(&mut app, Action::Copy));
+    // 最後のタブを閉じる（同じタブに白紙の作品が入る）：番号が新しくなる
+    let before = app.tab().id;
+    crate::project_io::close_tab(&mut app, 0, None);
+    assert_ne!(app.tab().id, before, "最後のタブを閉じて作品を入れても、番号が同じ");
+    // 入れ直した作品で、同じ番号の青いシンボルを作ってから貼る：赤いシンボルを移して貼る（青を使い回さない）
+    let blue = symbol_of(&mut app, Color32::BLUE);
+    assert_eq!(blue, red, "この確かめには、同じ番号の別のシンボルが要る");
+    assert!(canvas_tool::clear_selection(&mut app));
+    assert!(apply(&mut app, Action::Paste { in_place: true }));
+    let pasted = app.tab().session.selection().instances.iter().next().copied().expect("貼ったインスタンス");
+    let cel = app.tab().active_timeline().layers[0].cel_at(0).unwrap();
+    let sym = cel.instances().iter().find(|i| i.binding.instance_gid == pasted).unwrap().binding.symbol_id;
+    assert_ne!(sym, blue, "前の作品でコピーしたシンボルを、入れ直した作品の同じ番号の別のシンボルと取り違えた");
+    // まっさらなタブに開く・新規：番号が新しくなる
+    let mut app = Is2dApp::default();
+    let before = app.tab().id;
+    crate::project_io::open_document_in_new_tab(&mut app, symbol::Document::default(), None).unwrap();
+    assert_ne!(app.tab().id, before, "まっさらなタブに開いても、番号が同じ");
+    let before = app.tab().id;
+    crate::project_io::new_project(&mut app, &ctx);
+    assert_ne!(app.tab().id, before, "新規のタブの番号が前のタブと同じ");
+}
+
+/// 最後の砦の受け止め（`guarded`）：途中で止まる計算は `None`、止まらない計算はその答え（設計審査 392e9af の D-1）
+#[test]
+fn guarded_returns_none_only_when_the_work_stops() {
+    assert_eq!(doc_actions::guarded(|| 1 + 1), Some(2));
+    let stopped: Option<u32> = doc_actions::guarded(|| panic!("計算の前提が破れた"));
+    assert_eq!(stopped, None);
+}
+
+/// 道具の入力（ドラッグ）の途中で止まっても、アプリは落ちず、その入力を無かったことにする：ドラッグは取り消され、作品と
+/// 取り消しの控えは入力の前のまま、知らせが出て、続けて使える（道具の入力は砦の入口 `with_tool_input` の中でだけ受ける：
+/// 設計審査 392e9af の D-1。前は、離したときと同じ計算をするドラッグ中の仮表示で止まると、アプリごと落ちた）
+#[test]
+fn a_panic_inside_tool_input_cancels_the_drag_and_keeps_the_work() {
+    use crate::doc_actions::{apply, Action};
+    let mut app = Is2dApp::default();
+    put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
+    apply(&mut app, Action::SetTool { tool: Tool::Select });
+    // 辺をつまんで動かしている途中（ドラッグ中の仮表示がある）
+    tool(&mut app, |t| crate::tool_select::start_reshape_drag(t, Point::new(200.0, 100.0), false, false));
+    tool(&mut app, |t| crate::tool_select::update_reshape_drag(t, Point::new(200.0, 60.0)));
+    assert!(!matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None), "ドラッグが始まっていない");
+    let doc_before = app.doc.clone();
+    let undo_before = app.history.undo_stack.len();
+    app.toast = None;
+    // 道具の入力の途中で止まる
+    let out = doc_actions::with_tool_input(&mut app, |t| {
+        crate::tool_select::update_reshape_drag(t, Point::new(210.0, 50.0));
+        panic!("計算の前提が破れた");
+    });
+    assert!(out.is_none(), "止まった入力が成功とみなされた");
+    assert!(matches!(app.session.drag, crate::canvas_tool::ActiveCanvasDrag::None), "止まった入力のドラッグが残った");
+    assert_eq!(app.toast.as_ref().map(|t| t.message.as_str()), Some("内部の不具合でこの操作を続けられなかったので、操作の前に戻しました"));
+    assert!(
+        app.doc.root.layers.iter().zip(doc_before.root.layers.iter()).all(|(a, b)| a.keyframes.iter().zip(b.keyframes.iter()).all(|(x, y)| std::sync::Arc::ptr_eq(x.cel.maps(), y.cel.maps()))),
+        "作品が入力の前と違う"
+    );
+    assert_eq!(app.history.undo_stack.len(), undo_before, "取り消しの控えが変わった");
+    // 続けて使える：もう一度つまんで動かして離すと、絵が変わり、取り消すと戻る
+    tool(&mut app, |t| crate::tool_select::start_reshape_drag(t, Point::new(200.0, 100.0), false, false));
+    tool(&mut app, |t| crate::tool_select::update_reshape_drag(t, Point::new(200.0, 60.0)));
+    tool(&mut app, |t| crate::tool_select::finish_reshape_drag(t, Some(Point::new(200.0, 60.0))));
+    assert_eq!(app.history.undo_stack.len(), undo_before + 1, "続けて使えない");
+    assert!(apply(&mut app, Action::Undo));
+}
+
 /// 操作の途中で止まって（panic）も、アプリは落ちず、その操作を無かったことにして、操作の前の文書・選択・取り消しの控えに
 /// 戻り、知らせて、続けて使える（設計審査 de92ceb の D-2：落ちたときの最後の砦）。止まる操作には、今ある本物の道を使う：
 /// ブラシの点が格子のはるか外（1e300）にあると、ブラシの形を作る所（i_overlay）が止まる。この道を直したら（点を断る）、
@@ -21713,7 +21798,7 @@ fn ink_bottle_again_where_a_line_was_moved_away() {
     put_cel_shapes(&mut app, 0, 0, vec![map_overlay::rect_shape(100.0, 100.0, 300.0, 300.0, Color32::RED)]);
     assert!(apply(&mut app, Action::InkBottle { pt: Point::new(200.0, 200.0), stroke: ink }));
     apply(&mut app, Action::SetTool { tool: Tool::Select });
-    crate::select_ops::apply_click_selection(&mut app, Point::new(200.0, 100.0), false, true);
+    tool(&mut app, |t| crate::select_ops::apply_click_selection(t, Point::new(200.0, 100.0), false, true));
     assert!(app.scene().iter().any(|s| s.line.is_some() && app.session.selection().contains_shape(s)), "上の辺の線を選んだ");
     assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, -50.0) }));
     assert!(apply(&mut app, Action::Deselect));
@@ -21836,9 +21921,9 @@ fn line_ids_stay_the_same_when_lines_move() {
     app.tab_mut().view.show_wireframe = true;
     let seg = app.scene().iter().find(|s| s.line.is_some()).and_then(|s| s.center_curve()).expect("線");
     let from = seg.eval(0.5);
-    tool_select::start_reshape_drag(&mut app, from, false, false);
-    tool_select::update_reshape_drag(&mut app, from + KVec2::new(0.0, -12.0));
-    tool_select::finish_reshape_drag(&mut app, None);
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, from + KVec2::new(0.0, -12.0)));
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
     let after = line_ids(&app);
     assert_eq!(after.len(), first.len());
     assert_eq!(after, line_ids(&app));
@@ -21962,12 +22047,12 @@ fn selections_keep_their_lines_through_operations() {
                 }
                 1 => {
                     let pt = on_art(&mut rng);
-                    crate::select_ops::apply_click_selection(&mut app, pt, rng.bool(), true);
+                    tool(&mut app, |t| crate::select_ops::apply_click_selection(t, pt, rng.bool(), true));
                     ("クリック", None)
                 }
                 2 => {
                     let pt = on_art(&mut rng);
-                    tool_select::handle_canvas_double_click(&mut app, pt, rng.bool());
+                    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, pt, rng.bool()));
                     ("ダブル", None)
                 }
                 3 => ("全部", { apply(&mut app, Action::SelectAll); None }),
@@ -22073,11 +22158,11 @@ fn selections_keep_their_lines_through_operations() {
         // 続けてドラッグしたとき、ドラッグ中の見た目と離した後が同じ
         if !app.session.selection().is_empty() && !bad.iter().any(|b| b.starts_with(&format!("{case}（"))) {
             let from = Point::new(300.0, 300.0);
-            let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, false);
+            let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, from, false));
             app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-            crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(20.0, 130.0));
+            tool(&mut app, |t| crate::select_ops::update_selection_drag(t, from + KVec2::new(20.0, 130.0)));
             let during = colors(&app);
-            crate::select_ops::finish_selection_drag(&mut app, None);
+            tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
             let diff = during.iter().zip(&colors(&app)).filter(|(a, b)| a != b).count();
             if diff > 0 {
                 bad.push(format!("{case}（{}・続けてドラッグ）：ドラッグ中と離した後が {diff} 点違う", ops.join("・")));
@@ -24916,8 +25001,8 @@ fn test_drag_edge_bends_only_between_junctions() {
     let mut app = crossed_brush_strokes();
     let reds_before = reds(&app);
     let blue_before = blue_segment_count(&app);
-    tool_select::start_reshape_drag(&mut app, Point::new(285.0, 140.0), false, false);
-    tool_select::update_reshape_drag(&mut app, Point::new(270.0, 140.0));
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, Point::new(285.0, 140.0), false, false));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(270.0, 140.0)));
     let during: Vec<QuadBez> = app
         .scene()
         .iter()
@@ -24934,7 +25019,7 @@ fn test_drag_edge_bends_only_between_junctions() {
         v.sort_by(|a, b| a[0].p0.x.total_cmp(&b[0].p0.x));
         v
     };
-    tool_select::finish_reshape_drag(&mut app, None);
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
     let after: Vec<QuadBez> = scene_summary(&app)
         .shapes
         .iter()
@@ -25285,15 +25370,15 @@ fn test_reshape_preview_matches_commit_when_crossing() {
         (Point::new(330.0, 294.0), Point::new(345.0, 330.0)),
     ] {
         let mut app = three_color_junction_scene();
-        tool_select::start_reshape_drag(&mut app, from, false, false);
+        tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
         assert!(matches!(
             app.session.drag,
             crate::canvas_tool::ActiveCanvasDrag::Select(_)
         ));
-        tool_select::update_reshape_drag(&mut app, to);
+        tool(&mut app, |t| tool_select::update_reshape_drag(t, to));
         let during: Vec<FillShape> = app.scene().iter().cloned().collect();
         let during = colors_on_grid(&during);
-        tool_select::finish_reshape_drag(&mut app, None);
+        tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
         let after = colors_on_grid(&scene_summary(&app).shapes);
         assert_eq!(
             during, after,
@@ -25377,12 +25462,12 @@ fn dragging_after_mixed_selections_matches_the_drop() {
                 1 => {
                     let pt = on_line(&mut rng);
                     ops.push(format!("クリック{}", if shift { "+" } else { "" }));
-                    crate::select_ops::apply_click_selection(&mut app, pt, shift, true);
+                    tool(&mut app, |t| crate::select_ops::apply_click_selection(t, pt, shift, true));
                 }
                 _ => {
                     let pt = on_line(&mut rng);
                     ops.push(format!("ダブル{}", if shift { "+" } else { "" }));
-                    tool_select::handle_canvas_double_click(&mut app, pt, shift);
+                    tool(&mut app, |t| tool_select::handle_canvas_double_click(t, pt, shift));
                 }
             }
         }
@@ -25391,12 +25476,12 @@ fn dragging_after_mixed_selections_matches_the_drop() {
         }
         let from = Point::new(300.0, 300.0);
         let alt = rng.bool();
-        let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, alt);
+        let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, from, alt));
         app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-        crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(15.0, 140.0));
+        tool(&mut app, |t| crate::select_ops::update_selection_drag(t, from + KVec2::new(15.0, 140.0)));
         let during: Vec<FillShape> = app.scene().iter().cloned().collect();
         let during = colors_on_grid(&during);
-        crate::select_ops::finish_selection_drag(&mut app, None);
+        tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
         let after = colors_on_grid(&app.scene().iter().cloned().collect::<Vec<_>>());
         let diff = during.iter().zip(&after).filter(|(a, b)| a != b).count();
         if diff > 0 {
@@ -25418,14 +25503,14 @@ fn alt_duplicate_drop_reuses_the_committed_picture_from_the_drag() {
     assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(50.0, 50.0), p1: Point::new(200.0, 350.0), additive: false }));
     assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(30.0, 40.0) }));
     let from = Point::new(150.0, 200.0);
-    let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, true);
+    let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, from, true));
     // 画面の図形の番地で見る：ドラッグの前の土台 `b0`、ドラッグ中の画面 `during`、離したあとの土台 `b1`
     let addrs = |it: &mut dyn Iterator<Item = *const FillShape>| it.collect::<std::collections::HashSet<_>>();
     let b0 = addrs(&mut app.session.base_cache().shapes().iter().map(std::sync::Arc::as_ptr));
     let during = addrs(&mut app.scene().iter().map(|s| s as *const FillShape));
     app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-    crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(200.0, 0.0));
-    crate::select_ops::finish_selection_drag(&mut app, None);
+    tool(&mut app, |t| crate::select_ops::update_selection_drag(t, from + KVec2::new(200.0, 0.0)));
+    tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
     let b1 = addrs(&mut app.session.base_cache().shapes().iter().map(std::sync::Arc::as_ptr));
     // 離したあとの土台で新しくなった図形（確定した絵）は、みなドラッグ中に画面に出した物と同じ物
     let fresh: Vec<_> = b1.difference(&b0).collect();
@@ -25660,11 +25745,11 @@ fn drag_previews_match_the_drop() {
                     }
                     1 => {
                         ops.push(format!("クリック{}", if shift { "+" } else { "" }));
-                        crate::select_ops::apply_click_selection(app, on_art(rng), shift, true);
+                        tool(app, |t| crate::select_ops::apply_click_selection(t, on_art(rng), shift, true));
                     }
                     _ => {
                         ops.push(format!("ダブル{}", if shift { "+" } else { "" }));
-                        tool_select::handle_canvas_double_click(app, on_art(rng), shift);
+                        tool(app, |t| tool_select::handle_canvas_double_click(t, on_art(rng), shift));
                     }
                 }
             }
@@ -25683,11 +25768,11 @@ fn drag_previews_match_the_drop() {
         match kind {
             0 | 1 => {
                 let from = Point::new(300.0, 300.0);
-                let drag = crate::clipboard_ops::begin_move_selection_drag(app.tab_mut(), from, kind == 1);
+                let drag = tool(&mut app, |t| crate::clipboard_ops::begin_move_selection_drag(t, from, kind == 1));
                 app.tab_mut().session.drag = crate::canvas_tool::ActiveCanvasDrag::MoveSelection(drag);
-                crate::select_ops::update_selection_drag(app.tab_mut(), from + KVec2::new(23.0, 117.0));
+                tool(&mut app, |t| crate::select_ops::update_selection_drag(t, from + KVec2::new(23.0, 117.0)));
                 during = colors_on_grid(&app);
-                crate::select_ops::finish_selection_drag(&mut app, None);
+                tool(&mut app, |t| crate::select_ops::finish_selection_drag(t, None));
             }
             _ => {
                 let zoom = app.tab().view.zoom();
@@ -25701,10 +25786,10 @@ fn drag_previews_match_the_drop() {
                     let start = Point::new(bbox.x1 + 15.0 / zoom as f64, bbox.y0 - 15.0 / zoom as f64);
                     (start, kurbo::Affine::rotate_about(0.5, pivot) * start)
                 };
-                tool_transform::start_transform_drag(&mut app, start, false, false);
-                tool_transform::update_transform_drag(app.tab_mut(), end, false, false);
+                tool(&mut app, |t| tool_transform::start_transform_drag(t, start, false, false));
+                tool(&mut app, |t| tool_transform::update_transform_drag(t, end, false, false));
                 during = colors_on_grid(&app);
-                tool_transform::finish_transform_drag(&mut app, Some(end));
+                tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(end)));
             }
         }
         let after = colors_on_grid(&app);
@@ -25738,15 +25823,15 @@ fn test_reshape_preview_shows_split_during_drag() {
         .map(|q| q.eval(0.5))
         .min_by(|a, b| (*a - top).hypot().total_cmp(&(*b - top).hypot()))
         .unwrap();
-    tool_select::start_reshape_drag(&mut app, from, false, false);
-    tool_select::update_reshape_drag(&mut app, Point::new(200.0, 275.0));
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(200.0, 275.0)));
     let during = app
         .scene()
         .iter()
         .filter(|s| !s.exterior().segments.is_empty())
         .count();
     assert_eq!(during, 2, "ドラッグ中から2つに分かれて見える");
-    tool_select::finish_reshape_drag(&mut app, None);
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
     assert_eq!(scene_summary(&app).shapes.len(), 2);
 }
 
@@ -25771,8 +25856,8 @@ fn test_reshape_drag_near_opposite_edge_does_not_jump() {
         .map(|q| q.eval(0.5))
         .min_by(|a, b| (*a - top).hypot().total_cmp(&(*b - top).hypot()))
         .unwrap();
-    tool_select::start_reshape_drag(&mut app, from, false, false);
-    tool_select::update_reshape_drag(&mut app, Point::new(200.0, 248.0));
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
+    tool(&mut app, |t| tool_select::update_reshape_drag(t, Point::new(200.0, 248.0)));
     let covered = |shapes: &[FillShape], p: Point| shapes.iter().any(|s| s.contains_point(p));
     let during: Vec<FillShape> = app.scene().iter().cloned().collect();
     assert_eq!(
@@ -25787,7 +25872,7 @@ fn test_reshape_drag_near_opposite_edge_does_not_jump() {
         covered(&during, Point::new(200.0, 249.3)),
         "引っぱった辺と向こう側のフチの間の細い所が残って見える"
     );
-    tool_select::finish_reshape_drag(&mut app, None);
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
     let after = scene_summary(&app).shapes.clone();
     assert_eq!(after.len(), 1);
     assert!(covered(&after, Point::new(200.0, 249.3)));
@@ -33465,9 +33550,9 @@ fn rotation_dead_zone_is_measured_on_screen() {
         .selection_bbox_and_pivot(app.view.zoom())
         .unwrap();
     let corner = Point::new(bbox.x1, bbox.y1);
-    tool_transform::start_transform_drag(&mut app, corner + KVec2::new(0.5, 0.5), false, false);
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, corner + KVec2::new(0.5, 0.5), false, false));
     // 基準点から 1px（画面で 16px）の真上
-    tool_transform::update_transform_drag(&mut app, pivot + KVec2::new(0.0, 1.0), false, false);
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, pivot + KVec2::new(0.0, 1.0), false, false));
     let canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Rotate {
         current_angle,
         ..
@@ -33511,9 +33596,9 @@ fn releasing_alt_while_scaling_returns_to_the_opposite_handle() {
         .selection_bbox_and_pivot(app.view.zoom())
         .unwrap();
     let right = Point::new(bbox.x1, bbox.center().y);
-    tool_transform::start_transform_drag(&mut app, right, false, true);
-    tool_transform::update_transform_drag(&mut app, right + KVec2::new(50.0, 0.0), false, false);
-    tool_transform::finish_transform_drag(&mut app, Some(right + KVec2::new(50.0, 0.0)));
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, right, false, true));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, right + KVec2::new(50.0, 0.0), false, false));
+    tool(&mut app, |t| tool_transform::finish_transform_drag(t, Some(right + KVec2::new(50.0, 0.0))));
     let (after, _) = app
         .session
         .selection_bbox_and_pivot(app.view.zoom())
@@ -33731,8 +33816,8 @@ fn alt_scaling_with_the_pivot_on_the_handle_does_not_jump() {
     let (bbox, _) = app.session.selection_bbox_and_pivot(app.view.zoom()).unwrap();
     let right = Point::new(bbox.x1, bbox.center().y);
     app.session.transform_pivot = Some(right - KVec2::new(0.002, 0.0));
-    tool_transform::start_transform_drag(&mut app, right, false, true);
-    tool_transform::update_transform_drag(&mut app, right + KVec2::new(5.0, 0.0), false, true);
+    tool(&mut app, |t| tool_transform::start_transform_drag(t, right, false, true));
+    tool(&mut app, |t| tool_transform::update_transform_drag(t, right + KVec2::new(5.0, 0.0), false, true));
     let canvas_tool::ActiveCanvasDrag::Transform(canvas_tool::TransformDragState::Scale { last_affine, .. }) = &app.session.drag else {
         panic!("拡大のドラッグになっていない");
     };
@@ -35522,11 +35607,11 @@ fn pulling_near_the_end_of_a_long_edge_keeps_the_bulge_small() {
     s.layer_id = lid;
     put_cel_shapes(&mut app, 0, 0, vec![s]);
     let from = Point::new(145.0, 200.0);
-    tool_select::start_reshape_drag(&mut app, from, false, false);
+    tool(&mut app, |t| tool_select::start_reshape_drag(t, from, false, false));
     for k in 1..=20 {
-        tool_select::update_reshape_drag(&mut app, from + kurbo::Vec2::new(0.0, -k as f64));
+        tool(&mut app, |t| tool_select::update_reshape_drag(t, from + kurbo::Vec2::new(0.0, -k as f64)));
     }
-    tool_select::finish_reshape_drag(&mut app, None);
+    tool(&mut app, |t| tool_select::finish_reshape_drag(t, None));
     // 上の辺（両端が y = 200）の、元の直線からいちばん離れる所は、制御点の離れ方の半分
     let shapes = &scene_summary(&app).shapes;
     let top = shapes[0]
@@ -38579,7 +38664,7 @@ fn project_file_round_trip_keeps_every_bit() {
 #[test]
 fn project_file_refuses_wrong_or_broken_files() {
     let pd =
-        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(1, 1)).unwrap();
+        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1)).unwrap();
     let good = project_io::project_file_bytes(&pd).unwrap();
     assert!(opened_document(&good).is_ok());
     // 中身 `body` に正しい頭を付けたファイル
@@ -38671,7 +38756,7 @@ fn project_file_refuses_wrong_or_broken_files() {
 #[test]
 fn project_file_with_huge_counts_or_cut_body_is_refused_without_taking_memory() {
     let pd =
-        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(1, 1)).unwrap();
+        project_io::ProjectDocument::from_app(&crate::canvas_tool::Tab::new_empty(crate::canvas_tool::TabIds::default().fresh(), 1)).unwrap();
     let good = project_io::project_file_bytes(&pd).unwrap();
     let body = &good[20..];
     // 中身の終わりは、復旧の元の場所（無し）・色の数・塊の数・音の数・次の音の番号
@@ -40556,6 +40641,11 @@ fn insert_keyframe_at(tl: &mut timeline::Timeline, layer: usize, frame: usize, c
     tl.layers[layer].keyframe_index_starting_at(frame).is_some()
 }
 
+/// テスト用：道具の入力を、本物の入口（砦の中：`with_tool_input`）を通して受ける。途中で止まったらテストを落とす
+fn tool<R>(app: &mut Is2dApp, f: impl FnOnce(&mut doc_actions::ToolInput<'_, Is2dApp>) -> R) -> R {
+    doc_actions::with_tool_input(app, f).expect("道具の入力が途中で止まった")
+}
+
 /// テスト用：ライブラリの番号 `id` のシンボルのタイムラインを、中身を書く入口（`Document::write_symbol_timeline`：版を
 /// 上げる）で書く
 fn write_symbol(doc: &mut symbol::Document, id: u64, f: impl FnOnce(&mut timeline::Timeline)) {
@@ -40686,8 +40776,8 @@ fn sounds_survive_save_and_open() {
     assert!(doc.next_sound_id > doc.sounds.at(0).unwrap().id);
 }
 
-/// 壊れた音のデータ（無い音を指す区間・音の長さを越える区間・絵のあるキーフレームの音・重なる番号）は、開くときに壊れた
-/// ファイルとして断る（黙って音を外さない）。読めないバイトの音は断らず、「読めない音」として開く
+/// 壊れた音のデータ（無い音を指す区間・始まりが終わり以降の区間・絵のあるキーフレームの音・重なる番号）は、開くときに
+/// 壊れたファイルとして断る（黙って音を外さない）。音の長さを越える区間は断らない。読めないバイトの音は断らず、「読めない音」として開く
 /// （`unreadable_sound_opens_silently_and_keeps_its_bytes`）
 #[test]
 fn broken_sound_data_is_refused_when_opening() {
@@ -40705,7 +40795,8 @@ fn broken_sound_data_is_refused_when_opening() {
     }
     assert!(!refused(&|d| d.sounds[0].bytes = b"broken"[..].into()), "読めない音は開く");
     assert!(refused(&|d| kf(d).sound.as_mut().unwrap().sound = 99));
-    assert!(refused(&|d| kf(d).sound.as_mut().unwrap().end += 1));
+    // 音の長さを越える区間は断らない（`a_clip_longer_than_its_sound_opens_with_a_notice`）
+    assert!(!refused(&|d| kf(d).sound.as_mut().unwrap().end += 1), "音の長さを越える区間は開く");
     assert!(refused(&|d| {
         let c = kf(d).sound.as_mut().unwrap();
         c.start = c.end;
@@ -40729,6 +40820,58 @@ fn broken_sound_data_is_refused_when_opening() {
     d.timeline.layers[0].keyframes[0].sound = good.timeline.layers[0].keyframes[0].sound;
     d.write_map_tiles();
     assert!(d.into_document().is_err());
+}
+
+/// 音の区間が、開くときに読み直した音の長さより長くても（音を読む部品・読み方が変わると、同じ音の長さが変わる）、作品は
+/// 開き、区間はそのまま残して「音が区間より短い」と知らせる（保存したデータを、作り直せる値で拒まない：設計審査 392e9af の
+/// D-2。前は作品全体を「音が壊れています」と断った）。区間の始まりが音の終わりより後ろでも開く。開いた作品で、画面の描画・
+/// 再生の音（`mix`）・端のドラッグ・F6 の分けが落ちず、音の終わりから先は鳴らない
+#[test]
+fn a_clip_longer_than_its_sound_opens_with_a_notice() {
+    for past_end in [false, true] {
+        let mut app = Is2dApp::default();
+        assert!(import_sound(&mut app, short_wav()));
+        let len = app.doc.sounds.at(0).unwrap().len();
+        let mut d = project_io::ProjectDocument::of(&app.doc);
+        {
+            let kf = &mut d.timeline.layers[0].keyframes[0];
+            let c = kf.sound.as_mut().unwrap();
+            if past_end {
+                c.start = len + 10;
+            }
+            c.end = len + 2_000;
+        }
+        d.timeline.layers[0].frame_count = 30;
+        d.timeline.total_frames = 30;
+        let doc = d.into_document().expect("区間が音より長くても開く");
+        let clip = doc.root.layers[0].keyframes[0].sound.expect("区間を残す");
+        assert_eq!(clip.end, len + 2_000, "区間を変えた");
+        assert!(
+            doc.load_notices.take().iter().any(|n| matches!(n, crate::timeline::LoadNotice::ShortSound(name) if name == "テスト.wav")),
+            "音が区間より短いことを知らせない"
+        );
+        // 鳴らす：音の終わりから先は無音
+        let m = crate::sound::mix(&doc, &doc.root, 0..30, 0, 48_000, 48_000);
+        assert!(m.iter().all(|v| v.is_finite()));
+        // 開いた作品で、画面の描画・端のドラッグ・F6 の分け
+        let mut app = Is2dApp::default();
+        let id = crate::project_io::ProjectWorkspace::alloc_doc_id(&mut app);
+        app.tab_mut().install(id, doc);
+        let ctx = egui::Context::default();
+        let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+        for edge in [crate::sound::SoundEdge::End, crate::sound::SoundEdge::Start] {
+            for frame in [0usize, 1, 2, 5] {
+                doc_actions::apply(&mut app, doc_actions::Action::TrimSound { layer: 0, kf_start: 0, edge, frame });
+                if let Some(c) = app.doc.root.layers[0].keyframes[0].sound {
+                    assert!(c.start < c.end, "区間が壊れた：{c:?}");
+                }
+            }
+        }
+        doc_actions::apply(&mut app, doc_actions::Action::ScrubRulerToFrame { frame: 3 });
+        doc_actions::apply(&mut app, doc_actions::Action::InsertKeyframe { copy_prev: true });
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    }
 }
 
 /// テスト用：1 秒の、値がいつも 0.5 の音（48kHz・1 つの音）を音のライブラリに入れた文書（fps 24）。音の番号は 1
@@ -41088,7 +41231,7 @@ fn symbol_sound_bytes(doc: &symbol::Document, sym_id: u64) -> Vec<Vec<u8>> {
         .timeline
         .sound_clips()
         .map(|c| {
-            assert!(c.fits(&doc.sounds), "区間は音のライブラリの音を指す");
+            assert!(c.is_well_formed(&doc.sounds), "区間は音のライブラリの音を指す");
             let s = doc.sounds.iter().find(|s| s.id == c.sound).unwrap();
             s.encoded.to_vec()
         })
@@ -42463,7 +42606,7 @@ mod strokes {
             color: Color32::WHITE,
             width: 9,
         };
-        crate::tool_paint::pick_color_at(&mut app, Point::new(150.0, 99.0));
+        tool(&mut app, |t| crate::tool_paint::pick_color_at(t, Point::new(150.0, 99.0)));
         assert_eq!(app.tool.stroke, INK);
     }
 
@@ -42917,7 +43060,10 @@ mod strokes {
             .unwrap()
         };
         assert!(added.iter().any(|s| s.line.is_some()));
-        app.session.set_reshape_overlay(&removed, added, lid, &[]);
+        tool(&mut app, |t| {
+            let p = t.proof();
+            t.tab_mut().session.set_reshape_overlay(p, &removed, added, lid, &[]);
+        });
         assert!(lines_above_fills(&app));
     }
 
@@ -42952,8 +43098,11 @@ mod strokes {
             let mut app = inked_square_app();
             assert!(apply(&mut app, Action::SelectSingleAt { pt: Point::new(200.0, 100.5) }));
             if transform {
-                let orig = app.session.begin_transform_overlay();
-                app.session.update_transform_overlay(&orig, Affine::translate((0.0, 50.0)));
+                tool(&mut app, |t| {
+                    let p = t.proof();
+                    let orig = t.tab_mut().session.begin_transform_overlay(p);
+                    t.tab_mut().session.update_transform_overlay(p, &orig, Affine::translate((0.0, 50.0)));
+                });
             } else {
                 app.session.begin_move_overlay(false, None, Vec::new());
                 app.session.translate_move_overlay(KVec2::new(0.0, 50.0));
@@ -43026,8 +43175,11 @@ mod strokes {
         let mut app = inked_square_app();
         assert!(apply(&mut app, Action::SelectAll));
         assert!(apply(&mut app, Action::Group));
-        let orig = app.session.begin_transform_overlay();
-        app.session.update_transform_overlay(&orig, Affine::scale_about(2.0, Point::new(200.0, 200.0)));
+        tool(&mut app, |t| {
+            let p = t.proof();
+            let orig = t.tab_mut().session.begin_transform_overlay(p);
+            t.tab_mut().session.update_transform_overlay(p, &orig, Affine::scale_about(2.0, Point::new(200.0, 200.0)));
+        });
         assert!(near(&thickness(&app), 4.0), "グループ：ドラッグ中 {:?}", thickness(&app));
         // シンボル
         let mut app = inked_square_app();
