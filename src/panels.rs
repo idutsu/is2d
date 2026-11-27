@@ -2222,7 +2222,26 @@ fn draw_active_marquee_box(tab: &Tab, painter: &egui::Painter) {
     }
 }
 
-fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+/// ダイアログの中身の1段：文（改行で行を分ける）か、進み具合の棒（0〜1）
+enum DialogPart {
+    Text(String),
+    Progress(f32),
+}
+
+/// ダイアログの幅（中身がこれより広ければ広がる）と、段のすき間・ボタンの前のすき間
+const DIALOG_WIDTH: f32 = 320.0;
+const DIALOG_GAP: f32 = 8.0;
+const DIALOG_BUTTONS_GAP: f32 = 12.0;
+
+/// ダイアログを描く（どのダイアログもこれ1つで描く。各ダイアログが決めるのは、題 `title`・中身の段 `parts`・ボタン
+/// （名前と、押したときに返すもの `buttons`）だけで、形（背景を暗くして後ろの操作を止める・画面の真ん中・幅・すき間・
+/// ボタンを真ん中にそろえて横に並べる）はここだけが決める）。押したボタンのものを返す
+fn draw_dialog<T, const N: usize>(
+    ctx: &egui::Context,
+    title: &str,
+    parts: &[DialogPart],
+    buttons: [(&str, T); N],
+) -> Option<T> {
     egui::Area::new(egui::Id::new((title, "backdrop")))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
@@ -2236,13 +2255,30 @@ fn modal_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut
             );
         });
 
+    let mut clicked = None;
     egui::Window::new(title)
         .id(egui::Id::new((title, "modal")))
         .order(egui::Order::Tooltip)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, add_contents);
+        .show(ctx, |ui| {
+            ui.set_min_width(DIALOG_WIDTH);
+            for (i, part) in parts.iter().enumerate() {
+                ui.add_space(if i == 0 { DIALOG_GAP / 2.0 } else { DIALOG_GAP });
+                match part {
+                    DialogPart::Text(text) => {
+                        ui.label(text);
+                    }
+                    DialogPart::Progress(done) => {
+                        ui.add(egui::ProgressBar::new(*done).desired_width(DIALOG_WIDTH));
+                    }
+                }
+            }
+            ui.add_space(DIALOG_BUTTONS_GAP);
+            clicked = centered_buttons(ui, buttons);
+        });
+    clicked
 }
 
 /// 未保存変更があるタブを閉じる際の非ブロッキング確認モーダルダイアログ（egui Window）を描画する
@@ -2251,22 +2287,16 @@ pub(crate) fn draw_unsaved_close_confirm_modal(
     actions: &mut Vec<UiAction>,
     ctx: &egui::Context,
 ) {
-    let tab_name = tab.base_title();
-
-    modal_window(ctx, "未保存の変更の確認", |ui| {
-        ui.set_min_width(320.0);
-        ui.add_space(4.0);
-        ui.label(format!("「{tab_name}」には未保存の変更があります。"));
-        ui.add_space(12.0);
-        actions.extend(centered_buttons(
-            ui,
-            [
-                ("保存して閉じる", UiAction::ConfirmPendingCloseSave),
-                ("保存せずに閉じる", UiAction::ConfirmPendingCloseDiscard),
-                ("キャンセル", UiAction::ConfirmPendingCloseCancel),
-            ],
-        ));
-    });
+    actions.extend(draw_dialog(
+        ctx,
+        "未保存の変更の確認",
+        &[DialogPart::Text(format!("「{}」には未保存の変更があります。", tab.base_title()))],
+        [
+            ("保存して閉じる", UiAction::ConfirmPendingCloseSave),
+            ("保存せずに閉じる", UiAction::ConfirmPendingCloseDiscard),
+            ("キャンセル", UiAction::ConfirmPendingCloseCancel),
+        ],
+    ));
 }
 
 /// ボタン（名前と、押したときに返すもの `choices`）を、それまでに置いた中身の幅の真ん中にそろえて横に並べ、押したボタン
@@ -2307,18 +2337,10 @@ pub(crate) fn draw_recovery_modal(
     ctx: &egui::Context,
 ) {
     let now = std::time::SystemTime::now();
-    modal_window(ctx, "作業の復元", |ui| {
-        ui.set_min_width(320.0);
-        ui.add_space(4.0);
-        ui.label("前回、保存されないまま終了した作業があります。");
-        ui.add_space(8.0);
-        for item in found {
-            let raw_name = crate::project_io::file_name_or(&item.recovery_path, "");
-            let name = raw_name.split_once("RECOVER_").map_or(raw_name, |(_, n)| n);
-            let secs = now
-                .duration_since(item.modified)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+    let list: Vec<String> = found
+        .iter()
+        .map(|item| {
+            let secs = now.duration_since(item.modified).map(|d| d.as_secs()).unwrap_or(0);
             let age = if secs < 3600 {
                 format!("{} 分前", (secs / 60).max(1))
             } else if secs < 86400 {
@@ -2326,18 +2348,18 @@ pub(crate) fn draw_recovery_modal(
             } else {
                 format!("{} 日前", secs / 86400)
             };
-            ui.label(format!("・{name}（{age}）"));
-        }
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button("開く").clicked() {
-                actions.push(UiAction::RestoreRecovered);
-            }
-            if ui.button("破棄").clicked() {
-                actions.push(UiAction::DiscardRecovered);
-            }
-        });
-    });
+            format!("・{}（{age}）", item.work_name())
+        })
+        .collect();
+    actions.extend(draw_dialog(
+        ctx,
+        "作業の復元",
+        &[
+            DialogPart::Text("前回、保存されないまま終了した作業があります。".to_owned()),
+            DialogPart::Text(list.join("\n")),
+        ],
+        [("開く", UiAction::RestoreRecovered), ("破棄", UiAction::DiscardRecovered)],
+    ));
 }
 
 /// 動画書き出し中の進み具合と「中止」ボタンを画面中央に表示し、背後の操作をブロックするモーダルダイアログ
@@ -2348,18 +2370,13 @@ pub(crate) fn draw_video_export_modal(
 ) {
     let total = total.max(1);
     let done = done.min(total);
-
-    modal_window(ctx, "動画を書き出し（MP4）", |ui| {
-        ui.set_min_width(300.0);
-        ui.add_space(4.0);
-        ui.label(format!("動画を書き出しています　{done} / {total}"));
-        ui.add_space(8.0);
-        ui.add(egui::ProgressBar::new((done as f32) / (total as f32)).desired_width(280.0));
-        ui.add_space(12.0);
-        ui.vertical_centered(|ui| {
-            if ui.button("中止").clicked() {
-                actions.push(UiAction::CancelVideoExport);
-            }
-        });
-    });
+    actions.extend(draw_dialog(
+        ctx,
+        "動画を書き出し（MP4）",
+        &[
+            DialogPart::Text(format!("動画を書き出しています　{done} / {total}")),
+            DialogPart::Progress((done as f32) / (total as f32)),
+        ],
+        [("中止", UiAction::CancelVideoExport)],
+    ));
 }

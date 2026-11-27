@@ -479,63 +479,46 @@ pub(in crate::canvas_tool) fn commit_floating_except(tab: &mut Tab, keep_indices
     let Some(mut fl) = tab.session.take_floating() else {
         return true;
     };
-
-    if !fl.modified() {
-        if keep.is_empty() {
-            tab.session.retain_existing_selection();
-            return true;
+    // 断ったら、分ける前の浮いた片と選択に戻す
+    let whole = fl.clone();
+    let refuse = |tab: &mut Tab, why: Option<Refusal>| {
+        tab.session.set_floating(Some(whole));
+        tab.session.restore_selection(before);
+        if why.is_some() {
+            tab.session.refusal = why;
         }
-        // 外した片は残りに戻す（残す片の所だけで、セル画の地図を切り直す。同じ色でつながる所は1つになる）。戻せなければ、
-        // 浮いた片と選択を前のままにして断る（浮いた片はいつもみな選ばれている）
-        if !all_kept {
-            let whole = fl.clone();
-            if !fl.return_pieces(tab.session.stage(), &keep) {
-                tab.session.set_floating(Some(whole));
-                tab.session.restore_selection(before);
-                tab.session.refusal = Some(Refusal::Unplaceable);
-                return false;
-            }
+        false
+    };
+    // 1. 外した片のうち、動かしていない片は元の所に戻す（書く残りに元のまま入っているので、文書は書かない）。外した片を
+    //    確定するのは、動かした片だけ（前は動かしていない片も確定する側に入れたので、確定のあとの残りの作り直しでその片が
+    //    消えた：設計審査 4f8ef46 の D-1）
+    if !all_kept && !fl.return_pieces(tab.session.stage(), &keep) {
+        return refuse(tab, Some(Refusal::Unplaceable));
+    }
+    // 2. 残す片が無ければ、残りと動かした片をみな確定する（動かしていなければ書くものは無い）
+    if keep.is_empty() {
+        if fl.modified() && commit_floating_layers(tab, &fl).is_none() {
+            return refuse(tab, None);
         }
-        tab.session.set_floating(Some(fl));
         tab.session.retain_existing_selection();
         return true;
     }
-
-    let had_rest = fl.layers().iter().any(|l| l.origin.is_some());
-    let merged_any = !all_kept || (keep.is_empty() && had_rest);
-    // 確定を断ったら、分ける前の浮いた片と選択に戻す
-    let whole = merged_any.then(|| fl.clone());
-    let to_commit = match merged_any
-        .then(|| fl.split_off(&keep, &tab.session.editing_group_path))
-        .transpose()
-    {
-        Ok(to_commit) => to_commit,
-        Err(_) => {
-            tab.session.set_floating(whole);
-            tab.session.restore_selection(before);
-            tab.session.refusal = Some(Refusal::Unplaceable);
-            return false;
+    // 3. 外した動かした片があれば、それと残りを確定し、残す片の残りを書いたあとのセル画に合わせて作り直す
+    if fl.has_pieces_outside(&keep) {
+        let Ok(to_commit) = fl.split_off(&keep, &tab.session.editing_group_path) else {
+            return refuse(tab, Some(Refusal::Unplaceable));
+        };
+        if commit_floating_layers(tab, &to_commit).is_none() {
+            return refuse(tab, None);
         }
-    };
-    if let Some(to_commit) = &to_commit {
-        if commit_floating_layers(tab, to_commit).is_none() {
-            tab.session.set_floating(whole);
-            tab.session.restore_selection(before);
-            return false;
+        if !fl.rebase_after_commit(tab.session.stage(), &to_commit) {
+            return refuse(tab, Some(Refusal::Unplaceable));
         }
-        // 持ったまま残る置かない組の残りを、書いたあとのセル画に合わせて作り直す
-        if !keep.is_empty() && !fl.rebase_after_commit(tab.session.stage(), to_commit) {
-            tab.session.set_floating(whole);
-            tab.session.restore_selection(before);
-            tab.session.refusal = Some(Refusal::Unplaceable);
-            return false;
-        }
-    }
-    if !keep.is_empty() {
-        tab.session.set_floating(Some(fl));
     }
     // 残す片から覆われた所を消すと、分かれた片に新しい番号が付くことがある（`Floating::split_off`。選び直しは
-    // `Session::sync_floating`）
+    // `Session::put_floating`）
+    tab.session.set_floating(Some(fl));
+    tab.session.retain_existing_selection();
     true
 }
 

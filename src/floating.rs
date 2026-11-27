@@ -477,6 +477,11 @@ impl Floating {
         &self.layers
     }
 
+    /// 番号が `keep` に無い片があるか
+    pub(crate) fn has_pieces_outside(&self, keep: &HashSet<ShapeId>) -> bool {
+        !self.ids_not_in(keep).is_empty()
+    }
+
     /// 片の組の片のうち、番号が `keep` に無い片の番号
     fn ids_not_in(&self, keep: &HashSet<ShapeId>) -> HashSet<ShapeId> {
         self.layers
@@ -553,6 +558,49 @@ impl Floating {
         };
         let Floating { layers } = self;
         layers.len() == other.layers.len() && layers.iter().zip(&other.layers).all(|(a, b)| same_layer(a, b))
+    }
+
+    /// テスト用：見せる残りと確定で書く残りの関係の確かめ（浮いた片を書き換える入口が、テストでは毎回呼ぶ：
+    /// `Session::put_floating`）：見せる残りに、置かない組を元の所に戻すと、書く残りと同じ塗りになる（2つの残りは別々の
+    /// 関数が書くので、どの操作で関係が崩れても、ここで止める：設計審査 4f8ef46 の D-1・D-2）。線は、戻すと切り口で辺が
+    /// 分かれたままになる（同じ線が2本の辺になる）ので比べない。塗りは、色ごとの塗った所（面積と外枠）で比べる（線で分かれた
+    /// 同じ色の塗りは、戻すと1つにつながることがあるので、塗りの数では比べない。切り口の曲線は、戻すと地図の精度 `FLAT_TOL`
+    /// の中でずれることがあるので、外枠は 1/20px、面積は 1px² まで同じとみなす）。`Err`：違う所
+    #[cfg(test)]
+    pub(crate) fn check_views(&self, scope: &[u64]) -> Result<(), String> {
+        type Painted = std::collections::BTreeMap<[u8; 4], (f64, [f64; 4])>;
+        let painted = |m: &StoredMap| -> Painted {
+            let mut out = Painted::new();
+            for f in LayerBase::of_stored(m).drawn_shapes(scope).iter().filter(|f| f.line.is_none()) {
+                let area = f.exterior().signed_area().abs() - f.holes().iter().map(|h| h.signed_area().abs()).sum::<f64>();
+                let b = f.bounding_box();
+                let e = out.entry(f.color().to_array()).or_insert((0.0, [f64::MAX, f64::MAX, f64::MIN, f64::MIN]));
+                e.0 += area;
+                e.1 = [e.1[0].min(b.x0), e.1[1].min(b.y0), e.1[2].max(b.x1), e.1[3].max(b.y1)];
+            }
+            out
+        };
+        let same = |a: &Painted, b: &Painted| -> bool {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|((ca, (aa, ba)), (cb, (ab, bb)))| {
+                    ca == cb && (aa - ab).abs() <= 1.0 && ba.iter().zip(bb).all(|(x, y)| (x - y).abs() <= 0.05)
+                })
+        };
+        for l in &self.layers {
+            let Some(o) = &l.origin else {
+                continue;
+            };
+            let back = crate::planar_map::uncounted(|| {
+                o.base()
+                    .stacked_local(l.groups.iter().filter(|g| !g.placed).map(|g| Some(g.base().map().clone())))
+            })
+            .ok_or("置かない組を戻せない")?;
+            let (shown, kept) = crate::planar_map::uncounted(|| (painted(&back), painted(&o.kept)));
+            if !same(&shown, &kept) {
+                return Err(format!("レイヤー {}：見せる残り＋置かない組 {shown:?} と書く残り {kept:?} の塗りが違う", l.layer_id));
+            }
+        }
+        Ok(())
     }
 
     /// テスト用：レイヤーごとの（レイヤー, 残りの地図と預かり物を持つか, 片の組の地図と預かり物を持つか）
@@ -678,20 +726,26 @@ impl Floating {
         true
     }
 
-    /// 動かしていない片のうち、番号が `keep` に無い片を残りに戻す：外した片を残りの地図に重ねる（切り口は両側で同じ線
-    /// なので、同じ色でつながる所は1つになる：`cut_out`）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
+    /// 動かしていない片（置かない組の片）のうち、番号が `keep` に無い片を残りに戻す：外した片を残りの地図に重ねる（切り口は
+    /// 両側で同じ線なので、同じ色でつながる所は1つになる：`cut_out`）。動かしていない片は書く残り（`Origin::kept`）に元の
+    /// まま入っているので、書く残りは変えない（文書も書かない）。動かした片（置く組）は戻さない（外した動かした片は確定する
+    /// もの：`commit_floating_except`）。片が無くなったレイヤーは外す（何も変わらない）。`false`：地図にできない
     pub(crate) fn return_pieces(&mut self, stage: Stage<'_>, keep: &HashSet<ShapeId>) -> bool {
-        debug_assert!(!self.modified());
         let drop = self.ids_not_in(keep);
         for l in &mut self.layers {
             let layer_id = l.layer_id;
-            let kept = restricted_groups(&l.groups, keep, stage.scope);
+            let kept: Vec<PieceGroup> = l
+                .groups
+                .iter()
+                .filter_map(|g| if g.placed { Some(g.clone()) } else { g.restricted(keep, stage.scope) })
+                .collect();
             if kept.is_empty() {
                 l.origin = None;
                 l.groups.clear();
                 continue;
             }
-            let back = restricted_groups(&l.groups, &drop, stage.scope);
+            let unplaced: Vec<PieceGroup> = l.groups.iter().filter(|g| !g.placed).cloned().collect();
+            let back = restricted_groups(&unplaced, &drop, stage.scope);
             if back.is_empty() {
                 continue;
             }
@@ -763,12 +817,18 @@ impl Floating {
         Ok(out)
     }
 
-    /// 一部を確定したあと（`split_off` で取り出した `committed` を書いたあと）、持ったまま残る置かない組のために、残りを作り直す：
+    /// 一部を確定したあと（`split_off` で取り出した `committed` を書いたあと）、持ったまま残る置かない組のために、残りを作り直す。
+    /// 確定する側には置く組しか無い（外した置かない組は、確定の前に `return_pieces` で残りに戻してある：`commit_floating_except`。
+    /// 前は置かない組も確定する側に入れたので、ここで作る残りからその片が消えた：設計審査 4f8ef46 の D-1）：
     /// 出どころは書いたあとのセル画の地図、残りは、書く前の画面に見せる残りに、確定した置く組を重ねたもの（書いたセル画
     /// から、残る置かない組の元の所だけを切り抜いた地図と同じ。確定と同じ重ね方 `FloatLayer::placed_on`）、確定で書く残りは
     /// 出どころのまま（置かない組は確定でセル画を変えない）。置かない組が無いレイヤーは残りを持たない（置く組の元の所は、
     /// 書いた地図でもう切り抜いてある）。`false`：地図にできない
     pub(crate) fn rebase_after_commit(&mut self, stage: Stage<'_>, committed: &Floating) -> bool {
+        debug_assert!(
+            committed.layers.iter().all(|l| l.groups.iter().all(|g| g.placed)),
+            "一部の確定に、動かしていない片が入っている"
+        );
         for l in &mut self.layers {
             if l.groups.iter().all(|g| g.placed) {
                 continue;

@@ -16,6 +16,7 @@ mod planar_map;
 mod prefetch;
 mod project_io;
 mod recovery;
+mod recovery_journal;
 mod sound;
 mod stored_map;
 mod symbol;
@@ -79,13 +80,16 @@ fn main() -> eframe::Result<()> {
             app.timeline_ui.audio = audio_out::AudioOut::open(&cc.egui_ctx);
             app.recovery.dir = recovery::default_recovery_dir();
             app.recovery.find_leftovers();
+            app.recovery_writer = app.recovery.dir.clone().map(recovery::RecoveryWriter::start);
             // Windows のログアウト・再起動・シャットダウンでも、止められる前に復旧ファイルを書く（winit はその知らせを受け
             // 取らないので、窓の受け口を包む）
             #[cfg(target_os = "windows")]
             {
                 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Some(RawWindowHandle::Win32(w)) = cc.window_handle().ok().map(|h| h.as_raw()) {
-                    session_end_windows::install(w.hwnd.get(), app.recovery.dir.clone(), app.unsaved.clone());
+                    if let Some(writer) = app.recovery_writer.clone() {
+                        session_end_windows::install(w.hwnd.get(), writer, app.tab_copies.clone());
+                    }
                 }
             }
             Ok(Box::new(app))
@@ -214,9 +218,11 @@ pub(crate) struct Is2dApp {
     pub(crate) video_export: Option<video_export::VideoExportJob>,
     /// 確認なし終了時の復旧ファイル書き出し・次回起動時の復元管理状態
     pub(crate) recovery: recovery::Recovery,
-    /// 確認なしに終わるときに書く、未保存のタブの控え（Windows のセッションの終わりで書く：`session_end_windows`）
-    #[cfg(target_os = "windows")]
-    pub(crate) unsaved: recovery::UnsavedTabs,
+    /// 開いているタブの控え（毎コマの終わりに、変わったタブがあれば控え直して、裏の書き手に渡す。Windows のセッションの
+    /// 終わりも、これを書く：`session_end_windows`）
+    pub(crate) tab_copies: recovery::TabCopies,
+    /// 復旧ファイルの裏の書き手（復旧の置き場があるときだけ。テストの既定では無い）
+    pub(crate) recovery_writer: Option<recovery::RecoveryWriter>,
     /// 先読みの係（次に見るセル画の写しを、裏で作って持つ：`prefetch`）
     pub(crate) prefetch: prefetch::Prefetch,
     /// 直近フレームの中央キャンバス描画領域（スクリーン座標。画面に1つだけで、どのタブでも同じ）
@@ -243,8 +249,8 @@ impl Default for Is2dApp {
             allow_viewport_close: false,
             video_export: None,
             recovery: recovery::Recovery::default(),
-            #[cfg(target_os = "windows")]
-            unsaved: recovery::UnsavedTabs::default(),
+            tab_copies: recovery::TabCopies::default(),
+            recovery_writer: None,
             prefetch: prefetch::Prefetch::default(),
             canvas_rect: egui::Rect::from_min_max(Pos2::new(52.0, 30.0), Pos2::new(1000.0, 590.0)),
             #[cfg(target_os = "macos")]
@@ -1051,9 +1057,21 @@ impl Is2dApp {
         project_io::update_window_title(self, ctx);
         timeline_ui::scrub_on_frame_change(self);
         self.prefetch_next_cels();
-        // 確認なしに終わるときに書く控えを、今のタブにする（文書が変わったタブがあるときだけ写し直す）
-        #[cfg(target_os = "windows")]
-        self.unsaved.refresh(&self.tabs);
+        // タブの控えを今のタブにし（文書が変わったタブがあるときだけ写し直す）、変わったら裏の書き手に渡して、復旧ファイルに
+        // 書き足してもらう（待たない）
+        if self.tab_copies.refresh(&self.tabs) {
+            if let Some(w) = &self.recovery_writer {
+                w.submit(self.tab_copies.get());
+            }
+        }
+    }
+
+    /// 今のタブを、復旧ファイルに書き終えるまで待つ（確認なしに終わるとき・画面の処理で止まったとき）
+    fn flush_recovery(&self) {
+        if let Some(w) = &self.recovery_writer {
+            self.tab_copies.refresh(&self.tabs);
+            w.flush(self.tab_copies.get());
+        }
     }
 }
 
@@ -1137,17 +1155,22 @@ fn load_notice_text(notices: &[timeline::LoadNotice]) -> Option<String> {
 impl eframe::App for Is2dApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 画面の処理の途中で止まったら（panic。文書を変える操作の中で止まったときは `apply` が操作の前に戻すので、ここへ来る
-        // のはそのほかの所）、落ちる前に、確認なしに終わるときと同じ復旧ファイルを書く（設計審査 de92ceb の D-2。書き方は
-        // `on_exit` と同じ `write_unsaved_tabs` の1つ）。前は止まると、全部のタブの保存していない作業が消えた
+        // のはそのほかの所）、落ちる前に、今の未保存のタブを復旧ファイルに書き終える（設計審査 de92ceb の D-2。書く道は裏の
+        // 書き手の1つ）。前は止まると、全部のタブの保存していない作業が消えた
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.update_ui(ctx))) {
-            self.recovery.write_unsaved_tabs(&self.tabs);
+            self.flush_recovery();
             std::panic::resume_unwind(e);
         }
     }
 
+    /// 確認なしに終わるときは、今の未保存のタブを書き終えてから書き手を止める。確認ありで終わる（保存するか捨てるかを
+    /// 決めた）ときは、書いた復旧ファイルをみな消して止める
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if !self.allow_viewport_close {
-            self.recovery.write_unsaved_tabs(&self.tabs);
+            self.flush_recovery();
+        }
+        if let Some(w) = self.recovery_writer.take() {
+            w.finish(self.allow_viewport_close);
         }
     }
 }

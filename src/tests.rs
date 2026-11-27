@@ -10167,6 +10167,15 @@ fn content_json(pd: &project_io::ProjectDocument) -> String {
     let mut v = serde_json::to_value(pd).unwrap();
     let tiles = v["map_tiles"]["tiles"].take();
     let colors = v["map_tiles"]["colors"].take();
+    // 線の色も、色の表の番号でなく色で比べる（色の表の並びは書くたびに決まるので、番号だけでは、違う色が同じ番号になる
+    // ことがある）。線の番号の印は、側の図形の印と同じく比べない
+    if let Some(strokes) = v["map_tiles"]["strokes"].as_array_mut() {
+        for st in strokes {
+            let i = st["color"].as_u64().unwrap() as usize;
+            st["color"] = colors[i - 1].clone();
+            st["id"].take();
+        }
+    }
     let expand = |m: &mut serde_json::Value| {
         let edges: Vec<serde_json::Value> = m["tiles"]
             .as_array()
@@ -18504,7 +18513,8 @@ fn random_actions_cover_every_action_kind() {
 /// シンボルの、レイヤー・キーフレームごとの、面と線の色・線の太さ・外接矩形（絵の精度より粗い 1/20px に丸める）と、
 /// インスタンスの置き方。図形の番号と、絵の精度より細かい座標の違い（一部だけ確定したときの、格子にそろえる計算の順の
 /// 違い）は見ない
-fn picture_summary(doc: &symbol::Document) -> Vec<String> {
+/// `with_lines` が偽なら、線の図形は入れない（塗りだけで比べる）
+fn picture_summary_of(doc: &symbol::Document, with_lines: bool) -> Vec<String> {
     let r = |v: f64| (v * 20.0).round() as i64;
     let mut out = Vec::new();
     let mut timeline = |name: String, tl: &timeline::Timeline| {
@@ -18513,6 +18523,9 @@ fn picture_summary(doc: &symbol::Document) -> Vec<String> {
                 let mut items: Vec<String> = Vec::new();
                 for m in kf.cel.maps().iter() {
                     for f in m.base().drawn_shapes(&m.group_path) {
+                        if !with_lines && f.line.is_some() {
+                            continue;
+                        }
                         let b = f.bounding_box();
                         items.push(format!(
                             "{:?} {:?} {:?} {} {} {} {}",
@@ -18603,11 +18616,12 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
             let not_a_step = action.policy(app.tab()).undo == crate::doc_actions::UndoUse::None;
             // 動かした絵があるときに選択の一部を外す（その部分だけ確定する）と、外した線が持ったままの塗りの下に入り、あとで
             // 塗りを確定すると覆われて消えることがある（一度に全部を確定したときと絵が違う）。持ち主が、今は今のままにして、
-            // あとで直し方を設計すると決めた（2026-11-27。設計 claude/約束を入口で守る設計_5616fcc.md の 14）。この操作は、
-            // 選択を外す確定と同じく、絵が変わることがある
+            // あとで直し方を設計すると決めた（2026-11-27。設計 claude/約束を入口で守る設計_5616fcc.md の 14）。この操作のあとは、
+            // 線だけを比べから外し、塗りは必ず比べる（前は操作ごと比べから外したので、同じ操作で塗りが消える不具合を見逃した：
+            // 設計審査 4f8ef46 の D-2）
             let commits_part = matches!(action, Action::ToggleSelectionAt { .. } | Action::RetainSelection { .. })
                 && app.session.floating().is_some_and(|f| f.modified());
-            let picture_before = app.tab().committed_document_copy().map(|d| picture_summary(&d));
+            let picture_before = app.tab().committed_document_copy().map(|d| picture_summary_of(&d, !commits_part));
             let res = apply(&mut app, action);
             assert!(app.tab().history.before.is_none(), "{ctx}: 操作の前の写しが残った");
             let after = content(&saved(&app, &ctx));
@@ -18633,10 +18647,8 @@ fn test_m5_1_random_actions_undo_and_dirty_invariants_3_seeds() {
                 // 取り消しの1手にしない操作（選ぶ・見る場所を変えるなど）は、絵を変えない（持ち上げた絵の確定は、保存する絵と
                 // 同じ絵を書く。一部だけ確定すると、図形の番号の振り方と、絵の精度より細かい座標が、一度に確定したときと違う
                 // ことがあるので、絵として比べる：`picture_summary`）
-                let picture_after = app.tab().committed_document_copy().map(|d| picture_summary(&d));
-                if !commits_part {
-                    assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
-                }
+                let picture_after = app.tab().committed_document_copy().map(|d| picture_summary_of(&d, !commits_part));
+                assert_eq!(picture_after, picture_before, "{ctx}: 取り消しの1手にしない操作が絵を変えた");
                 assert_eq!(after_undo, before_undo, "{ctx}: 取り消しの1手にしない操作が取り消しを積んだ");
                 continue;
             }
@@ -19112,23 +19124,34 @@ fn test_symbol_color_effect_alpha_brightness_tween_export_nested_io_undo_ungroup
     );
 }
 
+/// 復旧ファイル（設計審査 4f8ef46 の D-3）：確認なしに終わると、未保存のタブ（保存したことのある作品も、無題の作品も）の
+/// 復旧ファイルが残り、次に起動したときに見つかって、開く・捨てるを選べる。確認ありで終わると何も残らない。壊れた復旧
+/// ファイルは名前を変えて残し、ほかは開く
 #[test]
 fn test_recovery_write_find_restore_discard_and_sanitization() {
     use eframe::App as _;
+
+    use crate::recovery::RecoveryWriter;
 
     let base_dir = std::env::temp_dir().join(format!("is2d_recovery_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base_dir);
     let proj_dir = base_dir.join("projects");
     let rec_dir = base_dir.join("recovery");
     std::fs::create_dir_all(&proj_dir).unwrap();
+    let files_in = |dir: &std::path::Path, ext: &str| -> usize {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some(ext)).count())
+            .unwrap_or(0)
+    };
 
     let red = Color32::from_rgb(220, 40, 40);
     let blue = Color32::from_rgb(40, 90, 230);
     let green = Color32::from_rgb(40, 180, 90);
 
-    // 11. Is2dApp::default() の復旧の仕組みは、何も書かない（dir が None）
+    // 11. Is2dApp::default() の復旧の仕組みは、何も書かない（置き場も書き手も無い）
     let mut default_app = Is2dApp::default();
     assert!(default_app.recovery.dir.is_none());
+    assert!(default_app.recovery_writer.is_none());
     assert!(apply(
         &mut default_app,
         Action::PaintStroke {
@@ -19186,7 +19209,6 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     ));
     assert!(app.tabs[1].file.is_none());
     assert!(app.tabs[1].history.is_dirty());
-    let tab1_id = app.tabs[1].id;
 
     // タブ2: 保存済みのタブ
     let clean_proj_path = proj_dir.join("clean_b.is2d");
@@ -19202,38 +19224,32 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     crate::project_io::save_project_to_path(&mut app, &clean_proj_path).unwrap();
     assert!(!app.tabs[2].history.is_dirty());
 
-    // 2. allow_viewport_close が true のときは on_exit で何も書かれない
+    // 2. 確認ありで終わる（allow_viewport_close が true）：書いてあった復旧ファイルも、みな消える
+    app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    app.recovery_writer.as_ref().unwrap().flush(app.tabs.iter().map(crate::recovery::TabCopy::of).collect());
+    assert_eq!(files_in(&rec_dir, "is2dj"), 2, "未保存のタブ2つ（無題も）の復旧ファイルを書く");
     app.allow_viewport_close = true;
     app.on_exit(None);
+    assert!(app.recovery_writer.is_none());
+    assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0, "確認ありで終わったのに復旧のファイルが残った");
     assert!(!proj_dir.join("RECOVER_work_a.is2d").exists());
-    assert!(!rec_dir.exists());
 
-    // 1. allow_viewport_close が false のとき、保存したことのある未保存タブ（タブ0）だけ書かれ、無題の未保存タブ（タブ1）は書かれない
+    // 1. 確認なしに終わる（allow_viewport_close が false）：未保存のタブ0（保存先あり）とタブ1（無題）が書かれ、保存済みの
+    // タブ2は書かれない。作品のフォルダには何も書かない
+    app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
     app.allow_viewport_close = false;
     app.on_exit(None);
-    let rec_work_a = proj_dir.join("RECOVER_work_a.is2d");
-    let rec_untitled = rec_dir.join(format!(
-        "RECOVER_無題-{}-{tab1_id}.is2d",
-        std::process::id()
-    ));
-    assert!(rec_work_a.is_file());
-    assert!(!rec_untitled.exists());
-    assert!(!proj_dir.join("RECOVER_clean_b.is2d").exists());
-
-    let entry_files: Vec<_> = std::fs::read_dir(&rec_dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("entry"))
-        .collect();
-    assert_eq!(entry_files.len(), 1);
+    assert_eq!(files_in(&rec_dir, "is2dj"), 2);
+    assert_eq!(files_in(&rec_dir, "entry"), 2);
+    assert_eq!(files_in(&rec_dir, "lock"), 0, "終わったアプリの錠のファイルが残った");
+    assert_eq!(std::fs::read_dir(&proj_dir).unwrap().count(), 2, "作品のフォルダに復旧ファイルを書いた");
 
     // 7. 指している復旧ファイルが無い一覧と .tmp ファイルは find_leftovers で黙って消える
     let stale_entry = rec_dir.join("stale-999.entry");
     std::fs::write(
         &stale_entry,
-        proj_dir
-            .join("RECOVER_missing.is2d")
+        rec_dir
+            .join("RECOVER_missing.is2dj")
             .to_string_lossy()
             .as_bytes(),
     )
@@ -19241,62 +19257,76 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     let leftover_tmp = rec_dir.join(".partial.123.tmp");
     std::fs::write(&leftover_tmp, b"partial").unwrap();
 
-    // 4. 起動したときに探す: 新しい Is2dApp から find_leftovers を呼ぶと found に1件入り、まだタブは開かない
+    // 12. いま動いている別のアプリ（錠を持つ書き手）のファイルは、見つけない・消さない
+    let running = RecoveryWriter::start(rec_dir.clone());
+    let mut other = Is2dApp::default();
+    assert!(apply(
+        &mut other,
+        Action::PaintStroke { points: vec![Point::new(10.0, 10.0), Point::new(60.0, 10.0)], radius: 6.0, color: red },
+    ));
+    running.flush(other.tabs.iter().map(crate::recovery::TabCopy::of).collect());
+    assert_eq!(files_in(&rec_dir, "is2dj"), 3);
+
+    // 4. 起動したときに探す: 新しい Is2dApp から find_leftovers を呼ぶと found に2件入り、まだタブは開かない
     let mut next_app = Is2dApp::default();
     next_app.recovery.dir = Some(rec_dir.clone());
     next_app.recovery.find_leftovers();
     assert!(!stale_entry.exists());
     assert!(!leftover_tmp.exists());
-    assert_eq!(next_app.recovery.found.len(), 1);
+    assert_eq!(next_app.recovery.found.len(), 2, "動いているアプリの復旧ファイルを見つけた、または終わったアプリの分が無い");
+    // 復元のダイアログに出す名前は作品の名前（復旧ファイルの名前の頭のしるし・番号・拡張子は出さない）
+    let mut names: Vec<String> = next_app.recovery.found.iter().map(|f| f.work_name()).collect();
+    names.sort();
+    assert_eq!(names, vec!["work_a".to_owned(), format!("無題-{}", app.tabs[1].untitled_number)]);
+    assert_eq!(files_in(&rec_dir, "lock"), 1, "動いているアプリの錠のファイルを消した");
     assert_eq!(next_app.tabs.len(), 1);
     assert!(crate::project_io::is_active_tab_pristine_empty(
         &next_app.tabs[0]
     ));
 
-    // 5. 開く: 元のファイルがある作品だけが未保存のタブとして開き（最初の空の無題タブが使い回されてタブは1つ）、復旧ファイルと一覧が消える
+    // 5. 開く: 保存先のある作品はその保存先で、無題の作品は無題で、どちらも未保存のタブとして開き（最初の空の無題タブが
+    // 使い回されてタブは2つ）、復旧ファイルと一覧が消える
     next_app.apply_action(UiAction::RestoreRecovered, &ctx);
     assert!(next_app.recovery.found.is_empty());
-    assert_eq!(next_app.tabs.len(), 1);
-    assert!(next_app.tabs[0].history.is_dirty());
-    assert_eq!(
-        next_app.tabs[0].file.as_deref(),
-        Some(saved_proj_path.as_path())
-    );
-    assert_eq!(next_app.tabs[0].scene().len(), tab0_shape_count);
-    assert_eq!(next_app.tabs[0].scene().get(0).unwrap().color(), red);
-    assert_eq!(next_app.tabs[0].scene().get(1).unwrap().color(), blue);
-    assert!(!rec_work_a.exists());
-    assert_eq!(
-        std::fs::read_dir(&rec_dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("entry"))
-            .count(),
-        0
-    );
+    assert_eq!(next_app.tabs.len(), 2);
+    assert!(next_app.tabs.iter().all(|t| t.history.is_dirty()));
+    let restored_a = next_app.tabs.iter().find(|t| t.file.as_deref() == Some(saved_proj_path.as_path())).expect("work_a を開く");
+    assert_eq!(restored_a.scene().len(), tab0_shape_count);
+    assert_eq!(restored_a.scene().get(0).unwrap().color(), red);
+    assert_eq!(restored_a.scene().get(1).unwrap().color(), blue);
+    let restored_untitled = next_app.tabs.iter().find(|t| t.file.is_none()).expect("無題の作品を開く");
+    assert!(restored_untitled.untitled_number > 0, "無題の作品に無題の番号が無い");
+    assert_eq!(restored_untitled.scene().get(0).unwrap().color(), green);
+    assert_eq!(files_in(&rec_dir, "entry"), 1, "開いた作品の一覧が残った（残るのは動いているアプリの分だけ）");
+    assert_eq!(files_in(&rec_dir, "is2dj"), 1);
+    // 動いているアプリが終わる（確認あり）：その分も消える
+    running.finish(true);
+    assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
 
-    // 6. 破棄: 復旧ファイルと一覧が全部消え、タブは開かない
-    next_app.recovery.write_unsaved_tabs(&next_app.tabs);
-    assert!(rec_work_a.is_file());
+    // 6. 破棄: 開いた2つのタブを確認なしに終わって書き、次の起動で捨てる：復旧ファイルと一覧が全部消え、タブは開かない
+    next_app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    next_app.allow_viewport_close = false;
+    next_app.on_exit(None);
+    assert_eq!(files_in(&rec_dir, "is2dj"), 2);
     let mut discard_app = Is2dApp::default();
     discard_app.recovery.dir = Some(rec_dir.clone());
     discard_app.recovery.find_leftovers();
-    assert_eq!(discard_app.recovery.found.len(), 1);
+    assert_eq!(discard_app.recovery.found.len(), 2);
     discard_app.apply_action(UiAction::DiscardRecovered, &ctx);
     assert!(discard_app.recovery.found.is_empty());
     assert_eq!(discard_app.tabs.len(), 1);
     assert!(crate::project_io::is_active_tab_pristine_empty(
         &discard_app.tabs[0]
     ));
-    assert!(!rec_work_a.exists());
     assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
 
-    // 3. 元のファイルのフォルダに書けないとき（フォルダを消しておく）はアプリ専用フォルダに書かれ、一覧もそこを指す
+    // 3. 元のファイルのフォルダが無くなっていても（復旧ファイルはいつもアプリの置き場に書く）、書けて、開くと元の保存先になる
     let gone_dir = base_dir.join("gone_folder");
     let gone_proj = gone_dir.join("moved_work.is2d");
     next_app.tabs[0].file = Some(gone_proj.clone());
     next_app.tabs.truncate(1);
-    next_app.recovery.write_unsaved_tabs(&next_app.tabs);
+    next_app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    next_app.on_exit(None);
     let mut fallback_app = Is2dApp::default();
     fallback_app.recovery.dir = Some(rec_dir.clone());
     fallback_app.recovery.find_leftovers();
@@ -19311,13 +19341,20 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     );
     assert!(!fallback_rec.exists());
 
-    // 8. 壊れた復旧ファイル（中身が .is2d の形でない）や recovery_source が無い復旧ファイルは .broken に名前が変わり、エラーが出て、ほかのファイルは開く
+    // 8. 壊れた復旧ファイル（中身が .is2d の形でない・書き足すファイルの頭だけで目録が無い）は .broken に名前が変わり、
+    // エラーが出て、ほかのファイルは開く。前の版のアプリが書いた `.is2d` の形の復旧ファイルも開く（元のファイル場所が
+    // 無ければ無題で）
     next_app.tabs[0].file = Some(saved_proj_path.clone());
-    next_app.recovery.write_unsaved_tabs(&next_app.tabs);
+    next_app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    next_app.on_exit(None);
     let bad_rec = rec_dir.join("RECOVER_corrupted.is2d");
     let bad_entry = rec_dir.join("0-9999.entry");
     std::fs::write(&bad_rec, b"not valid json").unwrap();
     std::fs::write(&bad_entry, bad_rec.to_string_lossy().as_bytes()).unwrap();
+    let bad_journal = rec_dir.join("RECOVER_headonly.is2dj");
+    let bad_journal_entry = rec_dir.join("0-9997.entry");
+    std::fs::write(&bad_journal, b"IS2DJRN1").unwrap();
+    std::fs::write(&bad_journal_entry, bad_journal.to_string_lossy().as_bytes()).unwrap();
     let no_src_rec = rec_dir.join("RECOVER_no_source.is2d");
     let no_src_entry = rec_dir.join("0-9998.entry");
     std::fs::copy(&saved_proj_path, &no_src_rec).unwrap();
@@ -19326,21 +19363,23 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     let mut broken_app = Is2dApp::default();
     broken_app.recovery.dir = Some(rec_dir.clone());
     broken_app.recovery.find_leftovers();
-    assert_eq!(broken_app.recovery.found.len(), 3);
+    assert_eq!(broken_app.recovery.found.len(), 4);
+    // 前の版のアプリの名前（`RECOVER_{作品のファイル名}`）も、作品の名前で出す
+    assert!(broken_app.recovery.found.iter().any(|f| f.work_name() == "no_source"));
     broken_app.apply_action(UiAction::RestoreRecovered, &ctx);
     let broken_renamed = rec_dir.join("RECOVER_corrupted.is2d.broken");
-    let no_src_broken = rec_dir.join("RECOVER_no_source.is2d.broken");
+    let journal_broken = rec_dir.join("RECOVER_headonly.is2d.broken");
     assert!(broken_renamed.is_file());
-    assert!(no_src_broken.is_file());
+    assert!(journal_broken.is_file());
     assert!(!bad_rec.exists());
     assert!(!bad_entry.exists());
+    assert!(!bad_journal.exists());
+    assert!(!bad_journal_entry.exists());
     assert!(!no_src_rec.exists());
     assert!(!no_src_entry.exists());
-    assert_eq!(broken_app.tabs.len(), 1);
-    assert_eq!(
-        broken_app.tabs[0].file.as_deref(),
-        Some(saved_proj_path.as_path())
-    );
+    assert_eq!(broken_app.tabs.len(), 2);
+    assert!(broken_app.tabs.iter().any(|t| t.file.as_deref() == Some(saved_proj_path.as_path())));
+    assert!(broken_app.tabs.iter().any(|t| t.file.is_none() && t.history.is_dirty()), "元のファイル場所の無い復旧ファイルを無題で開いていない");
     assert_eq!(
         broken_app.toast.as_ref().map(|t| t.kind),
         Some(crate::canvas_tool::NoticeKind::Error)
@@ -19349,11 +19388,11 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
         .toast
         .as_ref()
         .is_some_and(|t| t.message.contains("RECOVER_corrupted.is2d.broken")
-            && t.message.contains("RECOVER_no_source.is2d.broken")));
+            && t.message.contains("RECOVER_headonly.is2d.broken")));
 
-    // 9. 壊れた数値: 輪郭に NaN がある図形を1つ含む文書を保存すると成功し、警告一覧に入り、復旧ファイル書き出しも成功する
+    // 9. 壊れた数値: 輪郭に NaN がある図形を1つ含む文書を保存すると成功し、復旧ファイルの書き出しも成功する
+    let _ = std::fs::remove_dir_all(&rec_dir);
     let mut nan_app = Is2dApp::default();
-    nan_app.recovery.dir = Some(rec_dir.clone());
     let mut shapes = make_stroke(Point::new(20.0, 20.0), Point::new(80.0, 20.0), 6.0, red);
     let mut nan_shape = make_stroke(Point::new(20.0, 60.0), Point::new(80.0, 60.0), 6.0, blue)
         .into_iter()
@@ -19378,9 +19417,9 @@ fn test_recovery_write_find_restore_discard_and_sanitization() {
     assert!(reloaded.root.layers[0].keyframes[0].cel.is_empty());
 
     nan_app.history.mark_unsaved();
-    nan_app.recovery.write_unsaved_tabs(&nan_app.tabs);
-    let nan_rec_path = proj_dir.join("RECOVER_nan_saved.is2d");
-    assert!(nan_rec_path.is_file());
+    nan_app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    nan_app.on_exit(None);
+    assert_eq!(files_in(&rec_dir, "is2dj"), 1);
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
@@ -22424,56 +22463,103 @@ fn onion_skin_keeps_the_cel_copies_it_drew() {
     assert!(std::sync::Arc::strong_count(&base) >= 2, "オニオンスキンの写しが、計算に使う写しを持っていない");
 }
 
-/// レビュー d91cd4c の N-5001：OS がアプリを止める知らせ（Windows のセッションの終わり）で書く、未保存のタブの控え。
-/// 控えは文書が変わったときだけ控え直し、控えから、アプリの終わり（`on_exit`）と同じ復旧ファイルを書く。浮いた片は
-/// 置いた形で書く。セッションの終わりをやめたら、書いたものを消す（次の起動で要らない復元を聞かない）。控えを書く所は
-/// Windows の窓の受け口（`session_end_windows`）で、ここでは同じ控えと書き方を確かめる
+/// 復旧ファイルは、作品が変わるたびに裏で書かれる（設計審査 4f8ef46 の D-3。前は終わるときにだけ書いたので、強制終了・
+/// 電源断で作業が消えた）。画面の毎コマの終わりに、未保存のタブの控えを、文書が変わったときだけ控え直して裏の書き手に
+/// 渡す。浮いた片は置いた形で書く。保存して未保存でなくなったタブの復旧ファイルは消える。書いている途中で止まった
+/// （終わりが欠けた）ファイルも、前に書き終えた所までの作品として開ける
 #[test]
 fn unsaved_tabs_snapshot_writes_the_same_recovery_and_can_be_discarded() {
-    use crate::recovery::{Recovery, UnsavedTabs};
+    use crate::recovery::{RecoveryWriter, TabCopies};
     let base_dir = std::env::temp_dir().join(format!("is2d_unsaved_snapshot_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base_dir);
     let (proj_dir, rec_dir) = (base_dir.join("projects"), base_dir.join("recovery"));
     std::fs::create_dir_all(&proj_dir).unwrap();
+    let journals = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|s| s.to_str()) == Some("is2dj")).collect())
+            .unwrap_or_default()
+    };
+    // 裏の書き手が書き終えるのを待つ（決まった時間で見切る）
+    let wait_until = |what: &str, done: &dyn Fn() -> bool| {
+        let start = std::time::Instant::now();
+        while !done() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "裏の書き手が {what} しない");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
     let mut app = Is2dApp::default();
+    app.recovery.dir = Some(rec_dir.clone());
+    app.recovery_writer = Some(RecoveryWriter::start(rec_dir.clone()));
+    let ctx = egui::Context::default();
+    let frame = |app: &mut Is2dApp| {
+        let screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0)));
+        let _ = ctx.run(egui::RawInput { screen_rect, ..Default::default() }, |ctx| app.update_ui(ctx));
+    };
     let red = Color32::from_rgb(220, 40, 40);
     let path = proj_dir.join("work.is2d");
     let stroke = |app: &mut Is2dApp, y: f64| {
         assert!(apply(app, Action::PaintStroke { points: vec![Point::new(30.0, y), Point::new(90.0, y)], radius: 6.0, color: red }));
     };
+    // 無題のまま描く：画面の1コマで、裏で書かれる（無題の作品も控える）
     stroke(&mut app, 30.0);
+    frame(&mut app);
+    wait_until("無題の作品を書く", &|| journals(&rec_dir).len() == 1);
+    // 保存する：復旧ファイルは消さずに「保存した」の印を書き足す（続きの変更も書き足しで済む）。この形で残ったファイルは、
+    // 次の起動で聞かずに消す
+    let first = journals(&rec_dir)[0].clone();
+    let size_before_save = std::fs::metadata(&first).unwrap().len();
     crate::project_io::save_project_to_path(&mut app, &path).unwrap();
-    let unsaved = UnsavedTabs::default();
-    // 保存したばかり：控えるタブは無い
-    unsaved.refresh(&app.tabs);
-    assert!(unsaved.get().is_empty());
-    // 描き足す：控える。描き足さなければ控え直さない（同じ控え）
+    frame(&mut app);
+    wait_until("保存した印を書く", &|| crate::recovery_journal::is_saved(&first));
+    assert!(std::fs::metadata(&first).unwrap().len() - size_before_save < 64, "保存した印のほかに書いた");
+    {
+        let mut probe = crate::recovery::Recovery { dir: Some(rec_dir.clone()), found: Vec::new() };
+        let copy = rec_dir.join("0-1.entry");
+        let saved_copy = base_dir.join("saved_copy.is2dj");
+        std::fs::copy(&first, &saved_copy).unwrap();
+        std::fs::write(&copy, saved_copy.to_string_lossy().as_bytes()).unwrap();
+        probe.find_leftovers();
+        assert!(probe.found.is_empty(), "保存した印のある復旧ファイルを、復元するものとして見つけた");
+        assert!(!saved_copy.exists() && !copy.exists(), "保存した印のある復旧ファイルを消していない");
+    }
+
+    let unsaved = TabCopies::default();
+    // 保存したばかり：控えはあるが、未保存のタブは無い。何も変わらなければ控え直さない
+    assert!(unsaved.refresh(&app.tabs));
+    assert!(!unsaved.refresh(&app.tabs));
+    // 描き足す：控え直す
     stroke(&mut app, 100.0);
-    unsaved.refresh(&app.tabs);
+    assert!(unsaved.refresh(&app.tabs));
     assert_eq!(unsaved.get().len(), 1);
+    assert!(!unsaved.refresh(&app.tabs));
     // 絵を持ち上げて動かしたまま（浮いた片）：控えは、置いた形で書く
     assert!(apply(&mut app, Action::SelectAll));
     assert!(apply(&mut app, Action::FinishMoveSelectionDrag { total_delta: KVec2::new(0.0, 200.0), alt_duplicate: false }));
     assert!(app.session.floating().is_some_and(|f| f.modified()));
-    unsaved.refresh(&app.tabs);
-    let recovery = Recovery { dir: Some(rec_dir.clone()), found: Vec::new() };
-    recovery.write_unsaved(&unsaved.get());
-    let rec = proj_dir.join("RECOVER_work.is2d");
-    assert!(rec.is_file());
-    let written = crate::project_io::read_project_document(&rec).unwrap();
+    assert!(unsaved.refresh(&app.tabs));
+    app.recovery_writer.as_ref().unwrap().flush(unsaved.get());
+    let rec = journals(&rec_dir);
+    assert_eq!(rec.len(), 1);
+    let written = crate::recovery_journal::read(&rec[0]).unwrap();
     assert_eq!(written.recovery_source.as_deref(), Some(path.as_path()));
     // 浮いた片を置いた形：動かした先（y が 200 ずれた所）に絵がある
     let doc = written.into_document().unwrap();
     let cel = doc.root.layers[0].cel_at(0).unwrap();
     let shapes = cel.maps()[0].base().drawn_shapes(&[]);
+    assert!(!shapes.is_empty());
     assert!(shapes.iter().all(|s| s.bounding_box().y0 > 200.0), "浮いた片を置いた形で書いていない");
-    // 書いたものは、アプリの終わりで書くもの（`write_unsaved_tabs`）とバイトまで同じ
-    let snapshot_bytes = std::fs::read(&rec).unwrap();
-    recovery.write_unsaved_tabs(&app.tabs);
-    assert_eq!(std::fs::read(&rec).unwrap(), snapshot_bytes);
-    // セッションの終わりをやめた：書いたもの（復旧ファイルと一覧）を消す
-    recovery.discard_written();
-    assert!(!rec.exists());
+    // もう1本描いて書き足す。その書き足しの途中で止まった（終わりの記録が欠けた）ファイルは、前に書き終えた作品として
+    // 開ける（全体を書くときは一時ファイルに書いてから置き換えるので、欠けるのは書き足しだけ）
+    let before = shapes.len();
+    stroke(&mut app, 600.0);
+    assert!(unsaved.refresh(&app.tabs));
+    app.recovery_writer.as_ref().unwrap().flush(unsaved.get());
+    let bytes = std::fs::read(&rec[0]).unwrap();
+    std::fs::write(&rec[0], &bytes[..bytes.len() - 1]).unwrap();
+    let cut = crate::recovery_journal::read(&rec[0]).expect("終わりが欠けたファイルを読めない").into_document().unwrap();
+    assert_eq!(cut.root.layers[0].cel_at(0).unwrap().maps()[0].base().drawn_shapes(&[]).len(), before);
+    // 閉じる（確認ありで終わる）：書いたものはみな消える
+    app.recovery_writer.take().unwrap().finish(true);
     assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
     let _ = std::fs::remove_dir_all(&base_dir);
 }
@@ -22524,7 +22610,8 @@ fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
     ));
     app.tabs[1].file = Some(gone2.clone());
 
-    app.recovery.write_unsaved_tabs(&app.tabs);
+    app.recovery_writer = Some(crate::recovery::RecoveryWriter::start(rec_dir.clone()));
+    eframe::App::on_exit(&mut app, None);
 
     let mut next_app = Is2dApp::default();
     next_app.recovery.dir = Some(rec_dir.clone());
@@ -22555,14 +22642,14 @@ fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
         blue
     );
 
-    // 2. 修正6（N-4002）：vol/scene.is2d を未保存のタブにして書く → vol の名前を変える → find_leftovers で found は 0、一覧ファイルは残る → vol の名前を戻して find_leftovers → found は 1
+    // 2. 修正6（N-4002）：前の版のアプリは復旧ファイルを作品の隣に書いた。外付けの vol/RECOVER_scene.is2d を指す一覧が
+    // 残っているとき → vol の名前を変える（外した）→ find_leftovers で found は 0、一覧ファイルは残る → vol の名前を戻して
+    // find_leftovers → found は 1
     let vol_dir = base_dir.join("vol");
     let vol_unmounted = base_dir.join("vol_unmounted");
     std::fs::create_dir_all(&vol_dir).unwrap();
-    let vol_proj = vol_dir.join("scene.is2d");
-
+    let vol_rec = vol_dir.join("RECOVER_scene.is2d");
     let mut vol_app = Is2dApp::default();
-    vol_app.recovery.dir = Some(rec_dir.clone());
     assert!(apply(
         &mut vol_app,
         Action::PaintStroke {
@@ -22571,8 +22658,8 @@ fn test_recovery_fallback_same_filename_and_missing_parent_dir() {
             color: red,
         },
     ));
-    vol_app.tabs[0].file = Some(vol_proj);
-    vol_app.recovery.write_unsaved_tabs(&vol_app.tabs);
+    crate::project_io::save_project_to_path(&mut vol_app, &vol_rec).unwrap();
+    std::fs::write(rec_dir.join("0-1.entry"), vol_rec.to_string_lossy().as_bytes()).unwrap();
 
     std::fs::rename(&vol_dir, &vol_unmounted).unwrap();
     let mut check_app = Is2dApp::default();
@@ -37125,6 +37212,214 @@ fn broken_map_found_later_is_drawn_empty_noticed_and_saved_as_is() {
         broken
     );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// 復旧の書き足すファイル（`recovery_journal`）：でたらめな操作のたびに書き足し、読み戻した作品は、そのときの作品を丸ごと
+/// 保存したものと同じ（全体から作った答えと比べる：変わった所だけで作る仕組みにはお手本を付ける決まり）。書き足した量が
+/// 全体の量を超えて全体を書き直したあとも同じ。書いている途中で止まった（最後の記録が欠けた）ファイルは、最後の完全な
+/// 目録までの作品として読める（設計審査 4f8ef46 の D-3）
+#[test]
+fn recovery_journal_reads_back_the_same_work_after_every_edit() {
+    use crate::recovery_journal::{read, Journal};
+    let dir = std::env::temp_dir().join(format!("is2d_journal_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("work.is2dj");
+    let tmp = dir.join(".work.is2dj.tmp");
+    let names = action_kind_names();
+    // よく選ぶ操作：描く・選んで動かすに加えて、シンボル（ライブラリの塊）と音（音のライブラリ）も書き足すように
+    let drawing = [
+        "PaintStroke", "PencilStroke", "BucketFill", "InkBottle", "SelectMarquee", "FinishMoveSelectionDrag", "ConvertToSymbol",
+        "EnterSymbolFromLibrary", "ImportSound", "SetKeyframeSound",
+    ];
+    let canonical = |pd: project_io::ProjectDocument| content_json(&pd);
+    for seed in [0x4a52_0001u64, 0x4a52_0002] {
+        let mut rng = OpRng(seed);
+        let mut app = Is2dApp::default();
+        let mut journal: Option<Journal> = None;
+        let mut last_len = 0u64;
+        let (mut saw_sound, mut saw_symbol, mut saw_rewrite) = (false, false, false);
+        for step in 0..300 {
+            let kind = if rng.range(10) < 4 { drawing[rng.range(drawing.len())].to_owned() } else { names[rng.range(names.len())].clone() };
+            let action = random_action(&kind, &mut rng, &app);
+            apply(&mut app, action);
+            // ときどき、全部を選んでシンボルにする（でたらめな選択では、シンボルにできる絵を選ぶことが少ない）
+            if step % 40 == 39 {
+                apply(&mut app, Action::SelectAll);
+                apply(&mut app, Action::ConvertToSymbol);
+            }
+            let Some(doc) = app.tab().committed_document_copy() else {
+                continue;
+            };
+            saw_sound |= !doc.sounds.is_empty();
+            saw_symbol |= !doc.library().is_empty();
+            let len_before = std::fs::metadata(&path).map_or(0, |m| m.len());
+            match &mut journal {
+                None => journal = Some(Journal::create(&path, &tmp, &doc, None).unwrap()),
+                Some(j) => j.write(&tmp, &doc, None).unwrap(),
+            }
+            // 全体を書き直した（ファイルが前より短くなった）
+            saw_rewrite |= std::fs::metadata(&path).unwrap().len() < len_before;
+            let back = read(&path).expect("読める");
+            let mut trimmed = false;
+            let restored = back.into_document_noting(&mut trimmed).expect("文書にできる");
+            assert!(!trimmed, "seed={seed:#x} step={step}: 読み戻しで何かを外した");
+            // お手本：同じ作品を、ふつうの保存の形で丸ごと書いて読み戻したもの（読み込みの道が直す所も同じに直る）
+            let whole = project_io::ProjectDocument::of(&doc).into_document().expect("丸ごと保存して読める");
+            assert_eq!(
+                canonical(project_io::ProjectDocument::of(&restored)),
+                canonical(project_io::ProjectDocument::of(&whole)),
+                "seed={seed:#x} step={step}: 読み戻した作品が違う"
+            );
+            last_len = std::fs::metadata(&path).unwrap().len();
+        }
+        // 書いている途中で止まった：最後の記録の途中まで切る。読めて、前の目録までの作品になる
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        assert!(read(&path).is_ok(), "最後の記録が欠けたファイルを読めない");
+        assert!(last_len > 0);
+        assert!(saw_sound && saw_symbol && saw_rewrite, "seed={seed:#x}: 音 {saw_sound}・シンボル {saw_symbol}・全体の書き直し {saw_rewrite} を試していない");
+        let _ = std::fs::remove_file(&path);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 復旧の書き足すファイルを、レビューの作品で測る（`IS2D_WORK=<作品> cargo test --release measure_recovery_journal --
+/// --ignored --nocapture`）：全体を書く時間と大きさ、1本描くたびに書き足す時間と大きさ、保存した印を書く時間
+#[test]
+#[ignore]
+fn measure_recovery_journal() {
+    use crate::doc_actions::{apply, Action};
+    use crate::recovery_journal::Journal;
+    use std::time::Instant;
+    let Ok(path) = std::env::var("IS2D_WORK") else {
+        eprintln!("IS2D_WORK に作品のパスを入れて実行してください");
+        return;
+    };
+    let path = work_file_in_current_format(std::path::Path::new(&path));
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let ctx = egui::Context::default();
+    let mut app = Is2dApp::default();
+    crate::project_io::open_project_in_tab(&mut app, std::path::Path::new(&path), Some(&ctx)).expect("作品を開く");
+    let dir = std::env::temp_dir().join(format!("is2d_measure_journal_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (jpath, tmp) = (dir.join("work.is2dj"), dir.join(".work.is2dj.tmp"));
+    let size = || std::fs::metadata(&jpath).unwrap().len();
+    let doc = app.tab().committed_document_copy().unwrap();
+    let t = Instant::now();
+    let mut journal = Journal::create(&jpath, &tmp, &doc, Some(&path)).unwrap();
+    eprintln!("全体を書く: {:.1} ms, {:.1} MB", ms(t), size() as f64 / 1e6);
+    let total = app.tab().active_timeline().total_frames.max(1);
+    let mut times = Vec::new();
+    let mut bytes = Vec::new();
+    for i in 0..20 {
+        let frame = (i * 97) % total;
+        assert!(canvas_tool::clear_selection(&mut app));
+        apply(&mut app, Action::ScrubRulerToFrame { frame });
+        let y = 300.0 + i as f64 * 10.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke { points: vec![Point::new(400.0, y), Point::new(700.0, y + 40.0)], radius: 6.0, color: Color32::RED },
+        ));
+        let before = size();
+        let doc = app.tab().committed_document_copy().unwrap();
+        let t = Instant::now();
+        journal.write(&tmp, &doc, Some(&path)).unwrap();
+        times.push(ms(t));
+        bytes.push(size().saturating_sub(before));
+    }
+    times.sort_by(f64::total_cmp);
+    bytes.sort_unstable();
+    eprintln!(
+        "1本描いて書き足す（20回）: 中央 {:.2} ms・最大 {:.2} ms, 中央 {:.1} KB・最大 {:.1} KB",
+        times[10],
+        times[19],
+        bytes[10] as f64 / 1e3,
+        bytes[19] as f64 / 1e3
+    );
+    let t = Instant::now();
+    journal.mark_saved().unwrap();
+    eprintln!("保存した印: {:.2} ms", ms(t));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 復旧の書き足すファイルは、1回の編集で、作品全体でなく変わった所だけを書き足す：キーフレームの多い作品で、1つのコマに
+/// 1本描いたときに書き足す量は、全体を書いた量よりずっと小さい（設計審査 4f8ef46 の D-3。大事にする順番の 3.）
+#[test]
+fn recovery_journal_appends_only_what_changed() {
+    use crate::doc_actions::{apply, Action};
+    use crate::recovery_journal::Journal;
+    let dir = std::env::temp_dir().join(format!("is2d_journal_size_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("work.is2dj");
+    let mut app = Is2dApp::default();
+    // 200 コマのキーフレームに、それぞれ絵を描く
+    for f in 0..200 {
+        if f > 0 {
+            assert!(apply(&mut app, Action::InsertKeyframe { copy_prev: false }));
+        }
+        let y = 100.0 + (f % 20) as f64 * 10.0;
+        assert!(apply(
+            &mut app,
+            Action::PaintStroke { points: vec![Point::new(100.0, y), Point::new(500.0, y + 50.0)], radius: 12.0, color: Color32::RED },
+        ));
+    }
+    let doc = app.tab().committed_document_copy().unwrap();
+    let tmp = dir.join(".work.is2dj.tmp");
+    let mut journal = Journal::create(&path, &tmp, &doc, None).unwrap();
+    let snapshot = std::fs::metadata(&path).unwrap().len();
+    assert!(apply(&mut app, Action::SwitchLayerAndFrame { layer_idx: 0, frame: 50 }));
+    assert!(apply(
+        &mut app,
+        Action::PaintStroke { points: vec![Point::new(300.0, 300.0), Point::new(320.0, 310.0)], radius: 6.0, color: Color32::BLUE },
+    ));
+    journal.write(&tmp, &app.tab().committed_document_copy().unwrap(), None).unwrap();
+    let appended = std::fs::metadata(&path).unwrap().len() - snapshot;
+    assert!(appended * 20 < snapshot, "1本描いて書き足した量 {appended} が、全体 {snapshot} に比べて大きい");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 動かした絵があるときに、動かしていない絵を選び足して、その一部を Shift クリックで選択から外しても、外した絵は消えない
+/// （その場でも、続けて消す・動かすをして確定したあとも）。直す前は、一部を確定したあとの残りの作り直しが、確定する側の
+/// 動かしていない組を扱えず、外した絵がその場で画面から消え、続けて消すと戻らなかった：設計審査 4f8ef46 の D-1
+#[test]
+fn deselecting_an_unmoved_part_after_moving_keeps_it() {
+    use crate::doc_actions::{apply, Action};
+    for then in ["Delete", "Move"] {
+        let mut app = Is2dApp::default();
+        put_cel_shapes(
+            &mut app,
+            0,
+            0,
+            vec![
+                map_overlay::rect_shape(100.0, 100.0, 150.0, 150.0, Color32::RED),
+                map_overlay::rect_shape(300.0, 100.0, 350.0, 150.0, Color32::GREEN),
+                map_overlay::rect_shape(500.0, 100.0, 550.0, 150.0, Color32::BLUE),
+            ],
+        );
+        assert!(apply(&mut app, Action::SetTool { tool: Tool::Select }));
+        assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(80.0, 80.0), p1: Point::new(170.0, 170.0), additive: false }));
+        assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(0.0, 200.0) }));
+        assert!(apply(&mut app, Action::SelectMarquee { p0: Point::new(280.0, 80.0), p1: Point::new(570.0, 170.0), additive: true }));
+        let green = app.scene().iter().position(|s| s.color() == Color32::GREEN).expect("緑");
+        assert!(apply(&mut app, Action::ToggleSelectionAt { scene_idx: green }));
+        assert!(app.scene().iter().any(|s| s.color() == Color32::GREEN), "外した緑がその場で消えた");
+        match then {
+            "Delete" => assert!(apply(&mut app, Action::DeleteSelection)),
+            _ => assert!(apply(&mut app, Action::MoveSelected { delta: KVec2::new(30.0, 0.0) })),
+        }
+        assert!(apply(&mut app, Action::Deselect));
+        let doc = app.tab().doc();
+        let colors: Vec<Color32> = doc.root.layers[0].keyframes[0]
+            .cel
+            .maps()
+            .iter()
+            .flat_map(|m| m.base().drawn_shapes(&m.group_path).into_iter().map(|f| f.color()).collect::<Vec<_>>())
+            .collect();
+        assert!(colors.contains(&Color32::GREEN), "{then} のあと確定すると、外した緑が消えた：{colors:?}");
+    }
 }
 
 /// 自由変形の中心点は、選択か見ている場所（コマ・レイヤー・シンボルの中・グループの階層）が変わったら真ん中に戻す（戻すのは

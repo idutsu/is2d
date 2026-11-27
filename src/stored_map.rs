@@ -1100,6 +1100,35 @@ impl WriteTiles {
             .collect()
     }
 
+    /// 表の長さ（塊の数, 色の数）
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        (self.tiles.len(), self.colors.len())
+    }
+
+    /// 表の、塊の番号 `tiles_from` からと色の番号 `colors_from` からの分（あとから足した分）：（色, 塊の保存の形, その塊の
+    /// 線）。復旧の書き足すファイルが、新しく足した塊だけを書く（`recovery_journal`）。線の塊の番号は表の番号のまま
+    pub(crate) fn appended(&self, tiles_from: usize, colors_from: usize) -> (Vec<[u8; 4]>, Vec<SavedTile>, Vec<SavedStroke>) {
+        let tiles: Vec<SavedTile> = self.tiles.iter().skip(tiles_from).map(|t| self.saved_tile(t)).collect();
+        let strokes: Vec<SavedStroke> = self.strokes_from(tiles_from).collect();
+        (self.colors[colors_from..].to_vec(), tiles, strokes)
+    }
+
+    /// 塊の番号 `from` からの塊の線（塊の順、塊の中は辺の順）。線を作る決まりはこれ1つ（保存の線の並びと、書き足す分）
+    fn strokes_from(&self, from: usize) -> impl Iterator<Item = SavedStroke> + '_ {
+        self.tiles.iter().enumerate().skip(from).flat_map(move |(ti, t)| {
+            t.iter().enumerate().filter_map(move |(ei, e)| {
+                let (st, line_id) = (e.stroke?, e.line_id?);
+                Some(SavedStroke {
+                    tile: ti as u32,
+                    edge: ei as u32,
+                    color: self.color_no[&st.color.to_array()],
+                    width: st.width,
+                    id: self.labels[&line_id.get()],
+                })
+            })
+        })
+    }
+
     /// 塊 `t` の保存の形（書く1つだけを作る）
     fn saved_tile(&self, t: &TileData) -> SavedTile {
         let mut tile = SavedTile::default();
@@ -1153,18 +1182,8 @@ impl Serialize for WriteTiles {
                 use serde::ser::SerializeSeq;
                 let w = self.0;
                 let mut seq = s.serialize_seq(Some(w.stroke_count))?;
-                for (ti, t) in w.tiles.iter().enumerate() {
-                    for (ei, e) in t.iter().enumerate() {
-                        if let (Some(st), Some(line_id)) = (e.stroke, e.line_id) {
-                            seq.serialize_element(&SavedStroke {
-                                tile: ti as u32,
-                                edge: ei as u32,
-                                color: w.color_no[&st.color.to_array()],
-                                width: st.width,
-                                id: w.labels[&line_id.get()],
-                            })?;
-                        }
-                    }
+                for st in w.strokes_from(0) {
+                    seq.serialize_element(&st)?;
                 }
                 seq.end()
             }
@@ -1194,6 +1213,18 @@ pub(crate) struct ReadTiles {
 }
 
 impl ReadTiles {
+    /// 塊の表の続き（色・塊・その塊の線）を足す（復旧の書き足すファイルを読むとき：`recovery_journal`。ファイルの塊の表を
+    /// 読むのと同じ決まりで読む：`push`・`put_stroke`）
+    pub(crate) fn add(&mut self, colors: Vec<[u8; 4]>, tiles: Vec<SavedTile>, strokes: &[SavedStroke]) {
+        self.colors.extend(colors);
+        for t in tiles {
+            self.push(t);
+        }
+        for s in strokes {
+            self.put_stroke(s);
+        }
+    }
+
     /// 座標（辺の端の点・制御点）がみな有限か
     pub(crate) fn only_finite_numbers(&self) -> bool {
         !self.non_finite

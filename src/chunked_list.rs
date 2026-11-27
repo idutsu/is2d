@@ -186,6 +186,18 @@ impl<T> ChunkedList<T> {
         Arc::ptr_eq(&self.chunks, &other.chunks)
     }
 
+    /// 塊と、その塊の数の基準（`Keyed` でない列では 0）を並びの順に。塊は書き換えると新しい塊になり、書き換えていない塊は
+    /// 写しどうしで同じ塊（復旧の書き足すファイルが、新しい塊だけを書く：`recovery_journal`）
+    pub(crate) fn chunks_with_bases(&self) -> impl Iterator<Item = (&Arc<Vec<Arc<T>>>, i64)> + '_ {
+        self.chunks.chunks.iter().zip(self.chunks.bases.iter().copied())
+    }
+
+    /// 列の塊の並びの番地（塊の並び・基準を書き換えると変わる。写しどうしは同じ：`ptr_eq`。この列の写しを持っている間は、
+    /// ほかの並びに使い回されない）
+    pub(crate) fn list_address(&self) -> usize {
+        Arc::as_ptr(&self.chunks) as *const () as usize
+    }
+
     /// テスト用：塊ごとの要素の数
     #[cfg(test)]
     pub(crate) fn chunk_sizes(&self) -> Vec<usize> {

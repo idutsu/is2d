@@ -1,10 +1,10 @@
 //! Windows のセッションの終わり（ログアウト・再起動・シャットダウン・Windows Update の再起動）を受け取り、アプリが
 //! 確認なしに止められる前に、未保存のタブの復旧ファイルを書く（Mac・Linux のアプリの終わり `on_exit` と同じ書き方：
-//! `Recovery::write_unsaved`）。Windows はセッションを終わらせるとき、窓に `WM_QUERYENDSESSION`（終わってよいか）と
+//! 裏の書き手 `RecoveryWriter::flush`）。Windows はセッションを終わらせるとき、窓に `WM_QUERYENDSESSION`（終わってよいか）と
 //! `WM_ENDSESSION`（終わるか・やめたか）を送るが、winit はどちらも受け取らないので、窓の受け口（ウィンドウプロシージャ）を
 //! 包んで受ける。書いている間は、Windows に「保存していない作業を書いています」と伝えて待ってもらう
-//! （`ShutdownBlockReasonCreate`）。セッションを終わらせるのをやめたら（ほかのアプリが止めたなど）、書いたものを消す
-//! （残ると、次の起動で、もう要らない復元を聞いてしまう）。OS の機能を呼ぶ `unsafe` は、このファイルの中だけ
+//! （`ShutdownBlockReasonCreate`）。セッションを終わらせるのをやめたら（ほかのアプリが止めたなど）、次の終わりに備えるだけ
+//! （復旧ファイルは裏の書き手が作品の変わるたびに書き直しているので、消さない）。OS の機能を呼ぶ `unsafe` は、このファイルの中だけ
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,24 +14,21 @@ use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockR
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{WM_ENDSESSION, WM_QUERYENDSESSION};
 
-use crate::recovery::{Recovery, UnsavedTabs};
+use crate::recovery::{RecoveryWriter, TabCopies};
 
 /// 包んだ受け口が持つもの（アプリが終わるまで生きる）
 struct SessionEnd {
-    recovery: Recovery,
-    unsaved: UnsavedTabs,
+    writer: RecoveryWriter,
+    unsaved: TabCopies,
     /// このセッションの終わりで、もう書いたか
     written: AtomicBool,
 }
 
-/// 窓 `hwnd` の受け口を包んで、セッションの終わりに、控え `unsaved` の復旧ファイルを復旧の置き場 `dir` に書くようにする。
-/// 包めなければ何もしない（今までどおり、確認なしに終わったときは書けない）
-pub(crate) fn install(hwnd: isize, dir: Option<std::path::PathBuf>, unsaved: UnsavedTabs) {
+/// 窓 `hwnd` の受け口を包んで、セッションの終わりに、控え `unsaved` を裏の書き手 `writer` に書き終えてもらうようにする。
+/// 包めなければ何もしない（裏の書き手は、作品の変わるたびに書いている）
+pub(crate) fn install(hwnd: isize, writer: RecoveryWriter, unsaved: TabCopies) {
     let state = Box::new(SessionEnd {
-        recovery: Recovery {
-            dir,
-            found: Vec::new(),
-        },
+        writer,
         unsaved,
         written: AtomicBool::new(false),
     });
@@ -64,12 +61,12 @@ unsafe extern "system" fn subclass_proc(
             write_once(hwnd, state);
             LRESULT(1)
         }
-        // 終わる（wparam が 0 でない）なら、まだ書いていなければ書く。やめたなら、書いたものを消して、次に備える
+        // 終わる（wparam が 0 でない）なら、まだ書いていなければ書く。やめたなら、次の終わりに備える
         WM_ENDSESSION => {
             if wparam.0 != 0 {
                 write_once(hwnd, state);
-            } else if state.written.swap(false, Ordering::Relaxed) {
-                state.recovery.discard_written();
+            } else {
+                state.written.store(false, Ordering::Relaxed);
             }
             LRESULT(0)
         }
@@ -85,7 +82,7 @@ fn write_once(hwnd: HWND, state: &SessionEnd) {
     }
     // SAFETY: `hwnd` はこのアプリの窓。理由の文字列は静的な UTF-16
     let _ = unsafe { ShutdownBlockReasonCreate(hwnd, w!("保存していない作業を書いています")) };
-    state.recovery.write_unsaved(&state.unsaved.get());
+    state.writer.flush(state.unsaved.get());
     // SAFETY: 同じ窓の、上で作った理由を消す
     let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
 }

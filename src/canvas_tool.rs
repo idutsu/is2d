@@ -1573,6 +1573,15 @@ impl Session {
             fl.tidy(self.base_cache.layer_order_ids());
             (!fl.is_empty()).then_some(fl)
         });
+        // テストでは毎回、見せる残りと確定で書く残りの関係を確かめる（`Floating::check_views`）
+        #[cfg(test)]
+        if crate::planar_map::test_checks() {
+            if let Some(fl) = &fl {
+                if let Err(e) = fl.check_views(&self.editing_group_path) {
+                    panic!("持ち上げた絵の2つの残りが食い違う：{e}");
+                }
+            }
+        }
         self.floating_view = fl.as_ref().map_or_else(FloatingView::default, |fl| {
             FloatingView::of(fl, world, &self.editing_group_path)
         });
@@ -2413,7 +2422,7 @@ pub(crate) struct UndoHistory {
     /// いても、取り消すと操作を始める前の絵と選択に戻る）。`apply` の中だけで持つ
     pub(crate) before: Option<UndoEntry>,
     /// 中身の世代：`apply` が中身の変化を見つけるたびに進む（続けた編集をまとめて取り消しの1手を積まないときも進む）。
-    /// 「中身が変わったか」で控え直す所（Windows の確認なしに終わるときの控え `recovery::UnsavedTabs`、タイムラインの
+    /// 「中身が変わったか」で控え直す所（復旧ファイルに書くタブの控え `recovery::TabCopies`、タイムラインの
     /// ドラッグを捨てる判定）はこれを見る（前は取り消しの世代 `current_commit_id` を見たので、まとめた2回目以降の編集を
     /// 取りこぼした：約束の棚卸し 5616fcc の C の A2）
     pub(crate) content_gen: u64,
@@ -2600,7 +2609,7 @@ impl Tab {
 /// 文書 `doc` に、浮いている片 `floating`（編集位置 `edit_path`・グループの階層 `editing_group_path` で持ち上げたもの）を
 /// 置いた写し（タブ `(id, untitled_number)` の一時的な写しの上で確定し、元の文書には触れない）。片が無いか変わっていなければ
 /// 文書の写しのまま。`None`：浮いた片を置けない（`commit_floating_layers` が断る）。確定した文書の写しを作るのはこれ1つ
-/// （`Tab::committed_document_copy` と、確認なしに終わるときの復旧ファイル：`recovery::UnsavedTab`）
+/// （`Tab::committed_document_copy` と、復旧ファイルに書くタブの控え：`recovery::TabCopy`）
 pub(crate) fn committed_document(
     (id, untitled_number): (u64, usize),
     doc: &Document,

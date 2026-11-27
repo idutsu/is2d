@@ -477,9 +477,19 @@ pub(crate) struct SavedSound {
     pub(crate) bytes: Arc<[u8]>,
 }
 
+impl From<&crate::sound::Sound> for SavedSound {
+    fn from(s: &crate::sound::Sound) -> Self {
+        Self {
+            id: s.id,
+            name: s.name.clone(),
+            bytes: s.encoded.clone(),
+        }
+    }
+}
+
 impl SavedKeyframe {
     /// 始まりのコマが `start_frame` のキーフレーム `kf` の保存用の写し
-    fn new(start_frame: usize, kf: &Keyframe) -> Self {
+    pub(crate) fn new(start_frame: usize, kf: &Keyframe) -> Self {
         Self {
             start_frame,
             tween: kf.tween,
@@ -581,15 +591,26 @@ pub(crate) struct SavedLayer {
 impl From<&Layer> for SavedLayer {
     fn from(layer: &Layer) -> Self {
         Self {
+            keyframes: layer
+                .keyframes_with_start()
+                .map(|(start, kf)| SavedKeyframe::new(start, kf))
+                .collect(),
+            ..Self::header(layer)
+        }
+    }
+}
+
+impl SavedLayer {
+    /// レイヤー `layer` の、キーフレームを除いた保存の形（保存の形と、復旧の書き足すファイル `recovery_journal` の両方が
+    /// これを使う）
+    pub(crate) fn header(layer: &Layer) -> Self {
+        Self {
             id: layer.id,
             name: layer.name.clone(),
             visible: layer.visible,
             locked: layer.locked,
             frame_count: layer.frame_count,
-            keyframes: layer
-                .keyframes_with_start()
-                .map(|(start, kf)| SavedKeyframe::new(start, kf))
-                .collect(),
+            keyframes: Vec::new(),
         }
     }
 }
@@ -643,13 +664,24 @@ pub(crate) struct SavedTimeline {
 impl From<&Timeline> for SavedTimeline {
     fn from(tl: &Timeline) -> Self {
         Self {
+            layers: tl.layers.iter().map(SavedLayer::from).collect(),
+            ..Self::header(tl)
+        }
+    }
+}
+
+impl SavedTimeline {
+    /// タイムライン `tl` の、レイヤーを除いた保存の形（fps は 24。文書の fps は作品の一番上で入れる：`saved_fps`。保存の
+    /// 形と、復旧の書き足すファイル `recovery_journal` の両方がこれを使う）
+    pub(crate) fn header(tl: &Timeline) -> Self {
+        Self {
             fps: 24,
             total_frames: tl.total_frames,
             current_frame: tl.current_frame,
             active_layer: tl.active_layer,
             next_layer_number: tl.next_layer_number,
             next_layer_id: tl.next_layer_id,
-            layers: tl.layers.iter().map(SavedLayer::from).collect(),
+            layers: Vec::new(),
         }
     }
 }
@@ -813,7 +845,7 @@ impl ProjectDocument {
     /// 文書 `doc` の保存用の写し
     pub(crate) fn of(doc: &Document) -> Self {
         let mut saved_timeline: SavedTimeline = (&doc.root).into();
-        saved_timeline.fps = doc.fps.clamp(1, crate::symbol::MAX_FPS);
+        saved_timeline.fps = saved_fps(doc);
 
         let mut out = Self {
             stage_size: [doc.stage_size.x, doc.stage_size.y],
@@ -827,15 +859,7 @@ impl ProjectDocument {
             next_group_id: doc.next_group_id,
             recovery_source: None,
             map_tiles: WriteTiles::default(),
-            sounds: doc
-                .sounds
-                .iter()
-                .map(|s| SavedSound {
-                    id: s.id,
-                    name: s.name.clone(),
-                    bytes: s.encoded.clone(),
-                })
-                .collect(),
+            sounds: doc.sounds.iter().map(|s| SavedSound::from(&**s)).collect(),
             next_sound_id: doc.next_sound_id,
         };
         out.write_map_tiles();
@@ -846,12 +870,23 @@ impl ProjectDocument {
     /// 表に足す（塊は写さない：書くときに文書の塊から流す）
     pub(crate) fn write_map_tiles(&mut self) {
         let mut writer = std::mem::take(&mut self.map_tiles);
-        self.for_each_map(|m| {
-            if let Some(stored) = m.stored.take() {
-                m.tiles = writer.tiles_of(&stored);
-            }
-        });
+        self.for_each_map(|m| m.write_tiles(&mut writer));
         self.map_tiles = writer;
+    }
+}
+
+/// 文書 `doc` の保存する fps（範囲に収める。保存の形と復旧の書き足すファイルの両方がこれを使う）
+pub(crate) fn saved_fps(doc: &Document) -> u32 {
+    doc.fps.clamp(1, crate::symbol::MAX_FPS)
+}
+
+impl SavedScopeMap {
+    /// 地図のしまう形（`stored`）を、塊の表 `writer` の塊の番号の並びにする（共有している塊は1回だけ表に足す。保存の形
+    /// `write_map_tiles` と、復旧の書き足すファイル `recovery_journal` の両方がこれを使う）
+    pub(crate) fn write_tiles(&mut self, writer: &mut WriteTiles) {
+        if let Some(stored) = self.stored.take() {
+            self.tiles = writer.tiles_of(&stored);
+        }
     }
 }
 
